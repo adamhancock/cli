@@ -16,20 +16,29 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
         with:
           fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: pnpm/action-setup@v2
+      - uses: pnpm/action-setup@a3252b78c470c02df07e9d59298aecedc3ccdd6d # v3.0.0
         with:
           version: 10.13.1
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4.0.2
         with:
-          node-version: 20
+          node-version: 22
           cache: 'pnpm'
           registry-url: 'https://registry.npmjs.org'
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -37,11 +46,27 @@ jobs:
       - name: Build packages
         run: pnpm -r build
 
+      - name: Check NPM Token
+        run: |
+          if [ -z "${{ secrets.NPM_TOKEN }}" ]; then
+            echo "::error::NPM_TOKEN secret is not set. Please add it to your repository secrets."
+            exit 1
+          fi
+
       - name: Publish specific package
         if: github.event.inputs.package
         run: |
           cd packages/${{ github.event.inputs.package }}
+          PACKAGE_NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          
+          # Publish to NPM
           pnpm publish --no-git-checks --access public
+          
+          # Create git tag
+          TAG="${PACKAGE_NAME}@${VERSION}"
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "$TAG"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -62,12 +87,18 @@ jobs:
               echo "Publishing $pkg_dir"
               cd "$pkg_dir"
               
-              # Check if version has changed
+              PACKAGE_NAME=$(node -p "require('./package.json').name")
               CURRENT_VERSION=$(node -p "require('./package.json').version")
-              PUBLISHED_VERSION=$(npm view $(node -p "require('./package.json').name") version 2>/dev/null || echo "0.0.0")
+              PUBLISHED_VERSION=$(npm view "$PACKAGE_NAME" version 2>/dev/null || echo "0.0.0")
               
               if [ "$CURRENT_VERSION" != "$PUBLISHED_VERSION" ]; then
+                # Publish to NPM
                 pnpm publish --no-git-checks --access public
+                
+                # Create git tag
+                TAG="${PACKAGE_NAME}@${CURRENT_VERSION}"
+                git tag -a "$TAG" -m "Release $TAG"
+                git push origin "$TAG"
               else
                 echo "Version $CURRENT_VERSION already published, skipping"
               fi
@@ -86,15 +117,22 @@ jobs:
             if [ -d "$pkg_dir" ] && [ -f "$pkg_dir/package.json" ]; then
               cd "$pkg_dir"
               
-              # Check if version has changed
+              PACKAGE_NAME=$(node -p "require('./package.json').name")
               CURRENT_VERSION=$(node -p "require('./package.json').version")
-              PUBLISHED_VERSION=$(npm view $(node -p "require('./package.json').name") version 2>/dev/null || echo "0.0.0")
+              PUBLISHED_VERSION=$(npm view "$PACKAGE_NAME" version 2>/dev/null || echo "0.0.0")
               
               if [ "$CURRENT_VERSION" != "$PUBLISHED_VERSION" ]; then
-                echo "Publishing $(basename $pkg_dir) v$CURRENT_VERSION"
+                echo "Publishing $PACKAGE_NAME v$CURRENT_VERSION"
+                
+                # Publish to NPM
                 pnpm publish --no-git-checks --access public
+                
+                # Create git tag
+                TAG="${PACKAGE_NAME}@${CURRENT_VERSION}"
+                git tag -a "$TAG" -m "Release $TAG"
+                git push origin "$TAG"
               else
-                echo "$(basename $pkg_dir) v$CURRENT_VERSION already published, skipping"
+                echo "$PACKAGE_NAME v$CURRENT_VERSION already published, skipping"
               fi
               
               cd - > /dev/null
