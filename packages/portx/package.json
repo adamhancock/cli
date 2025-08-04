@@ -1,0 +1,43 @@
+{
+  "name": "@adamhancock/portx",
+  "version": "2.2.1",
+  "description": "Port testing CLI tool - TypeScript version",
+  "main": "dist/index.js",
+  "bin": {
+    "portx": "./dist/index.js"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "prepublishOnly": "pnpm build"
+  },
+  "keywords": [
+    "port",
+    "testing",
+    "cli",
+    "network",
+    "connectivity"
+  ],
+  "author": "Adam Hancock",
+  "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/adamhancock/cli.git",
+    "directory": "packages/portx"
+  },
+  "packageManager": "pnpm@10.13.1",
+  "dependencies": {
+    "axios": "^1.7.7",
+    "chalk": "^4.1.2",
+    "commander": "^12.1.0",
+    "handlebars": "^4.7.8",
+    "is-ip": "^5.0.1",
+    "is-port-reachable": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.1.0",
+    "tsx": "^4.20.3",
+    "typescript": "^5.9.2"
+  }
+}

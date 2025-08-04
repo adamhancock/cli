@@ -1,0 +1,7 @@
+[
+  {
+    "name": "Environment Test",
+    "host": "{{env}}.example.com",
+    "port": 443
+  }
+]
