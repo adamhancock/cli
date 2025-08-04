@@ -1,0 +1,33 @@
+{
+  "name": "@adamhancock/tmuxdev",
+  "version": "1.0.6",
+  "description": "CLI tool to manage tmux sessions for development servers",
+  "main": "dist/tmuxdev.js",
+  "bin": {
+    "tmuxdev": "./dist/tmuxdev.js"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "tsc",
+    "dev": "tsx src/tmuxdev.ts",
+    "prepublishOnly": "pnpm build"
+  },
+  "keywords": ["tmux", "cli", "dev-server", "development"],
+  "author": "Adam Hancock",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/adamhancock/tmuxdev"
+  },
+  "packageManager": "pnpm@10.13.1",
+  "dependencies": {
+    "@types/inquirer": "^9.0.8",
+    "inquirer": "^12.9.0",
+    "zx": "^8.7.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.1.0",
+    "tsx": "^4.20.3",
+    "typescript": "^5.9.2"
+  }
+}

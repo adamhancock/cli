@@ -1,0 +1,16 @@
+{
+  "name": "@adamhancock/cli",
+  "version": "1.0.0",
+  "description": "Monorepo for @adamhancock packages",
+  "private": true,
+  "scripts": {
+    "test": "pnpm -r test",
+    "build": "pnpm -r build",
+    "lint": "pnpm -r lint",
+    "publish-packages": "pnpm -r publish --access public"
+  },
+  "keywords": [],
+  "author": "Adam Hancock",
+  "license": "ISC",
+  "packageManager": "pnpm@10.13.1"
+}

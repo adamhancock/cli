@@ -1,0 +1,104 @@
+name: Publish Packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: 'Package to publish (leave empty to publish all changed packages)'
+        required: false
+        type: string
+  push:
+    branches:
+      - main
+    paths:
+      - 'packages/**/package.json'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v2
+        with:
+          version: 10.13.1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build packages
+        run: pnpm -r build
+
+      - name: Publish specific package
+        if: github.event.inputs.package
+        run: |
+          cd packages/${{ github.event.inputs.package }}
+          pnpm publish --no-git-checks --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish changed packages
+        if: github.event_name == 'push' && !github.event.inputs.package
+        run: |
+          # Get changed package directories
+          CHANGED_PACKAGES=$(git diff --name-only HEAD~1 HEAD | grep '^packages/.*/package.json$' | cut -d'/' -f1,2 | sort -u)
+          
+          if [ -z "$CHANGED_PACKAGES" ]; then
+            echo "No packages changed"
+            exit 0
+          fi
+          
+          # Publish each changed package
+          for pkg_dir in $CHANGED_PACKAGES; do
+            if [ -d "$pkg_dir" ]; then
+              echo "Publishing $pkg_dir"
+              cd "$pkg_dir"
+              
+              # Check if version has changed
+              CURRENT_VERSION=$(node -p "require('./package.json').version")
+              PUBLISHED_VERSION=$(npm view $(node -p "require('./package.json').name") version 2>/dev/null || echo "0.0.0")
+              
+              if [ "$CURRENT_VERSION" != "$PUBLISHED_VERSION" ]; then
+                pnpm publish --no-git-checks --access public
+              else
+                echo "Version $CURRENT_VERSION already published, skipping"
+              fi
+              
+              cd - > /dev/null
+            fi
+          done
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish all packages (manual trigger)
+        if: github.event_name == 'workflow_dispatch' && !github.event.inputs.package
+        run: |
+          # Publish all packages with version changes
+          for pkg_dir in packages/*; do
+            if [ -d "$pkg_dir" ] && [ -f "$pkg_dir/package.json" ]; then
+              cd "$pkg_dir"
+              
+              # Check if version has changed
+              CURRENT_VERSION=$(node -p "require('./package.json').version")
+              PUBLISHED_VERSION=$(npm view $(node -p "require('./package.json').name") version 2>/dev/null || echo "0.0.0")
+              
+              if [ "$CURRENT_VERSION" != "$PUBLISHED_VERSION" ]; then
+                echo "Publishing $(basename $pkg_dir) v$CURRENT_VERSION"
+                pnpm publish --no-git-checks --access public
+              else
+                echo "$(basename $pkg_dir) v$CURRENT_VERSION already published, skipping"
+              fi
+              
+              cd - > /dev/null
+            fi
+          done
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

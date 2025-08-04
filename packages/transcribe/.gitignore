@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.wav
+*.mp3
+*.mp4
+*.txt
+!README.md
+.DS_Store
+*.log

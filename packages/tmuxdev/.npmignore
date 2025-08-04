@@ -1,0 +1,6 @@
+*.ts
+!*.d.ts
+tsconfig.json
+.gitignore
+node_modules/
+pnpm-lock.yaml

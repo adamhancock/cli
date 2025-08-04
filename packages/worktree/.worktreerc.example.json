@@ -1,0 +1,30 @@
+{
+  "vscode": {
+    "command": "code",
+    "args": ["--new-window", "--goto"],
+    "open": true
+  },
+  "worktree": {
+    "prefix": "assurix",
+    "location": "../worktrees/{prefix}-{branch}"
+  },
+  "git": {
+    "fetch": true,
+    "remote": "origin",
+    "defaultBranch": "main",
+    "pushNewBranches": false
+  },
+  "env": {
+    "copy": true,
+    "patterns": [".env*"],
+    "exclude": [".env.example"]
+  },
+  "packageManager": {
+    "install": true,
+    "force": null,
+    "command": null
+  },
+  "hooks": {
+    "postCreate": ["echo 'Worktree ready!'"]
+  }
+}

@@ -1,0 +1,12 @@
+src/
+*.ts
+*.mp4
+*.wav
+*.txt
+*_frames/
+.git/
+.gitignore
+tsconfig.json
+node_modules/
+.DS_Store
+*.log
