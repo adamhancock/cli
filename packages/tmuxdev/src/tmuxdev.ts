@@ -72,11 +72,165 @@ async function killSession(sessionName: string): Promise<void> {
   echo(chalk.red(`Killed session '${sessionName}'`))
 }
 
-type ActionChoice = 'attach-current' | 'create-current' | 'select-existing' | 'kill-session' | 'exit'
+type ActionChoice = 'attach-current' | 'create-current' | 'select-existing' | 'kill-session' | 'exit' | 'back'
 
 interface Choice {
   name: string
   value: ActionChoice
+}
+
+async function showMenu(sessionName: string, exists: boolean): Promise<void> {
+  const allSessions = await getAllSessions()
+  const choices: Choice[] = []
+  
+  if (exists) {
+    choices.push({ name: `Attach to current branch session (${sessionName})`, value: 'attach-current' })
+  } else {
+    choices.push({ name: `Start new session for current directory (${sessionName})`, value: 'create-current' })
+  }
+  
+  if (allSessions.length > 0) {
+    choices.push({ name: 'Select from existing sessions', value: 'select-existing' })
+    choices.push({ name: 'Kill a session', value: 'kill-session' })
+  }
+  
+  choices.push({ name: chalk.gray('Exit (q)'), value: 'exit' })
+  
+  let action: ActionChoice
+  try {
+    const answer = await inquirer.prompt<{ action: ActionChoice }>([
+      {
+        type: 'list',
+        name: 'action',
+        message: 'What would you like to do? (Use arrow keys)',
+        choices
+      }
+    ])
+    action = answer.action
+  } catch (error) {
+    echo(chalk.yellow('\nExiting...'))
+    process.exit(0)
+  }
+  
+  switch (action) {
+    case 'attach-current':
+      await attachSession(sessionName)
+      break
+      
+    case 'create-current':
+      await createSession(sessionName)
+      let attachNow: boolean
+      try {
+        const answer = await inquirer.prompt<{ attachNow: boolean }>([
+          {
+            type: 'confirm',
+            name: 'attachNow',
+            message: 'Would you like to attach to the session now?',
+            default: true
+          }
+        ])
+        attachNow = answer.attachNow
+      } catch (error) {
+        echo(chalk.yellow('\nExiting...'))
+        process.exit(0)
+      }
+      if (attachNow) {
+        await attachSession(sessionName)
+      } else {
+        echo(chalk.yellow(`To attach later, run: tmux attach-session -t '${sessionName}'`))
+        echo(chalk.yellow(`To detach from the session, press: Ctrl+B then D`))
+      }
+      break
+      
+    case 'select-existing':
+      let selectedSession: string
+      try {
+        const answer = await inquirer.prompt<{ selectedSession: string }>([
+          {
+            type: 'list',
+            name: 'selectedSession',
+            message: 'Select a session to attach to:',
+            choices: [
+              ...allSessions.map(s => ({ name: s, value: s })),
+              { name: chalk.gray('← Back'), value: '__back__' }
+            ]
+          }
+        ])
+        selectedSession = answer.selectedSession
+      } catch (error) {
+        echo(chalk.yellow('\nExiting...'))
+        process.exit(0)
+      }
+      if (selectedSession === '__back__') {
+        await showMenu(sessionName, exists)
+        return
+      }
+      await attachSession(selectedSession)
+      break
+      
+    case 'kill-session':
+      let continueKilling = true
+      while (continueKilling) {
+        const currentSessions = await getAllSessions()
+        
+        if (currentSessions.length === 0) {
+          echo(chalk.yellow('No sessions to kill.'))
+          break
+        }
+        
+        let sessionToKill: string
+        try {
+          const answer = await inquirer.prompt<{ sessionToKill: string }>([
+            {
+              type: 'list',
+              name: 'sessionToKill',
+              message: 'Select a session to kill:',
+              choices: [
+                ...currentSessions.map(s => ({ name: s, value: s })),
+                { name: chalk.gray('← Back'), value: '__back__' }
+              ]
+            }
+          ])
+          sessionToKill = answer.sessionToKill
+        } catch (error) {
+          echo(chalk.yellow('\nExiting...'))
+          process.exit(0)
+        }
+        
+        if (sessionToKill === '__back__') {
+          // Restart the menu
+          await showMenu(sessionName, exists)
+          return
+        }
+        
+        let confirmKill: boolean
+        try {
+          const answer = await inquirer.prompt<{ confirmKill: boolean }>([
+            {
+              type: 'confirm',
+              name: 'confirmKill',
+              message: `Are you sure you want to kill session '${sessionToKill}'?`,
+              default: false
+            }
+          ])
+          confirmKill = answer.confirmKill
+        } catch (error) {
+          echo(chalk.yellow('\nExiting...'))
+          process.exit(0)
+        }
+        
+        if (confirmKill) {
+          await killSession(sessionToKill)
+        }
+      }
+      // After killing sessions, go back to main menu
+      await showMenu(sessionName, await sessionExists(sessionName))
+      break
+      
+    case 'exit':
+      echo(chalk.blue('Goodbye!'))
+      break
+  }
 }
 
 async function main(): Promise<void> {
@@ -178,129 +332,7 @@ async function main(): Promise<void> {
   }
   
   // Interactive menu mode (only reached with 'menu' or 'm' command)
-  const allSessions = await getAllSessions()
-  const choices: Choice[] = []
-  
-  if (exists) {
-    choices.push({ name: `Attach to current branch session (${sessionName})`, value: 'attach-current' })
-  } else {
-    choices.push({ name: `Start new session for current directory (${sessionName})`, value: 'create-current' })
-  }
-  
-  if (allSessions.length > 0) {
-    choices.push({ name: 'Select from existing sessions', value: 'select-existing' })
-    choices.push({ name: 'Kill a session', value: 'kill-session' })
-  }
-  
-  choices.push({ name: 'Exit', value: 'exit' })
-  
-  let action: ActionChoice
-  try {
-    const answer = await inquirer.prompt<{ action: ActionChoice }>([
-      {
-        type: 'list',
-        name: 'action',
-        message: 'What would you like to do?',
-        choices
-      }
-    ])
-    action = answer.action
-  } catch (error) {
-    echo(chalk.yellow('\nExiting...'))
-    process.exit(0)
-  }
-  
-  switch (action) {
-    case 'attach-current':
-      await attachSession(sessionName)
-      break
-      
-    case 'create-current':
-      await createSession(sessionName)
-      let attachNow: boolean
-      try {
-        const answer = await inquirer.prompt<{ attachNow: boolean }>([
-          {
-            type: 'confirm',
-            name: 'attachNow',
-            message: 'Would you like to attach to the session now?',
-            default: true
-          }
-        ])
-        attachNow = answer.attachNow
-      } catch (error) {
-        echo(chalk.yellow('\nExiting...'))
-        process.exit(0)
-      }
-      if (attachNow) {
-        await attachSession(sessionName)
-      } else {
-        echo(chalk.yellow(`To attach later, run: tmux attach-session -t '${sessionName}'`))
-        echo(chalk.yellow(`To detach from the session, press: Ctrl+B then D`))
-      }
-      break
-      
-    case 'select-existing':
-      let selectedSession: string
-      try {
-        const answer = await inquirer.prompt<{ selectedSession: string }>([
-          {
-            type: 'list',
-            name: 'selectedSession',
-            message: 'Select a session to attach to:',
-            choices: allSessions.map(s => ({ name: s, value: s }))
-          }
-        ])
-        selectedSession = answer.selectedSession
-      } catch (error) {
-        echo(chalk.yellow('\nExiting...'))
-        process.exit(0)
-      }
-      await attachSession(selectedSession)
-      break
-      
-    case 'kill-session':
-      let sessionToKill: string
-      try {
-        const answer = await inquirer.prompt<{ sessionToKill: string }>([
-          {
-            type: 'list',
-            name: 'sessionToKill',
-            message: 'Select a session to kill:',
-            choices: allSessions.map(s => ({ name: s, value: s }))
-          }
-        ])
-        sessionToKill = answer.sessionToKill
-      } catch (error) {
-        echo(chalk.yellow('\nExiting...'))
-        process.exit(0)
-      }
-      
-      let confirmKill: boolean
-      try {
-        const answer = await inquirer.prompt<{ confirmKill: boolean }>([
-          {
-            type: 'confirm',
-            name: 'confirmKill',
-            message: `Are you sure you want to kill session '${sessionToKill}'?`,
-            default: false
-          }
-        ])
-        confirmKill = answer.confirmKill
-      } catch (error) {
-        echo(chalk.yellow('\nExiting...'))
-        process.exit(0)
-      }
-      
-      if (confirmKill) {
-        await killSession(sessionToKill)
-      }
-      break
-      
-    case 'exit':
-      echo(chalk.blue('Goodbye!'))
-      break
-  }
+  await showMenu(sessionName, exists)
 }
 
 main().catch(console.error)
