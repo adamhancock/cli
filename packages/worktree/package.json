@@ -1,6 +1,6 @@
 {
   "name": "@adamhancock/worktree",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "Git worktree manager with branch selection, dependency installation, and VS Code integration",
   "main": "dist/worktree.js",
   "scripts": {
@@ -20,6 +20,11 @@
   ],
   "author": "Adam Hancock",
   "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/adamhancock/cli.git",
+    "directory": "packages/worktree"
+  },
   "packageManager": "pnpm@10.13.1",
   "devDependencies": {
     "@types/node": "^24.1.0",

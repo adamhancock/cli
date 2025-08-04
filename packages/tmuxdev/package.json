@@ -1,6 +1,6 @@
 {
   "name": "@adamhancock/tmuxdev",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "CLI tool to manage tmux sessions for development servers",
   "main": "dist/tmuxdev.js",
   "bin": {
@@ -17,7 +17,8 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/adamhancock/tmuxdev"
+    "url": "https://github.com/adamhancock/cli.git",
+    "directory": "packages/tmuxdev"
   },
   "packageManager": "pnpm@10.13.1",
   "dependencies": {

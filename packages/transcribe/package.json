@@ -1,6 +1,6 @@
 {
   "name": "@adamhancock/transcribe",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "CLI tool for transcribing and summarizing MP4 recordings using Whisper and Ollama",
   "main": "dist/index.js",
   "type": "module",
@@ -26,7 +26,8 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/adamhancock/transcribe-cli.git"
+    "url": "https://github.com/adamhancock/cli.git",
+    "directory": "packages/transcribe"
   },
   "engines": {
     "node": ">=18.0.0"
