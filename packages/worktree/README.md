@@ -127,7 +127,27 @@ You can customize the behavior by creating a `.worktreerc.json` file in your pro
 - `packageManager.command`: Custom install command (overrides auto-detection)
 
 #### Hooks
-- `hooks.postCreate`: Array of commands to run after worktree creation
+- `hooks.postCreate`: Array of commands to run after worktree creation. Supports template variables:
+  - `{branch}`: The branch name (e.g., `feature/new-feature`)
+  - `{safeBranch}`: Branch name with slashes replaced by hyphens (e.g., `feature-new-feature`)
+  - `{worktreePath}`: Absolute path to the worktree directory
+  - `{originalDir}`: Path to the original repository
+  - `{prefix}`: The configured worktree prefix
+  - `{remote}`: The git remote name (e.g., `origin`)
+  - `{defaultBranch}`: The default branch name (e.g., `main`)
+
+Example with variables:
+```json
+{
+  "hooks": {
+    "postCreate": [
+      "echo 'Setting up worktree for branch {branch}'",
+      "npx zx scripts/setup.mjs --branch {branch} --path {worktreePath}",
+      "npm run configure:{safeBranch}"
+    ]
+  }
+}
+```
 
 ## Requirements
 

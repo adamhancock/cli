@@ -346,9 +346,14 @@ async function createWorktree(branchName?: string) {
     process.exit(1);
   }
 
-  // Set up branch tracking for the worktree
-  process.chdir(worktreePath);
+  // Get absolute path and change to the worktree directory
+  const absoluteWorktreePath = resolve(originalDir, worktreePath);
+  process.chdir(absoluteWorktreePath);
   
+  // Wait a moment for git to settle after worktree creation
+  await new Promise(resolve => setTimeout(resolve, 100));
+  
+  // Set up branch tracking for the worktree
   try {
     if (await branchExists(selectedBranch, 'remote', remote)) {
       // For existing remote branches, ensure tracking is set
@@ -425,7 +430,50 @@ async function createWorktree(branchName?: string) {
     echo(chalk.gray('Skipping dependency installation (disabled in config)'));
   }
 
-  // Open in VS Code
+  // Run post-create hooks
+  if (config.hooks?.postCreate && config.hooks.postCreate.length > 0) {
+    echo(chalk.blue('Running post-create hooks...'));
+    echo(chalk.gray(`Working directory: ${process.cwd()}`));
+    
+    // Verify we're in the correct worktree
+    const currentBranch = await $`git rev-parse --abbrev-ref HEAD`;
+    echo(chalk.gray(`Current branch: ${currentBranch.stdout.trim()}`));
+    
+    const originalVerbose = $.verbose;
+    $.verbose = true; // Show hook command output
+    
+    // Prepare template variables for replacement
+    const templateVars: Record<string, string> = {
+      branch: selectedBranch,
+      safeBranch: safeBranchName,
+      worktreePath: absoluteWorktreePath,
+      originalDir: originalDir,
+      prefix: prefix,
+      remote: remote,
+      defaultBranch: defaultBranch
+    };
+    
+    for (const hook of config.hooks.postCreate) {
+      // Replace template variables in the hook command
+      let expandedHook = hook;
+      for (const [key, value] of Object.entries(templateVars)) {
+        expandedHook = expandedHook.replace(new RegExp(`\\{${key}\\}`, 'g'), value);
+      }
+      
+      echo(chalk.gray(`Running: ${expandedHook}`));
+      try {
+        // Use eval to properly handle complex commands with arguments
+        await $`eval ${expandedHook}`;
+      } catch (err) {
+        echo(chalk.yellow(`Warning: Hook failed: ${expandedHook}`));
+        echo(chalk.yellow(`Error: ${err instanceof Error ? err.message : String(err)}`));
+      }
+    }
+    
+    $.verbose = originalVerbose; // Restore original verbose setting
+  }
+
+  // Open in VS Code (after hooks have completed)
   if (config.vscode?.open !== false) {
     const absoluteWorktreePath = resolve(originalDir, worktreePath);
     echo(chalk.blue(`Opening VS Code at: ${absoluteWorktreePath}`));
@@ -437,20 +485,6 @@ async function createWorktree(branchName?: string) {
       await $`${command}`;
     } catch (err) {
       echo(chalk.yellow('Failed to open VS Code. You can manually open the project at:'), absoluteWorktreePath);
-    }
-  }
-
-  // Run post-create hooks
-  if (config.hooks?.postCreate && config.hooks.postCreate.length > 0) {
-    echo(chalk.blue('Running post-create hooks...'));
-    for (const hook of config.hooks.postCreate) {
-      echo(chalk.gray(`Running: ${hook}`));
-      try {
-        await $`${hook.split(' ')}`;
-      } catch (err) {
-        echo(chalk.yellow(`Warning: Hook failed: ${hook}`));
-        echo(chalk.yellow(`Error: ${err instanceof Error ? err.message : String(err)}`));
-      }
     }
   }
 
