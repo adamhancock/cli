@@ -41,6 +41,6 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ahancock1/cli.git"
+    "url": "git+https://github.com/adamhancock/cli.git"
   }
 }
