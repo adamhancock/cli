@@ -461,9 +461,10 @@ async function createWorktree(branchName?: string) {
       }
       
       echo(chalk.gray(`Running: ${expandedHook}`));
+      echo(chalk.gray(`Running in directory: ${process.cwd()}`));
       try {
-        // Use eval to properly handle complex commands with arguments
-        await $`eval ${expandedHook}`;
+        // Ensure we're in the worktree directory and use cd to explicitly set the directory for the eval
+        await $`cd ${absoluteWorktreePath} && eval ${expandedHook}`;
       } catch (err) {
         echo(chalk.yellow(`Warning: Hook failed: ${expandedHook}`));
         echo(chalk.yellow(`Error: ${err instanceof Error ? err.message : String(err)}`));
