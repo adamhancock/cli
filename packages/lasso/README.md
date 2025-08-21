@@ -21,6 +21,7 @@ This will fetch all hosts from your Caddy server, check their backend health, an
 - Select hosts to open in browser or VSCode
 - Auto-refreshes every 30 seconds
 - Quick access to refresh (r) and cleanup (c) actions
+- ESC key support to go back from detailed views
 
 ### List Mode
 ```bash
@@ -71,11 +72,18 @@ By default, lasso connects to the Caddy API on port 2019. Use this option to spe
 - 📋 List mode for quick overview of all hosts
 - 🎨 Colorized output for better readability
 - 📍 Shows upstream/backend servers for each host
+- 🌿 Git integration with branch and worktree support
+- 🔗 GitHub Pull Request integration with status and check details
+- ⚡ Individual PR check status with detailed breakdown
+- 🗑️ Delete Caddy routes directly from the interface
+- ⌨️ ESC key navigation support
 
 ## Requirements
 
 - Caddy server running with API enabled (default port 2019)
 - Node.js 18 or higher
+- GitHub CLI (`gh`) for Pull Request integration (optional)
+- Git repositories with worktree paths for git integration (optional)
 
 ## License
 

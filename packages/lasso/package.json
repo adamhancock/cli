@@ -1,6 +1,6 @@
 {
   "name": "@adamhancock/lasso",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "CLI tool to read Caddy API and interactively open configured hosts",
   "main": "dist/index.js",
   "bin": {

@@ -7,9 +7,49 @@ import axios from 'axios';
 import open from 'open';
 import chalk from 'chalk';
 import ora from 'ora';
+import { exec } from 'child_process';
+import { promisify } from 'util';
 
 // Register the autocomplete prompt
 inquirer.registerPrompt('autocomplete', autocompletePrompt);
+
+const execAsync = promisify(exec);
+
+interface GitStatus {
+  branch?: string;
+  ahead?: number;
+  behind?: number;
+  modified?: number;
+  untracked?: number;
+  staged?: number;
+  clean?: boolean;
+  lastCommit?: {
+    hash?: string;
+    message?: string;
+    author?: string;
+    date?: string;
+  };
+  remoteBranch?: string;
+  pullRequest?: {
+    number?: number;
+    title?: string;
+    url?: string;
+    state?: string;
+    author?: string;
+    checks?: {
+      total?: number;
+      passing?: number;
+      failing?: number;
+      pending?: number;
+      conclusion?: string;
+      runs?: Array<{
+        name: string;
+        state: string;
+        bucket: string;
+      }>;
+    };
+  };
+}
 
 interface CaddyHost {
   name: string;
@@ -20,6 +60,7 @@ interface CaddyHost {
   isActive?: boolean;
   responseTime?: number;
   statusCode?: number;
+  gitStatus?: GitStatus;
 }
 
 interface CaddyConfig {
@@ -49,6 +90,389 @@ class LassoCLI {
 
   constructor(port: number = 2019) {
     this.caddyApiUrl = `http://localhost:${port}`;
+  }
+
+  async getPullRequestInfo(path: string, branch: string): Promise<any> {
+    try {
+      // First check if this is a GitHub repository
+      const { stdout: remoteUrl } = await execAsync(`git -C "${path}" remote get-url origin 2>/dev/null`);
+      if (!remoteUrl.includes('github.com')) {
+        return undefined;
+      }
+
+      // Use gh CLI to get PR info for the branch
+      const { stdout: prData } = await execAsync(`gh pr view "${branch}" --repo="$(git -C "${path}" remote get-url origin)" --json number,title,url,state,author 2>/dev/null`);
+      
+      if (prData.trim()) {
+        const pr = JSON.parse(prData);
+        
+        // Get check status for open PRs
+        let checks = undefined;
+        if (pr.state === 'OPEN') {
+          try {
+            const { stdout: checksData } = await execAsync(`gh pr checks "${branch}" --repo="$(git -C "${path}" remote get-url origin)" --json bucket,name,state 2>/dev/null`);
+            
+            
+            if (checksData.trim()) {
+              const checkRuns = JSON.parse(checksData);
+              const total = checkRuns.length;
+              let passing = 0;
+              let failing = 0;
+              let pending = 0;
+              let overallConclusion = 'success';
+              
+              for (const check of checkRuns) {
+                if (check.bucket === 'pass') {
+                  passing++;
+                } else if (check.bucket === 'fail' || check.bucket === 'cancel') {
+                  failing++;
+                  overallConclusion = 'failure';
+                } else if (check.bucket === 'pending' || check.bucket === 'skipping') {
+                  pending++;
+                  if (overallConclusion === 'success') {
+                    overallConclusion = 'pending';
+                  }
+                }
+              }
+              
+              checks = {
+                total,
+                passing,
+                failing,
+                pending,
+                conclusion: overallConclusion,
+                runs: checkRuns.map((check: any) => ({
+                  name: check.name,
+                  state: check.state,
+                  bucket: check.bucket
+                }))
+              };
+            }
+          } catch {
+            // Failed to get checks, continue without them
+          }
+        }
+        
+        return {
+          number: pr.number,
+          title: pr.title,
+          url: pr.url,
+          state: pr.state,
+          author: pr.author?.login,
+          checks
+        };
+      }
+    } catch {
+      // No PR found, gh not available, or not authenticated
+    }
+    return undefined;
+  }
+
+  async getGitStatus(path: string): Promise<GitStatus | undefined> {
+    try {
+      // Get current branch
+      const { stdout: branch } = await execAsync(`git -C "${path}" rev-parse --abbrev-ref HEAD 2>/dev/null`);
+      
+      // Get status porcelain for parsing
+      const { stdout: status } = await execAsync(`git -C "${path}" status --porcelain 2>/dev/null`);
+      
+      // Get remote branch
+      let remoteBranch = undefined;
+      try {
+        const { stdout: remote } = await execAsync(`git -C "${path}" rev-parse --abbrev-ref @{u} 2>/dev/null`);
+        remoteBranch = remote.trim();
+      } catch {
+        // No upstream branch
+      }
+      
+      // Get ahead/behind info
+      let ahead = 0;
+      let behind = 0;
+      try {
+        const { stdout: revList } = await execAsync(`git -C "${path}" rev-list --left-right --count HEAD...@{u} 2>/dev/null`);
+        const [aheadStr, behindStr] = revList.trim().split('\t');
+        ahead = parseInt(aheadStr) || 0;
+        behind = parseInt(behindStr) || 0;
+      } catch {
+        // No upstream branch or other error, ignore
+      }
+      
+      // Get last commit info
+      let lastCommit = undefined;
+      try {
+        const { stdout: commitInfo } = await execAsync(`git -C "${path}" log -1 --pretty=format:"%h|%s|%an|%ar" 2>/dev/null`);
+        const [hash, message, author, date] = commitInfo.split('|');
+        lastCommit = { hash, message, author, date };
+      } catch {
+        // No commits or error
+      }
+
+      // Get PR info if available
+      const pullRequest = branch.trim() !== 'main' && branch.trim() !== 'master' 
+        ? await this.getPullRequestInfo(path, branch.trim())
+        : undefined;
+      
+      // Parse status
+      const lines = status.trim().split('\n').filter(l => l);
+      let modified = 0;
+      let untracked = 0;
+      let staged = 0;
+      
+      for (const line of lines) {
+        if (line.startsWith('??')) {
+          untracked++;
+        } else if (line[0] !== ' ' && line[0] !== '?') {
+          staged++;
+        }
+        if (line[1] === 'M' || line[1] === 'D') {
+          modified++;
+        }
+      }
+      
+      return {
+        branch: branch.trim(),
+        remoteBranch,
+        ahead,
+        behind,
+        modified,
+        untracked,
+        staged,
+        clean: lines.length === 0,
+        lastCommit,
+        pullRequest
+      };
+    } catch {
+      // Not a git repo or git not available
+      return undefined;
+    }
+  }
+
+  formatGitStatus(gitStatus?: GitStatus): string {
+    if (!gitStatus) return '';
+    
+    const parts: string[] = [];
+    
+    // Branch name
+    if (gitStatus.branch) {
+      parts.push(chalk.magenta(`⎇ ${gitStatus.branch}`));
+    }
+    
+    // PR info (compact)
+    if (gitStatus.pullRequest) {
+      const prState = gitStatus.pullRequest.state;
+      let prDisplay = `#${gitStatus.pullRequest.number}`;
+      
+      if (prState === 'OPEN') {
+        // Add check status for open PRs
+        if (gitStatus.pullRequest.checks) {
+          const checks = gitStatus.pullRequest.checks;
+          if (checks.conclusion === 'success') {
+            prDisplay += ' ✅';
+          } else if (checks.conclusion === 'failure') {
+            prDisplay += ' ❌';
+          } else if (checks.conclusion === 'pending') {
+            prDisplay += ' 🟡';
+          }
+        }
+        parts.push(chalk.green(prDisplay));
+      } else if (prState === 'MERGED') {
+        parts.push(chalk.blue(`${prDisplay} ✓`));
+      } else if (prState === 'CLOSED') {
+        parts.push(chalk.red(`${prDisplay} ✗`));
+      } else {
+        parts.push(chalk.gray(prDisplay));
+      }
+    }
+    
+    // Clean status
+    if (gitStatus.clean) {
+      parts.push(chalk.green('✓'));
+    } else {
+      // Modified files
+      if (gitStatus.modified && gitStatus.modified > 0) {
+        parts.push(chalk.yellow(`±${gitStatus.modified}`));
+      }
+      
+      // Staged files
+      if (gitStatus.staged && gitStatus.staged > 0) {
+        parts.push(chalk.green(`●${gitStatus.staged}`));
+      }
+      
+      // Untracked files
+      if (gitStatus.untracked && gitStatus.untracked > 0) {
+        parts.push(chalk.red(`?${gitStatus.untracked}`));
+      }
+    }
+    
+    // Ahead/behind
+    if (gitStatus.ahead && gitStatus.ahead > 0) {
+      parts.push(chalk.cyan(`↑${gitStatus.ahead}`));
+    }
+    if (gitStatus.behind && gitStatus.behind > 0) {
+      parts.push(chalk.yellow(`↓${gitStatus.behind}`));
+    }
+    
+    return parts.length > 0 ? `[${parts.join(' ')}]` : '';
+  }
+
+  displayDetailedGitStatus(gitStatus?: GitStatus): void {
+    if (!gitStatus) {
+      console.log(chalk.gray('    Git: Not a git repository\n'));
+      return;
+    }
+
+    console.log(chalk.bold('    Git Status:'));
+    
+    // Branch info
+    if (gitStatus.branch) {
+      const branchInfo = gitStatus.remoteBranch 
+        ? `${gitStatus.branch} → ${gitStatus.remoteBranch}`
+        : gitStatus.branch;
+      console.log(`      Branch: ${chalk.magenta(branchInfo)}`);
+    }
+    
+    // Pull Request info
+    if (gitStatus.pullRequest) {
+      const prState = gitStatus.pullRequest.state;
+      let prStateColor = chalk.gray;
+      let prStateIcon = '';
+      
+      if (prState === 'OPEN') {
+        prStateColor = chalk.green;
+        prStateIcon = '🟢';
+      } else if (prState === 'MERGED') {
+        prStateColor = chalk.blue;
+        prStateIcon = '🔵 ✓';
+      } else if (prState === 'CLOSED') {
+        prStateColor = chalk.red;
+        prStateIcon = '🔴 ✗';
+      }
+      
+      console.log(`      Pull Request: ${prStateColor(`#${gitStatus.pullRequest.number}`)} ${prStateIcon} ${prStateColor(prState)}`);
+      console.log(`      ${chalk.dim('└─')} ${gitStatus.pullRequest.title}`);
+      if (gitStatus.pullRequest.author) {
+        console.log(`      ${chalk.dim('└─')} by ${gitStatus.pullRequest.author}`);
+      }
+      
+      // Show check status for open PRs
+      if (prState === 'OPEN' && gitStatus.pullRequest.checks) {
+        const checks = gitStatus.pullRequest.checks;
+        let checksStatus = '';
+        let checksColor = chalk.gray;
+        
+        if (checks.conclusion === 'success') {
+          checksStatus = `✅ All checks passing (${checks.passing}/${checks.total})`;
+          checksColor = chalk.green;
+        } else if (checks.conclusion === 'failure') {
+          checksStatus = `❌ ${checks.failing || 0} checks failing`;
+          if ((checks.passing || 0) > 0) {
+            checksStatus += `, ${checks.passing} passing`;
+          }
+          if ((checks.pending || 0) > 0) {
+            checksStatus += `, ${checks.pending} pending`;
+          }
+          checksStatus += ` (${checks.total || 0} total)`;
+          checksColor = chalk.red;
+        } else if (checks.conclusion === 'pending') {
+          checksStatus = `🟡 ${checks.pending || 0} checks pending`;
+          if ((checks.passing || 0) > 0) {
+            checksStatus += `, ${checks.passing} passing`;
+          }
+          if ((checks.failing || 0) > 0) {
+            checksStatus += `, ${checks.failing} failing`;
+          }
+          checksStatus += ` (${checks.total || 0} total)`;
+          checksColor = chalk.yellow;
+        }
+        
+        console.log(`      ${chalk.dim('└─')} ${checksColor(checksStatus)}`);
+        
+        // Show individual check details if available
+        if (checks.runs && checks.runs.length > 0) {
+          console.log(`      ${chalk.dim('└─')} Check details:`);
+          
+          for (const run of checks.runs) {
+            let statusIcon = '○';
+            let statusColor = chalk.gray;
+            
+            if (run.bucket === 'pass') {
+              statusIcon = '✅';
+              statusColor = chalk.green;
+            } else if (run.bucket === 'fail' || run.bucket === 'cancel') {
+              statusIcon = '❌';
+              statusColor = chalk.red;
+            } else if (run.bucket === 'pending') {
+              statusIcon = '🔄';
+              statusColor = chalk.yellow;
+            } else if (run.bucket === 'skipping') {
+              statusIcon = '⏭️';
+              statusColor = chalk.gray;
+            } else {
+              // Fallback to state if bucket is unclear
+              if (run.state === 'success') {
+                statusIcon = '✅';
+                statusColor = chalk.green;
+              } else if (run.state === 'failure') {
+                statusIcon = '❌';
+                statusColor = chalk.red;
+              } else {
+                statusIcon = '⏳';
+                statusColor = chalk.yellow;
+              }
+            }
+            
+            console.log(`         ${chalk.dim('•')} ${statusIcon} ${statusColor(run.name)}`);
+          }
+        }
+      }
+      
+      if (gitStatus.pullRequest.url) {
+        console.log(`      ${chalk.dim('└─')} ${chalk.blue(gitStatus.pullRequest.url)}`);
+      }
+    }
+    
+    // Last commit
+    if (gitStatus.lastCommit) {
+      console.log(`      Last commit: ${chalk.yellow(gitStatus.lastCommit.hash)} ${chalk.gray(gitStatus.lastCommit.date)}`);
+      console.log(`      ${chalk.dim('└─')} ${gitStatus.lastCommit.message}`);
+      console.log(`      ${chalk.dim('└─')} by ${gitStatus.lastCommit.author}`);
+    }
+    
+    // Working directory status
+    if (gitStatus.clean) {
+      console.log(`      Working tree: ${chalk.green('clean')}`);
+    } else {
+      const statusParts: string[] = [];
+      if (gitStatus.staged && gitStatus.staged > 0) {
+        statusParts.push(chalk.green(`${gitStatus.staged} staged`));
+      }
+      if (gitStatus.modified && gitStatus.modified > 0) {
+        statusParts.push(chalk.yellow(`${gitStatus.modified} modified`));
+      }
+      if (gitStatus.untracked && gitStatus.untracked > 0) {
+        statusParts.push(chalk.red(`${gitStatus.untracked} untracked`));
+      }
+      console.log(`      Working tree: ${statusParts.join(', ')}`);
+    }
+    
+    // Remote status
+    if (gitStatus.remoteBranch) {
+      const remoteParts: string[] = [];
+      if (gitStatus.ahead && gitStatus.ahead > 0) {
+        remoteParts.push(chalk.cyan(`${gitStatus.ahead} ahead`));
+      }
+      if (gitStatus.behind && gitStatus.behind > 0) {
+        remoteParts.push(chalk.yellow(`${gitStatus.behind} behind`));
+      }
+      
+      if (remoteParts.length > 0) {
+        console.log(`      Remote sync: ${remoteParts.join(', ')}`);
+      } else if (gitStatus.ahead === 0 && gitStatus.behind === 0) {
+        console.log(`      Remote sync: ${chalk.green('up to date')}`);
+      }
+    }
+    
+    console.log('');
   }
 
   async fetchCaddyConfig(): Promise<CaddyConfig> {
@@ -144,9 +568,12 @@ class LassoCLI {
   async checkHostHealth(host: CaddyHost): Promise<CaddyHost> {
     // If no upstreams, consider it inactive
     if (!host.upstreams || host.upstreams.length === 0) {
+      // Still check git status if worktree path exists
+      const gitStatus = host.worktreePath ? await this.getGitStatus(host.worktreePath) : undefined;
       return {
         ...host,
-        isActive: false
+        isActive: false,
+        gitStatus
       };
     }
 
@@ -182,11 +609,15 @@ class LassoCLI {
     // Host is active if any upstream is active
     const activeUpstream = results.find(r => r.isActive);
     
+    // Check git status if worktree path exists
+    const gitStatus = host.worktreePath ? await this.getGitStatus(host.worktreePath) : undefined;
+    
     return {
       ...host,
       isActive: !!activeUpstream,
       statusCode: activeUpstream?.statusCode,
-      responseTime: activeUpstream?.responseTime || Date.now() - startTime
+      responseTime: activeUpstream?.responseTime || Date.now() - startTime,
+      gitStatus
     };
   }
 
@@ -205,7 +636,7 @@ class LassoCLI {
     });
   }
 
-  async selectAndOpenHost(hosts: CaddyHost[]): Promise<string> {
+  async selectAndOpenHost(hosts: CaddyHost[], timeoutMs?: number): Promise<string> {
     if (hosts.length === 0) {
       console.log(chalk.yellow('No hosts found in Caddy configuration'));
       return 'exit';
@@ -223,9 +654,10 @@ class LassoCLI {
       const upstream = host.upstreams && host.upstreams.length > 0 
         ? chalk.gray(`→ ${host.upstreams.join(', ')}`)
         : chalk.gray('→ (no upstream)');
+      const gitStatus = this.formatGitStatus(host.gitStatus);
       
       return {
-        name: `${statusIcon} ${hostName} ${responseTime} ${upstream}`,
+        name: `${statusIcon} ${hostName} ${responseTime} ${upstream} ${gitStatus}`,
         value: host.url,
         short: host.name,
         searchText: host.name.toLowerCase(), // For search filtering
@@ -255,7 +687,8 @@ class LassoCLI {
     const message = chalk.bold('Select a host (type to filter):') + 
       chalk.gray(` (${activeCount} active, ${hosts.length - activeCount} offline)`);
 
-    const { selectedUrl } = await inquirer.prompt([
+    // Create the prompt
+    const promptPromise = inquirer.prompt([
       {
         type: 'autocomplete' as any,
         name: 'selectedUrl',
@@ -296,6 +729,24 @@ class LassoCLI {
       }
     ]);
 
+    // If timeout is specified, race the prompt against the timeout
+    let result;
+    if (timeoutMs) {
+      const timeoutPromise = new Promise<{selectedUrl: string}>((resolve) => {
+        setTimeout(() => {
+          // Force close the prompt and resolve with refresh
+          (promptPromise as any).ui?.close();
+          resolve({ selectedUrl: 'REFRESH' });
+        }, timeoutMs);
+      });
+
+      result = await Promise.race([promptPromise, timeoutPromise]);
+    } else {
+      result = await promptPromise;
+    }
+
+    const { selectedUrl } = result;
+
     if (selectedUrl === 'EXIT') {
       return 'exit';
     } else if (selectedUrl === 'REFRESH') {
@@ -308,6 +759,25 @@ class LassoCLI {
       const selectedHost = hosts.find(h => h.url === selectedUrl);
       
       if (selectedHost) {
+        // Show detailed information about the selected host
+        console.log(chalk.bold(`\n  Selected: ${chalk.cyan(selectedHost.name)}`));
+        console.log(`    URL: ${selectedHost.url}`);
+        
+        if (selectedHost.upstreams && selectedHost.upstreams.length > 0) {
+          console.log(`    Backend: ${selectedHost.upstreams.join(', ')}`);
+          console.log(`    Status: ${selectedHost.isActive ? chalk.green('Active') : chalk.red('Offline')}`);
+          if (selectedHost.responseTime) {
+            console.log(`    Response time: ${selectedHost.responseTime}ms`);
+          }
+        } else {
+          console.log(`    Backend: ${chalk.gray('None configured')}`);
+        }
+        
+        if (selectedHost.worktreePath) {
+          console.log(`    Worktree: ${selectedHost.worktreePath}`);
+          this.displayDetailedGitStatus(selectedHost.gitStatus);
+        }
+        
         // Ask how to open
         const openChoices = [
           { name: chalk.cyan('🌐 Open in browser'), value: 'browser' },
@@ -317,29 +787,108 @@ class LassoCLI {
           openChoices.push({ name: chalk.blue('📝 Open folder in VSCode'), value: 'vscode' });
         }
         
+        if (selectedHost.gitStatus?.pullRequest?.url) {
+          openChoices.push({ name: chalk.green('🔗 Open Pull Request'), value: 'pr' });
+        }
+        
+        openChoices.push({ name: chalk.red('🗑️  Delete Caddy Route'), value: 'delete' });
         openChoices.push({ name: chalk.gray('← Back'), value: 'back' });
         
-        const { openMethod } = await inquirer.prompt([
-          {
-            type: 'list',
-            name: 'openMethod',
-            message: `How would you like to open ${chalk.cyan(selectedHost.name)}?`,
-            choices: openChoices
+        // Create a promise that resolves when ESC is pressed or normal selection is made
+        const { openMethod } = await new Promise<{openMethod: string}>((resolve) => {
+          // Enable keypress events
+          if (process.stdin.isTTY) {
+            process.stdin.setRawMode(true);
           }
-        ]);
+          process.stdin.resume();
+          
+          const detailPrompt = inquirer.prompt([
+            {
+              type: 'list',
+              name: 'openMethod',
+              message: `How would you like to open ${chalk.cyan(selectedHost.name)}? ${chalk.gray('(ESC to go back)')}`,
+              choices: openChoices
+            }
+          ]);
+
+          // Handle normal selection
+          detailPrompt.then((result) => {
+            process.stdin.removeAllListeners('keypress');
+            if (process.stdin.isTTY) {
+              process.stdin.setRawMode(false);
+            }
+            resolve(result);
+          });
+
+          // Handle ESC key
+          const keyListener = (_str: string, key: any) => {
+            if (key && key.name === 'escape') {
+              // Close the prompt and resolve with back action
+              (detailPrompt as any).ui.close();
+              process.stdin.removeAllListeners('keypress');
+              if (process.stdin.isTTY) {
+                process.stdin.setRawMode(false);
+              }
+              resolve({ openMethod: 'back' });
+            }
+          };
+
+          process.stdin.on('keypress', keyListener);
+        });
         
         if (openMethod === 'browser') {
           console.log(chalk.green(`Opening ${selectedUrl} in browser...`));
           await open(selectedUrl);
         } else if (openMethod === 'vscode' && selectedHost.worktreePath) {
           console.log(chalk.blue(`Opening ${selectedHost.worktreePath} in VSCode...`));
-          const { exec } = require('child_process');
           exec(`code "${selectedHost.worktreePath}"`, (error: any) => {
             if (error) {
               console.error(chalk.red(`Failed to open in VSCode: ${error.message}`));
             }
           });
           await new Promise(resolve => setTimeout(resolve, 500)); // Brief pause
+        } else if (openMethod === 'pr' && selectedHost.gitStatus?.pullRequest?.url) {
+          console.log(chalk.green(`Opening PR #${selectedHost.gitStatus.pullRequest.number} in browser...`));
+          await open(selectedHost.gitStatus.pullRequest.url);
+        } else if (openMethod === 'delete') {
+          // Show detailed information about what will be deleted
+          console.log(chalk.yellow(`\n⚠️  You are about to delete the Caddy route for:`));
+          console.log(`    Host: ${chalk.cyan(selectedHost.name)}`);
+          console.log(`    URL: ${selectedHost.url}`);
+          if (selectedHost.upstreams && selectedHost.upstreams.length > 0) {
+            console.log(`    Backend: ${selectedHost.upstreams.join(', ')}`);
+          }
+          console.log(chalk.red(`\n    This will permanently remove this host from Caddy configuration!`));
+          
+          const { confirmDelete } = await inquirer.prompt([
+            {
+              type: 'confirm',
+              name: 'confirmDelete',
+              message: `Are you sure you want to delete the route for ${chalk.cyan(selectedHost.name)}?`,
+              default: false
+            }
+          ]);
+
+          if (confirmDelete) {
+            const spinner = ora(`Deleting route for ${selectedHost.name}...`).start();
+            
+            try {
+              const success = await this.deleteHostRoute(selectedHost);
+              
+              if (success) {
+                spinner.succeed(`Successfully deleted route for ${selectedHost.name}`);
+                console.log(chalk.green(`✓ Route for ${selectedHost.name} has been removed from Caddy configuration`));
+                return 'refresh'; // Refresh the host list
+              } else {
+                spinner.fail(`Failed to delete route for ${selectedHost.name}`);
+              }
+            } catch (error) {
+              spinner.fail('Failed to delete route');
+              console.error(chalk.red((error as Error).message));
+            }
+          } else {
+            console.log(chalk.gray('Route deletion cancelled'));
+          }
         }
       }
       
@@ -372,7 +921,8 @@ class LassoCLI {
           const upstream = host.upstreams && host.upstreams.length > 0 
             ? chalk.gray(`→ ${host.upstreams.join(', ')}`)
             : '';
-          console.log(`  ${chalk.green('●')} ${chalk.cyan(host.name.padEnd(40))} ${responseTime.padEnd(8)} ${upstream}`);
+          const gitStatus = this.formatGitStatus(host.gitStatus);
+          console.log(`  ${chalk.green('●')} ${chalk.cyan(host.name.padEnd(40))} ${responseTime.padEnd(8)} ${upstream} ${gitStatus}`);
         }
       }
       
@@ -382,7 +932,8 @@ class LassoCLI {
           const upstream = host.upstreams && host.upstreams.length > 0 
             ? chalk.gray.dim(`→ ${host.upstreams.join(', ')}`)
             : chalk.gray.dim('→ (no upstream)');
-          console.log(`  ${chalk.red('●')} ${chalk.gray(host.name.padEnd(40))} ${upstream}`);
+          const gitStatus = this.formatGitStatus(host.gitStatus);
+          console.log(`  ${chalk.red('●')} ${chalk.gray(host.name.padEnd(40))} ${upstream} ${gitStatus}`);
         }
       }
       
@@ -394,9 +945,70 @@ class LassoCLI {
         const upstream = host.upstreams && host.upstreams.length > 0 
           ? chalk.gray(`→ ${host.upstreams.join(', ')}`)
           : chalk.gray('→ (no upstream)');
-        console.log(`  ${chalk.cyan(host.name.padEnd(40))} ${upstream}`);
+        const gitStatus = this.formatGitStatus(host.gitStatus);
+        console.log(`  ${chalk.cyan(host.name.padEnd(40))} ${upstream} ${gitStatus}`);
       }
       console.log('');
+    }
+  }
+
+  async deleteHostRoute(host: CaddyHost): Promise<boolean> {
+    try {
+      // Get current config
+      const config = await this.fetchCaddyConfig();
+      
+      // Find the route to delete
+      let routeFound = false;
+      let deletedCount = 0;
+      
+      if (config.apps?.http?.servers) {
+        for (const [serverName, server] of Object.entries(config.apps.http.servers)) {
+          if (server.routes) {
+            // Go through routes in reverse order to track indices for deletion
+            for (let i = server.routes.length - 1; i >= 0; i--) {
+              const route = server.routes[i];
+              if (route.match) {
+                for (const match of route.match) {
+                  if (match.host && match.host.includes(host.name)) {
+                    // Found the route for this host
+                    routeFound = true;
+                    try {
+                      const path = `/config/apps/http/servers/${serverName}/routes/${i}`;
+                      await axios.delete(`${this.caddyApiUrl}${path}`);
+                      deletedCount++;
+                      console.log(chalk.green(`✓ Deleted route for ${host.name} from server ${serverName}`));
+                    } catch (err) {
+                      console.error(chalk.red(`✗ Failed to delete route for ${host.name}: ${err}`));
+                      return false;
+                    }
+                    break; // Found and processed this host's route
+                  }
+                }
+                if (routeFound) break; // Exit route loop if we found and processed the route
+              }
+            }
+            if (routeFound) break; // Exit server loop if we found and processed the route
+          }
+        }
+      }
+
+      if (!routeFound) {
+        console.log(chalk.yellow(`No route found for ${host.name}`));
+        return false;
+      }
+
+      return deletedCount > 0;
+    } catch (error) {
+      console.error(chalk.red('Failed to delete route from Caddy configuration'));
+      if (axios.isAxiosError(error)) {
+        console.error(chalk.red(`Error: ${error.message}`));
+        if (error.response?.data) {
+          console.error(chalk.red('Response:', JSON.stringify(error.response.data, null, 2)));
+        }
+      } else {
+        console.error(chalk.red((error as Error).message));
+      }
+      return false;
     }
   }
 
@@ -545,13 +1157,11 @@ class LassoCLI {
       try {
         const hosts = await this.fetchAndCheckHosts(true);
         
-        // Check if it's time for auto-refresh
-        if (Date.now() - lastRefresh >= refreshInterval) {
-          lastRefresh = Date.now();
-          continue;
-        }
+        // Calculate remaining time until auto-refresh
+        const timeSinceRefresh = Date.now() - lastRefresh;
+        const timeUntilRefresh = Math.max(0, refreshInterval - timeSinceRefresh);
         
-        const action = await this.selectAndOpenHost(hosts);
+        const action = await this.selectAndOpenHost(hosts, timeUntilRefresh);
         
         if (action === 'exit') {
           break;
