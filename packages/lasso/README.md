@@ -75,8 +75,15 @@ By default, lasso connects to the Caddy API on port 2019. Use this option to spe
 - 🌿 Git integration with branch and worktree support
 - 🔗 GitHub Pull Request integration with status and check details
 - ⚡ Individual PR check status with detailed breakdown
-- 🗑️ Delete Caddy routes directly from the interface
+- 🗑️ Delete development environments (Caddy route + tmux session)
 - ⌨️ ESC key navigation support
+- 🖥️ Tmux session integration:
+  - Automatically detects tmux sessions (using tmuxdev naming convention)
+  - View last 25 lines of tmux session output
+  - Create new tmux sessions with `npm run dev`
+  - Shows session status in host listings
+  - Auto-cleanup of tmux sessions when deleting hosts
+- 💡 Works with offline backends - can still open in VSCode and view details
 
 ## Requirements
 
@@ -84,6 +91,7 @@ By default, lasso connects to the Caddy API on port 2019. Use this option to spe
 - Node.js 18 or higher
 - GitHub CLI (`gh`) for Pull Request integration (optional)
 - Git repositories with worktree paths for git integration (optional)
+- Tmux for session management features (optional)
 
 ## License
 

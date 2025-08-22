@@ -61,6 +61,10 @@ interface CaddyHost {
   responseTime?: number;
   statusCode?: number;
   gitStatus?: GitStatus;
+  tmuxSession?: {
+    name: string;
+    exists: boolean;
+  };
 }
 
 interface CaddyConfig {
@@ -168,6 +172,43 @@ class LassoCLI {
     return undefined;
   }
 
+  async getTmuxSessionInfo(path: string): Promise<{name: string; exists: boolean} | undefined> {
+    if (!path) return undefined;
+    
+    try {
+      // Get folder name (same logic as tmuxdev)
+      const folderName = path.split('/').pop() || 'tmuxdev';
+      
+      // Get branch name if it's a git repo
+      let branchName = '';
+      try {
+        const { stdout: branch } = await execAsync(`git -C "${path}" branch --show-current 2>/dev/null`);
+        branchName = branch.trim();
+      } catch {
+        // Not a git repo or no git installed
+      }
+      
+      // Create session name using tmuxdev logic
+      const sessionName = branchName ? `${folderName}-${branchName}` : folderName;
+      
+      // Check if session exists
+      let exists = false;
+      try {
+        await execAsync(`tmux has-session -t "${sessionName}" 2>/dev/null`);
+        exists = true;
+      } catch {
+        exists = false;
+      }
+      
+      return {
+        name: sessionName,
+        exists
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
   async getGitStatus(path: string): Promise<GitStatus | undefined> {
     try {
       // Get current branch
@@ -244,6 +285,16 @@ class LassoCLI {
     } catch {
       // Not a git repo or git not available
       return undefined;
+    }
+  }
+
+  formatTmuxStatus(tmuxSession?: {name: string; exists: boolean}): string {
+    if (!tmuxSession) return '';
+    
+    if (tmuxSession.exists) {
+      return chalk.green(`tmux:${tmuxSession.name}`);
+    } else {
+      return chalk.gray(`tmux:${tmuxSession.name}`);
     }
   }
 
@@ -568,12 +619,14 @@ class LassoCLI {
   async checkHostHealth(host: CaddyHost): Promise<CaddyHost> {
     // If no upstreams, consider it inactive
     if (!host.upstreams || host.upstreams.length === 0) {
-      // Still check git status if worktree path exists
+      // Still check git status and tmux session if worktree path exists
       const gitStatus = host.worktreePath ? await this.getGitStatus(host.worktreePath) : undefined;
+      const tmuxSession = host.worktreePath ? await this.getTmuxSessionInfo(host.worktreePath) : undefined;
       return {
         ...host,
         isActive: false,
-        gitStatus
+        gitStatus,
+        tmuxSession
       };
     }
 
@@ -609,15 +662,17 @@ class LassoCLI {
     // Host is active if any upstream is active
     const activeUpstream = results.find(r => r.isActive);
     
-    // Check git status if worktree path exists
+    // Check git status and tmux session if worktree path exists
     const gitStatus = host.worktreePath ? await this.getGitStatus(host.worktreePath) : undefined;
+    const tmuxSession = host.worktreePath ? await this.getTmuxSessionInfo(host.worktreePath) : undefined;
     
     return {
       ...host,
       isActive: !!activeUpstream,
       statusCode: activeUpstream?.statusCode,
       responseTime: activeUpstream?.responseTime || Date.now() - startTime,
-      gitStatus
+      gitStatus,
+      tmuxSession
     };
   }
 
@@ -655,9 +710,10 @@ class LassoCLI {
         ? chalk.gray(`→ ${host.upstreams.join(', ')}`)
         : chalk.gray('→ (no upstream)');
       const gitStatus = this.formatGitStatus(host.gitStatus);
+      const tmuxStatus = this.formatTmuxStatus(host.tmuxSession);
       
       return {
-        name: `${statusIcon} ${hostName} ${responseTime} ${upstream} ${gitStatus}`,
+        name: `${statusIcon} ${hostName} ${responseTime} ${upstream} ${gitStatus} ${tmuxStatus}`,
         value: host.url,
         short: host.name,
         searchText: host.name.toLowerCase(), // For search filtering
@@ -778,6 +834,11 @@ class LassoCLI {
           this.displayDetailedGitStatus(selectedHost.gitStatus);
         }
         
+        if (selectedHost.tmuxSession) {
+          const sessionStatus = selectedHost.tmuxSession.exists ? chalk.green('exists') : chalk.red('not found');
+          console.log(`    Tmux session: ${chalk.cyan(selectedHost.tmuxSession.name)} (${sessionStatus})`);
+        }
+        
         // Ask how to open
         const openChoices = [
           { name: chalk.cyan('🌐 Open in browser'), value: 'browser' },
@@ -787,11 +848,19 @@ class LassoCLI {
           openChoices.push({ name: chalk.blue('📝 Open folder in VSCode'), value: 'vscode' });
         }
         
+        if (selectedHost.tmuxSession) {
+          if (selectedHost.tmuxSession.exists) {
+            openChoices.push({ name: chalk.magenta('📜 View tmux session logs'), value: 'tmux-logs' });
+          } else {
+            openChoices.push({ name: chalk.magenta('🚀 Start tmux session'), value: 'tmux-create' });
+          }
+        }
+        
         if (selectedHost.gitStatus?.pullRequest?.url) {
           openChoices.push({ name: chalk.green('🔗 Open Pull Request'), value: 'pr' });
         }
         
-        openChoices.push({ name: chalk.red('🗑️  Delete Caddy Route'), value: 'delete' });
+        openChoices.push({ name: chalk.red('🗑️  Delete dev environment'), value: 'delete' });
         openChoices.push({ name: chalk.gray('← Back'), value: 'back' });
         
         // Create a promise that resolves when ESC is pressed or normal selection is made
@@ -850,6 +919,59 @@ class LassoCLI {
         } else if (openMethod === 'pr' && selectedHost.gitStatus?.pullRequest?.url) {
           console.log(chalk.green(`Opening PR #${selectedHost.gitStatus.pullRequest.number} in browser...`));
           await open(selectedHost.gitStatus.pullRequest.url);
+        } else if (openMethod === 'tmux-logs' && selectedHost.tmuxSession?.exists) {
+          console.log(chalk.magenta(`\nShowing last 25 lines from tmux session '${selectedHost.tmuxSession.name}':\n`));
+          try {
+            // Capture the pane output from tmux session
+            const { stdout } = await execAsync(`tmux capture-pane -t "${selectedHost.tmuxSession.name}" -p | tail -n 25`);
+            
+            // Display with a nice border
+            console.log(chalk.gray('─'.repeat(80)));
+            console.log(stdout || chalk.gray('(no output yet)'));
+            console.log(chalk.gray('─'.repeat(80)));
+            console.log('');
+            
+            // Allow user to continue
+            await inquirer.prompt([
+              {
+                type: 'input',
+                name: 'continue',
+                message: chalk.gray('Press Enter to continue...'),
+              }
+            ]);
+          } catch (error) {
+            console.error(chalk.red(`Failed to get tmux session logs: ${(error as Error).message}`));
+          }
+        } else if (openMethod === 'tmux-create' && selectedHost.tmuxSession && selectedHost.worktreePath) {
+          console.log(chalk.magenta(`Creating tmux session '${selectedHost.tmuxSession.name}' and starting dev server...`));
+          try {
+            // Create session
+            await execAsync(`tmux new-session -d -s "${selectedHost.tmuxSession.name}"`);
+            // Change to the worktree directory and start dev server
+            await execAsync(`tmux send-keys -t "${selectedHost.tmuxSession.name}" "cd '${selectedHost.worktreePath}'" Enter`);
+            await execAsync(`tmux send-keys -t "${selectedHost.tmuxSession.name}" "npm run dev" Enter`);
+            console.log(chalk.green(`Tmux session '${selectedHost.tmuxSession.name}' created and dev server started`));
+            
+            console.log(chalk.yellow(`\nSession created! To attach manually, run:`));
+            console.log(chalk.cyan(`  tmux attach-session -t '${selectedHost.tmuxSession.name}'`));
+            console.log('');
+            
+            // Wait a moment for the dev server to start
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            
+            // Show initial output
+            console.log(chalk.magenta(`Initial output from dev server:\n`));
+            try {
+              const { stdout } = await execAsync(`tmux capture-pane -t "${selectedHost.tmuxSession.name}" -p | tail -n 25`);
+              console.log(chalk.gray('─'.repeat(80)));
+              console.log(stdout || chalk.gray('(starting up...)'));
+              console.log(chalk.gray('─'.repeat(80)));
+            } catch (error) {
+              console.log(chalk.gray('(unable to capture initial output)'));
+            }
+          } catch (error) {
+            console.error(chalk.red(`Failed to create tmux session: ${(error as Error).message}`));
+          }
         } else if (openMethod === 'delete') {
           // Show detailed information about what will be deleted
           console.log(chalk.yellow(`\n⚠️  You are about to delete the Caddy route for:`));
@@ -876,6 +998,17 @@ class LassoCLI {
               const success = await this.deleteHostRoute(selectedHost);
               
               if (success) {
+                // Also kill tmux session if it exists
+                if (selectedHost.tmuxSession?.exists) {
+                  spinner.text = `Route deleted, killing tmux session '${selectedHost.tmuxSession.name}'...`;
+                  try {
+                    await execAsync(`tmux kill-session -t "${selectedHost.tmuxSession.name}"`);
+                    console.log(chalk.green(`✓ Killed tmux session '${selectedHost.tmuxSession.name}'`));
+                  } catch (error) {
+                    console.log(chalk.yellow(`⚠️  Failed to kill tmux session: ${(error as Error).message}`));
+                  }
+                }
+                
                 spinner.succeed(`Successfully deleted route for ${selectedHost.name}`);
                 console.log(chalk.green(`✓ Route for ${selectedHost.name} has been removed from Caddy configuration`));
                 return 'refresh'; // Refresh the host list
@@ -922,7 +1055,8 @@ class LassoCLI {
             ? chalk.gray(`→ ${host.upstreams.join(', ')}`)
             : '';
           const gitStatus = this.formatGitStatus(host.gitStatus);
-          console.log(`  ${chalk.green('●')} ${chalk.cyan(host.name.padEnd(40))} ${responseTime.padEnd(8)} ${upstream} ${gitStatus}`);
+          const tmuxStatus = this.formatTmuxStatus(host.tmuxSession);
+          console.log(`  ${chalk.green('●')} ${chalk.cyan(host.name.padEnd(40))} ${responseTime.padEnd(8)} ${upstream} ${gitStatus} ${tmuxStatus}`);
         }
       }
       
@@ -933,7 +1067,8 @@ class LassoCLI {
             ? chalk.gray.dim(`→ ${host.upstreams.join(', ')}`)
             : chalk.gray.dim('→ (no upstream)');
           const gitStatus = this.formatGitStatus(host.gitStatus);
-          console.log(`  ${chalk.red('●')} ${chalk.gray(host.name.padEnd(40))} ${upstream} ${gitStatus}`);
+          const tmuxStatus = this.formatTmuxStatus(host.tmuxSession);
+          console.log(`  ${chalk.red('●')} ${chalk.gray(host.name.padEnd(40))} ${upstream} ${gitStatus} ${tmuxStatus}`);
         }
       }
       
@@ -946,7 +1081,8 @@ class LassoCLI {
           ? chalk.gray(`→ ${host.upstreams.join(', ')}`)
           : chalk.gray('→ (no upstream)');
         const gitStatus = this.formatGitStatus(host.gitStatus);
-        console.log(`  ${chalk.cyan(host.name.padEnd(40))} ${upstream} ${gitStatus}`);
+        const tmuxStatus = this.formatTmuxStatus(host.tmuxSession);
+        console.log(`  ${chalk.cyan(host.name.padEnd(40))} ${upstream} ${gitStatus} ${tmuxStatus}`);
       }
       console.log('');
     }
@@ -1096,6 +1232,20 @@ class LassoCLI {
       }
 
       spinner.succeed(`Removed ${deletedCount} route(s) with offline hosts from Caddy configuration`);
+      
+      // Kill tmux sessions for removed hosts
+      const sessionsToKill = offlineHosts.filter(h => h.tmuxSession?.exists);
+      if (sessionsToKill.length > 0) {
+        console.log(chalk.yellow(`\nKilling tmux sessions for removed hosts...`));
+        for (const host of sessionsToKill) {
+          try {
+            await execAsync(`tmux kill-session -t "${host.tmuxSession!.name}"`);
+            console.log(`  ${chalk.green('✓')} Killed session '${host.tmuxSession!.name}'`);
+          } catch (error) {
+            console.log(`  ${chalk.yellow('⚠️')} Failed to kill session '${host.tmuxSession!.name}': ${(error as Error).message}`);
+          }
+        }
+      }
       
       // Show removed hosts
       console.log(chalk.green('\nRemoved hosts:'));
