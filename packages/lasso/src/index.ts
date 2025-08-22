@@ -661,7 +661,7 @@ class LassoCLI {
         value: host.url,
         short: host.name,
         searchText: host.name.toLowerCase(), // For search filtering
-        disabled: !host.isActive ? chalk.red('(Backend offline)') : false,
+        disabled: false, // Allow selection of offline hosts too
         host: host
       };
     });
