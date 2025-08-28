@@ -274,7 +274,7 @@ async function createWorktree(branchName?: string) {
 
   // Replace forward slashes with hyphens for directory name
   const safeBranchName = selectedBranch.replace(/\//g, '-');
-  const prefix = config.worktree?.prefix || 'assurix';
+  const prefix = config.worktree?.prefix || '';
   
   // Use custom location pattern if provided
   let worktreePath: string;
