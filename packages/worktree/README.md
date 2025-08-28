@@ -39,6 +39,13 @@ worktree feature/new-feature
 npx @adamhancock/worktree feature/new-feature
 ```
 
+### Create worktree without opening VS Code
+```bash
+worktree --no-vscode
+# or with a specific branch
+worktree feature/new-feature --no-vscode
+```
+
 ## How it works
 
 1. Fetches latest branches from origin

@@ -243,6 +243,12 @@ async function createWorktree(branchName?: string) {
   // Load configuration
   const config = await loadConfig();
   
+  // Check for --no-vscode flag
+  const noVscode = argv['no-vscode'] || argv['novscode'] || false;
+  if (noVscode) {
+    config.vscode = { ...config.vscode, open: false };
+  }
+  
   // Check if we're in a git repository
   if (!await isGitRepository()) {
     echo(chalk.red('Error: Not in a git repository'));
