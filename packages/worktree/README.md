@@ -42,7 +42,7 @@ npx @adamhancock/worktree feature/new-feature
 ## How it works
 
 1. Fetches latest branches from origin
-2. Creates a new worktree in `../assurix-{branch-name}`
+2. Creates a new worktree in `../<prefix>-{branch-name}`
 3. Handles existing local branches, remote branches, or creates new branches
 4. Sets up branch tracking (without auto-pushing new branches)
 5. Copies all `.env` files from the original repository
@@ -104,7 +104,7 @@ You can customize the behavior by creating a `.worktreerc.json` file in your pro
 - `vscode.open`: Whether to open VS Code after creating worktree (default: `true`)
 
 #### Worktree
-- `worktree.prefix`: Prefix for worktree directory names (default: `"assurix"`)
+- `worktree.prefix`: Prefix for worktree directory names (default: `""`)
 - `worktree.location`: Custom location pattern for worktrees. Supports placeholders:
   - `{prefix}`: The configured prefix
   - `{branch}`: The branch name with slashes replaced by hyphens

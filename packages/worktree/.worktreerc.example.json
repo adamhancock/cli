@@ -5,7 +5,7 @@
     "open": true
   },
   "worktree": {
-    "prefix": "assurix",
+    "prefix": "test",
     "location": "../worktrees/{prefix}-{branch}"
   },
   "git": {
