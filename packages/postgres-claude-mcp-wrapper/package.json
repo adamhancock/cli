@@ -1,0 +1,26 @@
+{
+  "name": "@adamhancock/postgres-claude-mcp-wrapper",
+  "version": "1.0.0",
+  "description": "",
+  "type": "module",
+  "main": "index.js",
+  "bin": {
+    "postgres-mcp-setup": "./setup-mcp.ts"
+  },
+  "scripts": {
+    "setup": "tsx setup-mcp.ts",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "packageManager": "pnpm@10.13.1",
+  "dependencies": {
+    "zx": "^8.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.1",
+    "dotenv": "^17.2.2",
+    "tsx": "^4.20.5"
+  }
+}
