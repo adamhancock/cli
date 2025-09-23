@@ -41,6 +41,15 @@ lasso -c
 
 This will check backend health for all hosts and offer to remove offline hosts from your Caddy configuration. You'll be prompted to confirm before any changes are made.
 
+### Cleanup Merged PR Hosts
+```bash
+lasso --cleanup-merged
+# or
+lasso -m
+```
+
+This will check git status for all hosts and offer to remove hosts that have merged pull requests from your Caddy configuration. This is useful for cleaning up development environments after PRs are merged. You'll be prompted to confirm before any changes are made.
+
 ### Skip Health Checks
 ```bash
 lasso --skip-health
@@ -65,6 +74,7 @@ By default, lasso connects to the Caddy API on port 2019. Use this option to spe
 - 🏥 Checks backend/upstream server health (not just the proxy)
 - ✅ Shows active hosts first with response times
 - 🧹 Cleanup command to remove offline hosts from Caddy
+- 🔵 Cleanup merged PR environments to keep your dev setup tidy
 - 🎯 Interactive menu with searchable/filterable host selection
 - 🔤 Type-to-filter hosts with smart sorting (matches starting with search term appear first)
 - 🚀 Opens selected host in browser or VSCode (when worktree path is available)

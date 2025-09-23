@@ -726,13 +726,21 @@ class LassoCLI {
     const actionChoices = [
       { name: chalk.yellow('[r] ↻ Refresh now'), value: 'REFRESH', short: 'Refresh', searchText: 'refresh' }
     ];
-    
+
     if (hasOfflineHosts) {
       actionChoices.push(
         { name: chalk.red('[c] 🧹 Cleanup offline hosts'), value: 'CLEANUP', short: 'Cleanup', searchText: 'cleanup' }
       );
     }
-    
+
+    // Check for hosts with merged PRs
+    const hasMergedPRHosts = hosts.some(h => h.gitStatus?.pullRequest?.state === 'MERGED');
+    if (hasMergedPRHosts) {
+      actionChoices.push(
+        { name: chalk.blue('[m] 🔵 Cleanup merged PR hosts'), value: 'CLEANUP_MERGED', short: 'Cleanup Merged', searchText: 'cleanup merged pr' }
+      );
+    }
+
     actionChoices.push(
       { name: chalk.gray('[q] Exit'), value: 'EXIT', short: 'Exit', searchText: 'exit quit' }
     );
@@ -809,6 +817,9 @@ class LassoCLI {
       return 'refresh';
     } else if (selectedUrl === 'CLEANUP') {
       await this.cleanupOfflineHosts(hosts);
+      return 'refresh';
+    } else if (selectedUrl === 'CLEANUP_MERGED') {
+      await this.cleanupMergedPRHosts(hosts);
       return 'refresh';
     } else if (selectedUrl) {
       // Find the selected host
@@ -1148,9 +1159,129 @@ class LassoCLI {
     }
   }
 
+  async cleanupMergedPRHosts(hosts: CaddyHost[]): Promise<void> {
+    const mergedPRHosts = hosts.filter(h => h.gitStatus?.pullRequest?.state === 'MERGED');
+
+    if (mergedPRHosts.length === 0) {
+      console.log(chalk.green('No hosts with merged PRs found, nothing to clean up'));
+      return;
+    }
+
+    console.log(chalk.yellow(`\nFound ${mergedPRHosts.length} host(s) with merged PRs:\n`));
+    for (const host of mergedPRHosts) {
+      const prInfo = `PR #${host.gitStatus?.pullRequest?.number}`;
+      const upstream = host.upstreams && host.upstreams.length > 0
+        ? chalk.gray(`→ ${host.upstreams.join(', ')}`)
+        : chalk.gray('→ (no upstream)');
+      console.log(`  ${chalk.blue('🔵')} ${chalk.cyan(host.name)} ${chalk.blue(prInfo)} ${upstream}`);
+    }
+
+    const { confirmCleanup } = await inquirer.prompt([
+      {
+        type: 'confirm',
+        name: 'confirmCleanup',
+        message: `Remove ${mergedPRHosts.length} host(s) with merged PRs from Caddy configuration?`,
+        default: false
+      }
+    ]);
+
+    if (!confirmCleanup) {
+      console.log(chalk.gray('Cleanup cancelled'));
+      return;
+    }
+
+    const spinner = ora('Removing hosts with merged PRs from Caddy...').start();
+
+    try {
+      // Get current config
+      const config = await this.fetchCaddyConfig();
+
+      // Create a set of host names with merged PRs for quick lookup
+      const mergedPRHostNames = new Set(mergedPRHosts.map(h => h.name));
+
+      // Find routes to delete (track by server and index)
+      const routesToDelete: Array<{server: string, routeIndex: number, routeId?: string}> = [];
+
+      if (config.apps?.http?.servers) {
+        for (const [serverName, server] of Object.entries(config.apps.http.servers)) {
+          if (server.routes) {
+            // Go through routes in reverse order to track indices for deletion
+            for (let i = server.routes.length - 1; i >= 0; i--) {
+              const route = server.routes[i];
+              if (route.match) {
+                for (const match of route.match) {
+                  if (match.host) {
+                    // Check if any host in this route has a merged PR
+                    const hasMergedPRHost = match.host.some(host => mergedPRHostNames.has(host));
+                    if (hasMergedPRHost) {
+                      routesToDelete.push({
+                        server: serverName,
+                        routeIndex: i,
+                        routeId: (route as any)['@id']
+                      });
+                      break; // Found merged PR host, mark for deletion
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // Delete routes one by one (in reverse order to maintain indices)
+      let deletedCount = 0;
+      for (const {server, routeIndex, routeId} of routesToDelete) {
+        try {
+          const path = `/config/apps/http/servers/${server}/routes/${routeIndex}`;
+          await axios.delete(`${this.caddyApiUrl}${path}`);
+          deletedCount++;
+          spinner.text = `Removed ${deletedCount}/${routesToDelete.length} route(s)...`;
+        } catch (err) {
+          // Continue even if one fails
+          console.warn(chalk.yellow(`Failed to delete route ${routeId || routeIndex}`));
+        }
+      }
+
+      spinner.succeed(`Removed ${deletedCount} route(s) with merged PRs from Caddy configuration`);
+
+      // Kill tmux sessions for removed hosts
+      const sessionsToKill = mergedPRHosts.filter(h => h.tmuxSession?.exists);
+      if (sessionsToKill.length > 0) {
+        console.log(chalk.yellow(`\nKilling tmux sessions for removed hosts...`));
+        for (const host of sessionsToKill) {
+          try {
+            await execAsync(`tmux kill-session -t "${host.tmuxSession!.name}"`);
+            console.log(`  ${chalk.green('✓')} Killed session '${host.tmuxSession!.name}'`);
+          } catch (error) {
+            console.log(`  ${chalk.yellow('⚠️')} Failed to kill session '${host.tmuxSession!.name}': ${(error as Error).message}`);
+          }
+        }
+      }
+
+      // Show removed hosts
+      console.log(chalk.green('\nRemoved hosts with merged PRs:'));
+      for (const host of mergedPRHosts) {
+        console.log(`  ${chalk.blue('✓')} ${chalk.gray(host.name)} (PR #${host.gitStatus?.pullRequest?.number} merged)`);
+      }
+
+    } catch (error) {
+      spinner.fail('Failed to update Caddy configuration');
+      if (axios.isAxiosError(error)) {
+        console.error(chalk.red(`Error: ${error.message}`));
+        if (error.response?.data) {
+          console.error(chalk.red('Response:', JSON.stringify(error.response.data, null, 2)));
+        }
+      } else {
+        console.error(chalk.red((error as Error).message));
+      }
+      process.exit(1);
+    }
+  }
+
   async cleanupOfflineHosts(hosts: CaddyHost[]): Promise<void> {
     const offlineHosts = hosts.filter(h => !h.isActive);
-    
+
     if (offlineHosts.length === 0) {
       console.log(chalk.green('All hosts are active, nothing to clean up'));
       return;
@@ -1158,7 +1289,7 @@ class LassoCLI {
 
     console.log(chalk.yellow(`\nFound ${offlineHosts.length} offline host(s):\n`));
     for (const host of offlineHosts) {
-      const upstream = host.upstreams && host.upstreams.length > 0 
+      const upstream = host.upstreams && host.upstreams.length > 0
         ? chalk.gray(`→ ${host.upstreams.join(', ')}`)
         : chalk.gray('→ (no upstream)');
       console.log(`  ${chalk.red('●')} ${chalk.gray(host.name)} ${upstream}`);
@@ -1331,7 +1462,7 @@ class LassoCLI {
     }
   }
 
-  async run(options: { list?: boolean; port?: number; skipHealth?: boolean; cleanup?: boolean }): Promise<void> {
+  async run(options: { list?: boolean; port?: number; skipHealth?: boolean; cleanup?: boolean; cleanupMerged?: boolean }): Promise<void> {
     if (options.port) {
       this.caddyApiUrl = `http://localhost:${options.port}`;
     }
@@ -1339,6 +1470,9 @@ class LassoCLI {
     if (options.cleanup) {
       const hosts = await this.fetchAndCheckHosts(true);
       await this.cleanupOfflineHosts(hosts);
+    } else if (options.cleanupMerged) {
+      const hosts = await this.fetchAndCheckHosts(true);
+      await this.cleanupMergedPRHosts(hosts);
     } else if (options.list) {
       const spinner = ora('Fetching Caddy configuration...').start();
       try {
@@ -1377,13 +1511,15 @@ program
   .option('-p, --port <port>', 'Caddy API port (default: 2019)', '2019')
   .option('-s, --skip-health', 'Skip health checks for faster listing')
   .option('-c, --cleanup', 'Remove offline hosts from Caddy configuration')
+  .option('-m, --cleanup-merged', 'Remove hosts with merged PRs from Caddy configuration')
   .action(async (options) => {
     const cli = new LassoCLI();
     await cli.run({
       list: options.list,
       port: parseInt(options.port),
       skipHealth: options.skipHealth,
-      cleanup: options.cleanup
+      cleanup: options.cleanup,
+      cleanupMerged: options.cleanupMerged
     });
   });
 
