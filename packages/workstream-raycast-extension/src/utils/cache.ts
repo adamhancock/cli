@@ -53,3 +53,35 @@ export function setCachedInstances(instances: InstanceWithStatus[]): void {
 export function clearCache(): void {
   cache.remove(CACHE_KEY);
 }
+
+const USAGE_HISTORY_KEY = 'usage-history';
+
+export interface UsageHistory {
+  [path: string]: number; // path -> timestamp of last access
+}
+
+/**
+ * Record that a workspace was accessed via Raycast
+ */
+export function recordUsage(path: string): void {
+  try {
+    const cached = cache.get(USAGE_HISTORY_KEY);
+    const history: UsageHistory = cached ? JSON.parse(cached) : {};
+    history[path] = Date.now();
+    cache.set(USAGE_HISTORY_KEY, JSON.stringify(history));
+  } catch (error) {
+    console.error('Failed to record usage:', error);
+  }
+}
+
+/**
+ * Get usage history for sorting
+ */
+export function getUsageHistory(): UsageHistory {
+  try {
+    const cached = cache.get(USAGE_HISTORY_KEY);
+    return cached ? JSON.parse(cached) : {};
+  } catch {
+    return {};
+  }
+}

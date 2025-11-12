@@ -4,7 +4,7 @@ import { getVSCodeInstances, focusVSCodeInstance } from './utils/vscode';
 import { getGitInfo } from './utils/git';
 import { getPRStatus } from './utils/github';
 import { isClaudeCodeActive } from './utils/claude';
-import { getCachedInstances, setCachedInstances, clearCache } from './utils/cache';
+import { getCachedInstances, setCachedInstances, clearCache, recordUsage, getUsageHistory } from './utils/cache';
 import { loadFromDaemon, triggerDaemonRefresh, subscribeToUpdates } from './utils/daemon-client';
 import type { InstanceWithStatus } from './types';
 
@@ -28,7 +28,7 @@ export default function Command() {
       (updatedInstances) => {
         console.log('Received real-time update:', updatedInstances.length);
         setIsRealtimeMode(true);
-        setInstances(updatedInstances);
+        setInstances(sortByUsageHistory(updatedInstances));
         setIsLoading(false);
       },
       () => {
@@ -77,7 +77,7 @@ export default function Command() {
       const daemonInstances = await loadFromDaemon();
       if (daemonInstances && daemonInstances.length > 0) {
         console.log('Using daemon cache:', daemonInstances.length);
-        setInstances(daemonInstances);
+        setInstances(sortByUsageHistory(daemonInstances));
         setIsLoading(false);
         return;
       }
@@ -86,7 +86,7 @@ export default function Command() {
       const daemonInstances = await loadFromDaemon();
       if (daemonInstances && daemonInstances.length > 0) {
         console.log('Using refreshed daemon cache:', daemonInstances.length);
-        setInstances(daemonInstances);
+        setInstances(sortByUsageHistory(daemonInstances));
         setIsLoading(false);
         return;
       }
@@ -97,7 +97,7 @@ export default function Command() {
       const cached = getCachedInstances();
       if (cached && cached.length > 0) {
         console.log('Using Raycast cache:', cached.length);
-        setInstances(cached);
+        setInstances(sortByUsageHistory(cached));
         setIsLoading(false);
         return;
       }
@@ -117,8 +117,8 @@ export default function Command() {
         return;
       }
 
-      // Show instances immediately with basic info
-      setInstances(basicInstances);
+      // Show instances immediately with basic info (sorted)
+      setInstances(sortByUsageHistory(basicInstances));
       setIsLoading(false);
 
       // Enrich with metadata in the background - but do it progressively
@@ -136,7 +136,7 @@ export default function Command() {
           return enriched;
         })
       );
-      setInstances(withGitInfo);
+      setInstances(sortByUsageHistory(withGitInfo));
 
       // Second pass: PR status and Claude (slower, network calls)
       const fullyEnriched = await Promise.all(
@@ -166,10 +166,11 @@ export default function Command() {
         })
       );
 
-      setInstances(fullyEnriched);
+      const sortedEnriched = sortByUsageHistory(fullyEnriched);
+      setInstances(sortedEnriched);
 
-      // Cache the fully enriched instances
-      setCachedInstances(fullyEnriched);
+      // Cache the fully enriched instances (sorted)
+      setCachedInstances(sortedEnriched);
     } catch (error) {
       console.error('Error in loadInstances:', error);
       await showToast({
@@ -184,6 +185,9 @@ export default function Command() {
 
   async function switchToInstance(instance: InstanceWithStatus) {
     try {
+      // Record usage for sorting next time
+      recordUsage(instance.path);
+
       await focusVSCodeInstance(instance.path);
 
       // Close Raycast window immediately after switching
@@ -195,6 +199,23 @@ export default function Command() {
         message: error instanceof Error ? error.message : 'Unknown error',
       });
     }
+  }
+
+  function sortByUsageHistory(instances: InstanceWithStatus[]): InstanceWithStatus[] {
+    const usageHistory = getUsageHistory();
+
+    return [...instances].sort((a, b) => {
+      const aTime = usageHistory[a.path] || 0;
+      const bTime = usageHistory[b.path] || 0;
+
+      // Most recently used first
+      if (aTime !== bTime) {
+        return bTime - aTime;
+      }
+
+      // If both never used or same time, sort alphabetically
+      return a.name.localeCompare(b.name);
+    });
   }
 
   function getStatusIcon(instance: InstanceWithStatus): Icon {
