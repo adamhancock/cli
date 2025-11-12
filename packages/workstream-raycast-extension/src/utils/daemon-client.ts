@@ -136,7 +136,20 @@ export function subscribeToUpdates(
       reconnectTimer = null;
     }
     if (ws) {
-      ws.close();
+      // Remove all event listeners first to prevent any events from firing during/after cleanup
+      ws.removeAllListeners();
+
+      // Check readyState before closing to avoid "WebSocket was closed before the connection was established" error
+      // CONNECTING (0): Connection has not yet been established
+      // OPEN (1): Connection is open and ready to communicate
+      // CLOSING (2): Connection is in the process of closing
+      // CLOSED (3): Connection is closed
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.close();
+      }
+      // For CONNECTING state, don't call close() or terminate() - both throw errors
+      // Just abandon the connection by setting isClosing=true and removing listeners
+      // The underlying connection will be garbage collected
       ws = null;
     }
   };
