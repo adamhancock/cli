@@ -19,6 +19,8 @@ declare namespace Preferences {
   export type CreateWorktree = ExtensionPreferences & {}
   /** Preferences accessible in the `cleanup-environments` command */
   export type CleanupEnvironments = ExtensionPreferences & {}
+  /** Preferences accessible in the `open-dev-environment` command */
+  export type OpenDevEnvironment = ExtensionPreferences & {}
 }
 
 declare namespace Arguments {
@@ -28,5 +30,7 @@ declare namespace Arguments {
   export type CreateWorktree = {}
   /** Arguments passed to the `cleanup-environments` command */
   export type CleanupEnvironments = {}
+  /** Arguments passed to the `open-dev-environment` command */
+  export type OpenDevEnvironment = {}
 }
 

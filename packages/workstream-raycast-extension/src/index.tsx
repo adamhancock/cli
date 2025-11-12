@@ -165,6 +165,7 @@ export default function Command() {
       setInstances(sortByUsageHistory(withGitInfo));
 
       // Second pass: PR status and Claude (slower, network calls)
+      // Note: Caddy host info now comes from the daemon automatically
       const fullyEnriched = await Promise.all(
         withGitInfo.map(async (instance) => {
           const enriched: InstanceWithStatus = { ...instance };
@@ -225,6 +226,18 @@ export default function Command() {
         title: 'Failed to switch window',
         message: error instanceof Error ? error.message : 'Unknown error',
       });
+    }
+  }
+
+  function getSpotlightUrl(instance: InstanceWithStatus): string | null {
+    if (!instance.caddyHost) return null;
+
+    try {
+      const url = new URL(instance.caddyHost.url);
+      // Spotlight UI is on port 8888
+      return `https://${url.hostname}:8888`;
+    } catch {
+      return null;
     }
   }
 
@@ -425,6 +438,14 @@ export default function Command() {
       });
     }
 
+    // Show Caddy host status
+    if (instance.caddyHost) {
+      accessories.push({
+        icon: { source: Icon.Globe, tintColor: Color.Blue },
+        tooltip: `Dev environment: ${instance.caddyHost.url}`,
+      });
+    }
+
     if (instance.prStatus?.checks) {
       const { passing, failing, pending, total } = instance.prStatus.checks;
       accessories.push({
@@ -614,6 +635,23 @@ export default function Command() {
                         </List.Item.Detail.Metadata.TagList>
                       </>
                     )}
+
+                    {instance.caddyHost && (
+                      <>
+                        <List.Item.Detail.Metadata.Separator />
+                        <List.Item.Detail.Metadata.Link
+                          title="Dev Environment"
+                          text={instance.caddyHost.name}
+                          target={instance.caddyHost.url}
+                        />
+                        {instance.caddyHost.upstreams && instance.caddyHost.upstreams.length > 0 && (
+                          <List.Item.Detail.Metadata.Label
+                            title="Backend"
+                            text={instance.caddyHost.upstreams.join(', ')}
+                          />
+                        )}
+                      </>
+                    )}
                   </List.Item.Detail.Metadata>
                 }
               />
@@ -629,6 +667,22 @@ export default function Command() {
                 />
                 {instance.prStatus && (
                   <Action.OpenInBrowser title="Open PR" url={instance.prStatus.url} icon={Icon.Globe} />
+                )}
+                {instance.caddyHost && (
+                  <Action.OpenInBrowser
+                    title="Open Dev Environment"
+                    url={instance.caddyHost.url}
+                    icon={Icon.Link}
+                    shortcut={{ modifiers: ['cmd'], key: 'o' }}
+                  />
+                )}
+                {getSpotlightUrl(instance) && (
+                  <Action.OpenInBrowser
+                    title="Open Spotlight"
+                    url={getSpotlightUrl(instance)!}
+                    icon={Icon.Eye}
+                    shortcut={{ modifiers: ['cmd', 'shift'], key: 's' }}
+                  />
                 )}
 
                 {instance.tmuxStatus?.exists && (

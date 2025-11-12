@@ -28,6 +28,13 @@
       "subtitle": "Workstream",
       "description": "Bulk close VS Code windows, tmux sessions, and Caddy routes for merged/closed PRs and old worktrees",
       "mode": "view"
+    },
+    {
+      "name": "open-dev-environment",
+      "title": "Open Dev Environment",
+      "subtitle": "Workstream",
+      "description": "Quick access to open your Caddy-hosted development environments in the browser",
+      "mode": "view"
     }
   ],
   "dependencies": {

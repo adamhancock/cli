@@ -63,11 +63,21 @@ interface TmuxStatus {
   exists: boolean;
 }
 
+interface CaddyHost {
+  name: string;
+  url: string;
+  upstreams?: string[];
+  worktreePath?: string;
+  routes?: unknown[];
+  isActive?: boolean;
+}
+
 interface InstanceWithMetadata extends VSCodeInstance {
   gitInfo?: GitInfo;
   prStatus?: PRStatus;
   claudeStatus?: ClaudeStatus;
   tmuxStatus?: TmuxStatus;
+  caddyHost?: CaddyHost;
   lastUpdated: number;
 }
 
@@ -257,6 +267,12 @@ class WorkstreamDaemon {
     log('Daemon stopped');
   }
 
+  private getMinutesUntilReset(resetTimestamp: number): number {
+    const now = Math.floor(Date.now() / 1000); // Current time in seconds
+    const secondsUntilReset = resetTimestamp - now;
+    return Math.ceil(secondsUntilReset / 60); // Convert to minutes, round up
+  }
+
   private async checkGitHubRateLimit(): Promise<void> {
     try {
       const result = await $`/opt/homebrew/bin/gh api rate_limit`;
@@ -270,10 +286,14 @@ class WorkstreamDaemon {
       const effectiveLimit = coreLimit.remaining < graphqlLimit.remaining ? coreLimit : graphqlLimit;
       this.ghRateLimit = effectiveLimit;
 
-      // Log both limits for visibility
+      // Calculate time until reset
+      const coreMinutesUntilReset = this.getMinutesUntilReset(coreLimit.reset);
+      const graphqlMinutesUntilReset = this.getMinutesUntilReset(graphqlLimit.reset);
+
+      // Log both limits for visibility with reset times
       const corePercent = Math.round((coreLimit.remaining / coreLimit.limit) * 100);
       const graphqlPercent = Math.round((graphqlLimit.remaining / graphqlLimit.limit) * 100);
-      log(`GitHub Rate Limits - Core: ${corePercent}% remaining (${coreLimit.remaining}/${coreLimit.limit}), GraphQL: ${graphqlPercent}% remaining (${graphqlLimit.remaining}/${graphqlLimit.limit})`);
+      log(`GitHub Rate Limits - Core: ${corePercent}% remaining (${coreLimit.remaining}/${coreLimit.limit}), resets in ${coreMinutesUntilReset}m, GraphQL: ${graphqlPercent}% remaining (${graphqlLimit.remaining}/${graphqlLimit.limit}), resets in ${graphqlMinutesUntilReset}m`);
 
       // Adjust polling interval based on rate limit
       if (this.ghRateLimit!.remaining < RATE_LIMIT_THRESHOLD) {
@@ -375,6 +395,9 @@ class WorkstreamDaemon {
               const claudeState = enriched.claudeStatus.isWaiting ? 'waiting' : enriched.claudeStatus.isWorking ? 'working' : 'idle';
               log(`     🤖 Claude: ${claudeState} (pid ${enriched.claudeStatus.pid})`);
             }
+            if (enriched.caddyHost) {
+              log(`     🌐 Caddy: ${enriched.caddyHost.url}`);
+            }
           }
         }
       }
@@ -466,6 +489,9 @@ class WorkstreamDaemon {
 
     // Get tmux status (local, fast)
     enriched.tmuxStatus = await this.getTmuxStatus(instance.path, enriched.gitInfo?.branch);
+
+    // Get Caddy host info (local API call, fast)
+    enriched.caddyHost = await this.getCaddyHost(instance.path);
 
     return enriched;
   }
@@ -637,6 +663,90 @@ class WorkstreamDaemon {
         exists,
       };
     } catch {
+      return undefined;
+    }
+  }
+
+  private async getCaddyHost(repoPath: string): Promise<CaddyHost | undefined> {
+    try {
+      // Fetch Caddy config from API
+      const response = await fetch('http://localhost:2019/config/');
+      if (!response.ok) {
+        return undefined;
+      }
+
+      const config: any = await response.json();
+
+      // Extract hosts and find matching worktree path
+      const normalizedPath = repoPath.replace(/\/$/, ''); // Remove trailing slash
+
+      if (config.apps?.http?.servers) {
+        for (const [serverName, server] of Object.entries<any>(config.apps.http.servers)) {
+          if (server.routes) {
+            for (const route of server.routes) {
+              if (route.match) {
+                for (const match of route.match) {
+                  if (match.host) {
+                    for (const hostName of match.host) {
+                      // Extract upstreams and worktree path
+                      const upstreams: Set<string> = new Set();
+                      let worktreePath: string | undefined;
+
+                      const extractData = (handlers: any[]) => {
+                        if (!handlers) return;
+
+                        for (const handler of handlers) {
+                          if (handler.handler === 'reverse_proxy') {
+                            if (Array.isArray(handler.upstreams)) {
+                              for (const upstream of handler.upstreams) {
+                                if (upstream.dial) {
+                                  upstreams.add(upstream.dial);
+                                }
+                              }
+                            }
+
+                            // Extract worktree path from headers
+                            if (handler.headers?.response?.set?.['X-Worktree-Path']?.[0]) {
+                              worktreePath = handler.headers.response.set['X-Worktree-Path'][0];
+                            }
+                          } else if (handler.handler === 'subroute' && Array.isArray(handler.routes)) {
+                            for (const subroute of handler.routes) {
+                              if (subroute.handle) {
+                                extractData(subroute.handle);
+                              }
+                            }
+                          }
+                        }
+                      };
+
+                      if (route.handle) {
+                        extractData(route.handle);
+                      }
+
+                      // Check if this host matches the worktree path
+                      if (worktreePath && worktreePath.replace(/\/$/, '') === normalizedPath) {
+                        const protocol = serverName.includes('https') || serverName === 'srv1' ? 'https' : 'http';
+                        return {
+                          name: hostName,
+                          url: `${protocol}://${hostName}`,
+                          upstreams: upstreams.size > 0 ? Array.from(upstreams) : undefined,
+                          worktreePath,
+                          routes: route.handle,
+                          isActive: true,
+                        };
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      return undefined;
+    } catch (error) {
+      // Caddy might not be running, silently return undefined
       return undefined;
     }
   }
