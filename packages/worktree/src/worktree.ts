@@ -296,14 +296,17 @@ async function createWorktree(branchName?: string) {
   echo(chalk.cyan(`Creating worktree for branch: ${selectedBranch}`));
   echo(chalk.gray(`Worktree path: ${worktreePath}`));
 
-  // Check if worktree directory already exists
-  if (fs.existsSync(worktreePath)) {
-    echo(chalk.red(`Error: Directory ${worktreePath} already exists`));
-    process.exit(1);
-  }
-
   // Store the original directory
   const originalDir = process.cwd();
+
+  // Resolve to absolute path for existence check
+  const absoluteWorktreePath = resolve(originalDir, worktreePath);
+
+  // Check if worktree directory already exists
+  if (fs.existsSync(absoluteWorktreePath)) {
+    echo(chalk.red(`Error: Directory ${absoluteWorktreePath} already exists`));
+    process.exit(1);
+  }
 
   // Fetch latest from remote (skip if it would cause conflicts or disabled)
   if (config.git?.fetch !== false) {
@@ -352,8 +355,7 @@ async function createWorktree(branchName?: string) {
     process.exit(1);
   }
 
-  // Get absolute path and change to the worktree directory
-  const absoluteWorktreePath = resolve(originalDir, worktreePath);
+  // Change to the worktree directory
   process.chdir(absoluteWorktreePath);
   
   // Wait a moment for git to settle after worktree creation
@@ -482,7 +484,6 @@ async function createWorktree(branchName?: string) {
 
   // Open in VS Code (after hooks have completed)
   if (config.vscode?.open !== false) {
-    const absoluteWorktreePath = resolve(originalDir, worktreePath);
     echo(chalk.blue(`Opening VS Code at: ${absoluteWorktreePath}`));
     try {
       const vscodeCommand = config.vscode?.command || 'code';

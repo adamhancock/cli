@@ -35,6 +35,7 @@ export interface PRStatus {
   state: 'OPEN' | 'MERGED' | 'CLOSED';
   author: string;
   mergeable?: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN';
+  labels?: string[];
   checks?: {
     total: number;
     passing: number;

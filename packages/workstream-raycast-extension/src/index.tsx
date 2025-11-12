@@ -1,12 +1,12 @@
 import { List, ActionPanel, Action, Icon, Color, showToast, Toast, closeMainWindow } from '@raycast/api';
 import { useState, useEffect, useRef } from 'react';
-import { getVSCodeInstances, focusVSCodeInstance } from './utils/vscode';
+import { getVSCodeInstances, focusVSCodeInstance, closeVSCodeInstance } from './utils/vscode';
 import { getGitInfo } from './utils/git';
 import { getPRStatus } from './utils/github';
 import { isClaudeCodeActive } from './utils/claude';
 import { getCachedInstances, setCachedInstances, clearCache, recordUsage, getUsageHistory } from './utils/cache';
 import { loadFromDaemon, triggerDaemonRefresh, subscribeToUpdates, type DaemonCache } from './utils/daemon-client';
-import { getTmuxSessionOutput, createTmuxSession, attachToTmuxSession } from './utils/tmux';
+import { getTmuxSessionOutput, createTmuxSession, attachToTmuxSession, killTmuxSession } from './utils/tmux';
 import type { InstanceWithStatus } from './types';
 
 export default function Command() {
@@ -381,6 +381,14 @@ export default function Command() {
       });
     }
 
+    // Show preview label icon
+    if (instance.prStatus?.labels?.includes('preview')) {
+      accessories.push({
+        icon: { source: Icon.Eye, tintColor: Color.Blue },
+        tooltip: 'Preview deployment available',
+      });
+    }
+
     // Show merge conflict warning
     if (instance.prStatus?.mergeable === 'CONFLICTING') {
       accessories.push({
@@ -675,6 +683,53 @@ export default function Command() {
                     shortcut={{ modifiers: ['cmd'], key: 't' }}
                   />
                 )}
+
+                <Action
+                  title="Close VS Code & Tmux"
+                  onAction={async () => {
+                    try {
+                      await showToast({
+                        style: Toast.Style.Animated,
+                        title: 'Closing...',
+                        message: `Closing ${instance.name}`,
+                      });
+
+                      // Close tmux session if it exists
+                      if (instance.tmuxStatus?.exists) {
+                        try {
+                          await killTmuxSession(instance.tmuxStatus.name);
+                        } catch (error) {
+                          console.error('Failed to kill tmux session:', error);
+                          // Continue even if tmux fails
+                        }
+                      }
+
+                      // Close VS Code window
+                      await closeVSCodeInstance(instance.path);
+
+                      // Wait a moment for processes to fully terminate
+                      await new Promise(resolve => setTimeout(resolve, 1000));
+
+                      // Trigger daemon refresh to update the list
+                      await triggerDaemonRefresh();
+
+                      await showToast({
+                        style: Toast.Style.Success,
+                        title: 'Closed successfully',
+                        message: `Closed ${instance.name}`,
+                      });
+                    } catch (error) {
+                      await showToast({
+                        style: Toast.Style.Failure,
+                        title: 'Failed to close',
+                        message: error instanceof Error ? error.message : 'Unknown error',
+                      });
+                    }
+                  }}
+                  icon={Icon.XMarkCircle}
+                  style={Action.Style.Destructive}
+                  shortcut={{ modifiers: ['cmd'], key: 'w' }}
+                />
 
                 <Action.ShowInFinder path={instance.path} />
                 <Action.CopyToClipboard title="Copy Path" content={instance.path} />
