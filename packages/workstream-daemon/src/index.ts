@@ -33,6 +33,7 @@ interface PRStatus {
   title: string;
   url: string;
   state: 'OPEN' | 'MERGED' | 'CLOSED';
+  mergeable?: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN';
   checks?: {
     passing: number;
     failing: number;
@@ -394,7 +395,7 @@ class WorkstreamDaemon {
       }
 
       // Suppress stderr to avoid rate limit error messages
-      const prInfoResult = await $`/opt/homebrew/bin/gh pr view ${branch} --repo=${remoteUrlResult.stdout.trim()} --json number,title,url,state 2>/dev/null || echo ""`.quiet();
+      const prInfoResult = await $`/opt/homebrew/bin/gh pr view ${branch} --repo=${remoteUrlResult.stdout.trim()} --json number,title,url,state,mergeable 2>/dev/null || echo ""`.quiet();
 
       if (!prInfoResult.stdout.trim()) {
         return undefined;
@@ -432,6 +433,7 @@ class WorkstreamDaemon {
         title: pr.title,
         url: pr.url,
         state: pr.state,
+        mergeable: pr.mergeable,
         checks,
       };
     } catch {
