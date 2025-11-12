@@ -175,13 +175,18 @@ The daemon can receive real-time notifications from Claude Code via hooks:
 
 ### Setup
 
-1. **Copy the hook script** to `~/.claude/`:
+1. **Ensure redis-cli is available** (installed automatically with Redis):
+   ```bash
+   which redis-cli  # Should show path to redis-cli
+   ```
+
+2. **Copy the hook script** to `~/.claude/`:
    ```bash
    cp notify-daemon.sh ~/.claude/notify-daemon.sh
    chmod +x ~/.claude/notify-daemon.sh
    ```
 
-2. **Configure Claude hooks** in `~/.claude/settings.json`:
+3. **Configure Claude hooks** in `~/.claude/settings.json`:
    ```json
    {
      "hooks": {

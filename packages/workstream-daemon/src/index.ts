@@ -114,6 +114,7 @@ class WorkstreamDaemon {
   }
 
   private setupSubscriber() {
+    // Subscribe to refresh channel for general refresh requests
     this.subscriber.subscribe(REDIS_CHANNELS.REFRESH, (err) => {
       if (err) {
         logError('Failed to subscribe to refresh channel:', err);
@@ -122,14 +123,27 @@ class WorkstreamDaemon {
       }
     });
 
+    // Subscribe to claude channel for Claude Code events
+    this.subscriber.subscribe(REDIS_CHANNELS.CLAUDE, (err) => {
+      if (err) {
+        logError('Failed to subscribe to Claude channel:', err);
+      } else {
+        log('Subscribed to Claude channel');
+      }
+    });
+
     this.subscriber.on('message', async (channel, message) => {
       try {
         const data = JSON.parse(message);
 
         if (channel === REDIS_CHANNELS.REFRESH) {
+          // Handle general refresh requests
           if (data.type === 'refresh') {
             this.pollInstances(true); // Force PR refresh
-          } else if (data.type === 'work_started') {
+          }
+        } else if (channel === REDIS_CHANNELS.CLAUDE) {
+          // Handle Claude-specific events
+          if (data.type === 'work_started') {
             await this.handleClaudeStarted(data.path);
           } else if (data.type === 'waiting_for_input') {
             await this.handleClaudeWaiting(data.path);
@@ -202,7 +216,7 @@ class WorkstreamDaemon {
 
     log(`Daemon running. Initial polling interval: ${this.currentPollInterval}ms`);
     log(`Cache file: ${CACHE_FILE}`);
-    log(`Redis pub/sub channels: ${REDIS_CHANNELS.UPDATES}, ${REDIS_CHANNELS.REFRESH}`);
+    log(`Redis pub/sub channels: ${REDIS_CHANNELS.UPDATES}, ${REDIS_CHANNELS.REFRESH}, ${REDIS_CHANNELS.CLAUDE}`);
   }
 
   private scheduleNextPoll() {

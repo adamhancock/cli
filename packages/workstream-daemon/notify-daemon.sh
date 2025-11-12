@@ -1,9 +1,11 @@
 #!/bin/bash
 
-# Claude hook script to notify workstream daemon
+# Claude hook script to notify workstream daemon via Redis
 # Automatically determines event type from hook context
 
-DAEMON_WS="ws://localhost:58234"
+REDIS_HOST="localhost"
+REDIS_PORT="6379"
+REDIS_CHANNEL="workstream:claude"
 
 # Read JSON context from stdin (provided by Claude hooks)
 CONTEXT=$(cat)
@@ -40,25 +42,15 @@ PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 # Debug logging (optional, uncomment to enable)
 # echo "[$(date '+%Y-%m-%d %H:%M:%S')] $HOOK_EVENT -> $EVENT_TYPE ($TOOL_NAME) in $PROJECT_DIR" >> /tmp/claude-hook-debug.log
 
-# Send event to daemon via WebSocket
-# Using websocat if available, otherwise try curl websocket upgrade
-if command -v websocat &> /dev/null; then
-    echo "{\"type\":\"$EVENT_TYPE\",\"path\":\"$PROJECT_DIR\"}" | websocat "$DAEMON_WS" 2>/dev/null || true
-elif command -v wscat &> /dev/null; then
-    echo "{\"type\":\"$EVENT_TYPE\",\"path\":\"$PROJECT_DIR\"}" | wscat -c "$DAEMON_WS" 2>/dev/null || true
+# Send event to daemon via Redis pub/sub
+# Using redis-cli to publish to the refresh channel
+if command -v redis-cli &> /dev/null; then
+    # Publish to Redis channel
+    MESSAGE="{\"type\":\"$EVENT_TYPE\",\"path\":\"$PROJECT_DIR\"}"
+    echo "$MESSAGE" | redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" -x PUBLISH "$REDIS_CHANNEL" >/dev/null 2>&1 || true
 else
-    # Fallback: try with node if available
-    if command -v node &> /dev/null; then
-        node -e "
-        const WebSocket = require('ws');
-        const ws = new WebSocket('$DAEMON_WS');
-        ws.on('open', () => {
-            ws.send('{\"type\":\"$EVENT_TYPE\",\"path\":\"$PROJECT_DIR\"}');
-            ws.close();
-        });
-        ws.on('error', () => {});
-        " 2>/dev/null || true
-    fi
+    # If redis-cli is not available, log a warning
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] WARNING: redis-cli not found, cannot notify daemon" >> /tmp/claude-hook-debug.log
 fi
 
 exit 0

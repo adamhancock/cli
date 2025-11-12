@@ -10,7 +10,7 @@ export const REDIS_KEYS = {
 export const REDIS_CHANNELS = {
   UPDATES: 'workstream:updates',
   REFRESH: 'workstream:refresh',
-  CLAUDE: (path: string) => `workstream:claude:${Buffer.from(path).toString('base64')}`,
+  CLAUDE: 'workstream:claude',
 } as const;
 
 let redisClient: Redis | null = null;
