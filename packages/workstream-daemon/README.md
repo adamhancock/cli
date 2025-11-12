@@ -8,8 +8,26 @@ The daemon runs in the background and:
 - ⚡ Polls VS Code instances every 5 seconds
 - 📊 Fetches git status, PR info, and Claude Code status
 - 💾 Maintains a cache file at `~/.workstream-daemon/instances.json`
-- 🔌 Provides a WebSocket server on `ws://localhost:58234` for real-time updates
+- 🔴 Uses Redis pub/sub for real-time updates
 - 🚀 Makes the Raycast extension load **instantly** (< 10ms)
+
+## Prerequisites
+
+**Redis must be running locally:**
+
+```bash
+# macOS (Homebrew)
+brew install redis
+brew services start redis
+
+# Or manually
+redis-server
+```
+
+Verify Redis is running:
+```bash
+redis-cli ping  # Should return "PONG"
+```
 
 ## Installation
 
@@ -88,10 +106,8 @@ workstream status
 # Or check process manually
 ps aux | grep workstream-daemon
 
-# Or check WebSocket
-curl -i -N -H "Connection: Upgrade" -H "Upgrade: websocket" \
-  -H "Sec-WebSocket-Key: test" -H "Sec-WebSocket-Version: 13" \
-  http://localhost:58234
+# Or check Redis
+redis-cli keys "workstream:*"
 ```
 
 ### View Logs
@@ -114,8 +130,13 @@ tail -f ~/Library/Logs/workstream-daemon-error.log
 ### View Cache
 
 ```bash
-# Pretty print the cache
+# View file cache
 cat ~/.workstream-daemon/instances.json | jq
+
+# View Redis data
+redis-cli keys "workstream:*"
+redis-cli get workstream:timestamp
+redis-cli smembers workstream:instances:list
 ```
 
 ## Uninstallation
@@ -141,8 +162,12 @@ pnpm remove -g @adamhancock/workstream-daemon
 Edit these constants in `src/index.ts`:
 
 - `POLL_INTERVAL`: How often to poll (default: 5000ms)
-- `WS_PORT`: WebSocket server port (default: 58234)
+- `INSTANCE_TTL`: Redis key expiration (default: 30 seconds)
 - `CACHE_DIR`: Cache directory (default: ~/.workstream-daemon)
+
+Redis configuration in `src/redis-client.ts`:
+- `host`: Redis host (default: localhost)
+- `port`: Redis port (default: 6379)
 
 ## Claude Code Integration
 
@@ -150,18 +175,13 @@ The daemon can receive real-time notifications from Claude Code via hooks:
 
 ### Setup
 
-1. **Install websocat** (required for WebSocket communication):
-   ```bash
-   brew install websocat
-   ```
-
-2. **Copy the hook script** to `~/.claude/`:
+1. **Copy the hook script** to `~/.claude/`:
    ```bash
    cp notify-daemon.sh ~/.claude/notify-daemon.sh
    chmod +x ~/.claude/notify-daemon.sh
    ```
 
-3. **Configure Claude hooks** in `~/.claude/settings.json`:
+2. **Configure Claude hooks** in `~/.claude/settings.json`:
    ```json
    {
      "hooks": {
@@ -222,43 +242,57 @@ You should see status updates in Raycast and notifications for waiting/finished 
 
 ### Raycast Extension
 
-The Raycast extension can read from the cache file for instant results:
+The Raycast extension can read from Redis or the cache file for instant results:
 
 ```typescript
-import { readFile } from 'fs/promises';
-import { join } from 'path';
-import { homedir } from 'os';
+import Redis from 'ioredis';
 
-const CACHE_FILE = join(homedir(), '.workstream-daemon', 'instances.json');
+const redis = new Redis({ host: 'localhost', port: 6379 });
 
-async function loadFromDaemon() {
+async function loadFromRedis() {
   try {
-    const cache = await readFile(CACHE_FILE, 'utf-8');
-    const { instances } = JSON.parse(cache);
-    return instances;
+    // Get instance paths
+    const paths = await redis.smembers('workstream:instances:list');
+
+    // Get each instance data
+    const pipeline = redis.pipeline();
+    for (const path of paths) {
+      const key = `workstream:instance:${Buffer.from(path).toString('base64')}`;
+      pipeline.get(key);
+    }
+
+    const results = await pipeline.exec();
+    return results.map(([, data]) => JSON.parse(data as string));
   } catch {
-    // Daemon not running, fallback to direct fetch
+    // Redis not available, fallback to file cache
     return null;
   }
 }
 ```
 
-### WebSocket Client (Real-time Updates)
+### Redis Pub/Sub Client (Real-time Updates)
 
 ```typescript
-import { WebSocket } from 'ws';
+import Redis from 'ioredis';
 
-const ws = new WebSocket('ws://localhost:58234');
+const subscriber = new Redis({ host: 'localhost', port: 6379 });
 
-ws.on('message', (data) => {
-  const { type, data: instances } = JSON.parse(data.toString());
-  if (type === 'instances') {
-    console.log('Received update:', instances);
+subscriber.subscribe('workstream:updates');
+
+subscriber.on('message', async (channel, message) => {
+  if (channel === 'workstream:updates') {
+    const { type, count, timestamp } = JSON.parse(message);
+    if (type === 'instances') {
+      console.log(`Received update: ${count} instances at ${timestamp}`);
+      // Load latest data from Redis
+      const instances = await loadFromRedis();
+    }
   }
 });
 
-// Request refresh
-ws.send(JSON.stringify({ type: 'refresh' }));
+// Trigger refresh
+const publisher = new Redis({ host: 'localhost', port: 6379 });
+await publisher.publish('workstream:refresh', JSON.stringify({ type: 'refresh' }));
 ```
 
 ## Performance Comparison
@@ -267,9 +301,10 @@ ws.send(JSON.stringify({ type: 'refresh' }));
 - First load: 2-3 seconds (fetches everything)
 - Cached loads: ~500ms (reads from Raycast cache)
 
-**With Daemon:**
-- Every load: < 10ms (reads pre-computed cache)
+**With Daemon (Redis):**
+- Every load: < 10ms (reads from Redis)
 - Always up-to-date (refreshed every 5 seconds)
+- Real-time updates via pub/sub
 
 ## Troubleshooting
 
@@ -280,9 +315,17 @@ Check logs:
 tail -f ~/Library/Logs/workstream-daemon-error.log
 ```
 
-### Port already in use
+### Redis connection issues
 
-Change `WS_PORT` in `src/index.ts` and rebuild.
+Check if Redis is running:
+```bash
+redis-cli ping
+```
+
+Start Redis:
+```bash
+brew services start redis
+```
 
 ### Cache not updating
 
@@ -291,7 +334,13 @@ Check if daemon is running:
 launchctl list | grep workstream
 ```
 
-Restart it:
+Check Redis data:
+```bash
+redis-cli keys "workstream:*"
+redis-cli ttl workstream:timestamp
+```
+
+Restart daemon:
 ```bash
 launchctl stop com.workstream.daemon
 launchctl start com.workstream.daemon
@@ -309,14 +358,36 @@ launchctl start com.workstream.daemon
 ┌─────────────────┐         ┌──────────────┐
 │  Workstream     │ ──────→ │  Cache File  │
 │  Daemon         │  writes │  .json       │
-└────────┬────────┘         └──────┬───────┘
-         │                          │
-         │ WebSocket                │ reads
-         ↓                          ↓
+└────────┬────────┘         └──────────────┘
+         │
+         │ Redis Pub/Sub + Storage
+         ↓
+┌─────────────────┐
+│  Redis Server   │
+│  (localhost)    │
+└────────┬────────┘
+         │
+         ↓ reads + subscribes
 ┌─────────────────┐         ┌──────────────┐
 │  Raycast Ext    │         │  CLI Tool    │
 │  (live updates) │         │  (instant)   │
 └─────────────────┘         └──────────────┘
+```
+
+## Redis Data Structure
+
+```
+Keys:
+- workstream:instances:list         (SET)    → Set of instance paths
+- workstream:instance:{base64path}  (STRING) → JSON instance data
+- workstream:timestamp              (STRING) → Last update timestamp
+
+Pub/Sub Channels:
+- workstream:updates                → Instance list updates
+- workstream:refresh                → Trigger refresh requests
+- workstream:claude:{base64path}    → Claude status updates
+
+TTL: All keys expire after 30 seconds if daemon stops
 ```
 
 ## Development
@@ -329,9 +400,10 @@ pnpm run dev
 
 ### Testing locally
 
-1. Build: `pnpm run build`
-2. Run: `pnpm start`
-3. In another terminal: `cat ~/.workstream-daemon/instances.json`
+1. Start Redis: `redis-server`
+2. Run daemon: `pnpm start`
+3. Check Redis: `redis-cli keys "workstream:*"`
+4. Monitor pub/sub: `redis-cli subscribe workstream:updates`
 
 ## License
 

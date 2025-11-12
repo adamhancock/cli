@@ -1,6 +1,6 @@
 {
   "name": "@adamhancock/workstream-daemon",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Background daemon that maintains real-time VS Code instance metadata for instant access",
   "type": "module",
   "bin": {
@@ -21,13 +21,12 @@
   "author": "adamhancock",
   "license": "MIT",
   "dependencies": {
+    "ioredis": "^5.4.1",
     "tsx": "^4.19.2",
-    "ws": "^8.18.0",
     "zx": "^8.2.4"
   },
   "devDependencies": {
     "@types/node": "^22.13.10",
-    "@types/ws": "^8.5.13",
     "typescript": "^5.4.5"
   }
 }

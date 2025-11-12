@@ -66,5 +66,48 @@ export interface InstanceWithStatus extends VSCodeInstance {
   prStatus?: PRStatus;
   claudeStatus?: ClaudeStatus;
   tmuxStatus?: TmuxStatus;
+  caddyHost?: CaddyHost;
+  error?: string;
+}
+
+export interface CaddyHost {
+  name: string;
+  url: string;
+  upstreams?: string[];
+  worktreePath?: string;
+  routes?: unknown[];
+  isActive?: boolean;
+}
+
+export interface CaddyConfig {
+  apps?: {
+    http?: {
+      servers?: {
+        [key: string]: {
+          routes?: Array<{
+            match?: Array<{
+              host?: string[];
+            }>;
+            handle?: unknown[];
+          }>;
+        };
+      };
+    };
+  };
+}
+
+export enum CleanupCriteria {
+  MergedPRs = 'merged',
+  ClosedPRs = 'closed',
+  OldWorktrees = 'old',
+}
+
+export interface CleanupResult {
+  success: boolean;
+  instancePath: string;
+  instanceName: string;
+  vscodeClosed: boolean;
+  tmuxClosed: boolean;
+  caddyRouteClosed: boolean;
   error?: string;
 }

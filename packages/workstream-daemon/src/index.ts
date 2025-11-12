@@ -4,7 +4,15 @@ import { $ } from 'zx';
 import { writeFile, mkdir } from 'fs/promises';
 import { join } from 'path';
 import { homedir } from 'os';
-import { WebSocketServer } from 'ws';
+import Redis from 'ioredis';
+import {
+  getRedisClient,
+  getPublisherClient,
+  closeRedisConnections,
+  REDIS_KEYS,
+  REDIS_CHANNELS,
+  INSTANCE_TTL
+} from './redis-client.js';
 
 // Disable verbose output from zx
 $.verbose = false;
@@ -66,7 +74,6 @@ interface InstanceWithMetadata extends VSCodeInstance {
 const CACHE_DIR = join(homedir(), '.workstream-daemon');
 const CACHE_FILE = join(CACHE_DIR, 'instances.json');
 const POLL_INTERVAL = 5000; // 5 seconds (git and Claude are local, fast)
-const WS_PORT = 58234;
 const MIN_POLL_INTERVAL = 120000; // 2 minutes (when rate limited)
 const RATE_LIMIT_THRESHOLD = 100; // Start slowing down when remaining < 100
 
@@ -89,58 +96,93 @@ interface GitHubRateLimit {
 
 class WorkstreamDaemon {
   private instances: Map<string, InstanceWithMetadata> = new Map();
-  private wss: WebSocketServer;
+  private redis: Redis;
+  private publisher: Redis;
+  private subscriber: Redis;
   private pollTimer?: NodeJS.Timeout;
   private currentPollInterval: number = POLL_INTERVAL;
   private ghRateLimit?: GitHubRateLimit;
 
   constructor() {
-    this.wss = new WebSocketServer({ port: WS_PORT });
-    this.setupWebSocket();
+    this.redis = getRedisClient();
+    this.publisher = getPublisherClient();
+    this.subscriber = new Redis({
+      host: 'localhost',
+      port: 6379,
+    });
+    this.setupSubscriber();
   }
 
-  private setupWebSocket() {
-    this.wss.on('connection', (ws) => {
-      log('Client connected');
-
-      // Send current instances immediately
-      ws.send(JSON.stringify({
-        type: 'instances',
-        data: Array.from(this.instances.values()),
-      }));
-
-      ws.on('message', (message) => {
-        try {
-          const { type, path } = JSON.parse(message.toString());
-          if (type === 'refresh') {
-            this.pollInstances(true); // Force PR refresh
-          } else if (type === 'work_started') {
-            this.handleClaudeStarted(path);
-          } else if (type === 'waiting_for_input') {
-            this.handleClaudeWaiting(path);
-          } else if (type === 'work_stopped') {
-            this.handleClaudeFinished(path);
-          }
-        } catch (error) {
-          logError('Invalid message:', error);
-        }
-      });
-    });
-
-    log(`WebSocket server listening on ws://localhost:${WS_PORT}`);
-  }
-
-  private broadcast() {
-    const data = JSON.stringify({
-      type: 'instances',
-      data: Array.from(this.instances.values()),
-    });
-
-    this.wss.clients.forEach((client) => {
-      if (client.readyState === 1) { // OPEN
-        client.send(data);
+  private setupSubscriber() {
+    this.subscriber.subscribe(REDIS_CHANNELS.REFRESH, (err) => {
+      if (err) {
+        logError('Failed to subscribe to refresh channel:', err);
+      } else {
+        log('Subscribed to refresh channel');
       }
     });
+
+    this.subscriber.on('message', async (channel, message) => {
+      try {
+        const data = JSON.parse(message);
+
+        if (channel === REDIS_CHANNELS.REFRESH) {
+          if (data.type === 'refresh') {
+            this.pollInstances(true); // Force PR refresh
+          } else if (data.type === 'work_started') {
+            await this.handleClaudeStarted(data.path);
+          } else if (data.type === 'waiting_for_input') {
+            await this.handleClaudeWaiting(data.path);
+          } else if (data.type === 'work_stopped') {
+            await this.handleClaudeFinished(data.path);
+          }
+        }
+      } catch (error) {
+        logError('Error handling message:', error);
+      }
+    });
+  }
+
+  private async publishUpdate() {
+    try {
+      const instances = Array.from(this.instances.values());
+      const timestamp = Date.now();
+
+      // Store each instance in Redis with TTL
+      const pipeline = this.redis.pipeline();
+
+      // Store instance paths list
+      if (instances.length > 0) {
+        pipeline.del(REDIS_KEYS.INSTANCES_LIST);
+        for (const instance of instances) {
+          pipeline.sadd(REDIS_KEYS.INSTANCES_LIST, instance.path);
+        }
+        pipeline.expire(REDIS_KEYS.INSTANCES_LIST, INSTANCE_TTL);
+      }
+
+      // Store each instance data
+      for (const instance of instances) {
+        const key = REDIS_KEYS.INSTANCE(instance.path);
+        pipeline.set(key, JSON.stringify(instance), 'EX', INSTANCE_TTL);
+      }
+
+      // Store timestamp
+      pipeline.set(REDIS_KEYS.TIMESTAMP, timestamp.toString(), 'EX', INSTANCE_TTL);
+
+      await pipeline.exec();
+
+      // Publish update notification
+      await this.publisher.publish(
+        REDIS_CHANNELS.UPDATES,
+        JSON.stringify({
+          type: 'instances',
+          count: instances.length,
+          timestamp,
+        })
+      );
+    } catch (error) {
+      logError('Error publishing update:', error);
+    }
   }
 
   async start() {
@@ -160,6 +202,7 @@ class WorkstreamDaemon {
 
     log(`Daemon running. Initial polling interval: ${this.currentPollInterval}ms`);
     log(`Cache file: ${CACHE_FILE}`);
+    log(`Redis pub/sub channels: ${REDIS_CHANNELS.UPDATES}, ${REDIS_CHANNELS.REFRESH}`);
   }
 
   private scheduleNextPoll() {
@@ -176,7 +219,12 @@ class WorkstreamDaemon {
     if (this.pollTimer) {
       clearTimeout(this.pollTimer);
     }
-    this.wss.close();
+
+    // Unsubscribe and close Redis connections
+    await this.subscriber.unsubscribe();
+    await this.subscriber.quit();
+    await closeRedisConnections();
+
     log('Daemon stopped');
   }
 
@@ -248,11 +296,11 @@ class WorkstreamDaemon {
         }
       }
 
-      // Write to cache file
+      // Write to cache file (for compatibility)
       await this.writeCache();
 
-      // Broadcast to connected clients
-      this.broadcast();
+      // Publish to Redis
+      await this.publishUpdate();
 
       log(`Updated ${this.instances.size} instances${forcePR ? ' (forced PR refresh)' : ''}`);
     } catch (error) {
@@ -516,7 +564,7 @@ class WorkstreamDaemon {
         instance.claudeStatus.isWorking = true;
         instance.claudeStatus.isWaiting = false;
         await this.writeCache();
-        this.broadcast();
+        await this.publishUpdate();
 
         const projectName = repoPath.split('/').pop() || 'project';
 
@@ -543,7 +591,7 @@ class WorkstreamDaemon {
         instance.claudeStatus.isWaiting = true;
         instance.claudeStatus.isWorking = false;
         await this.writeCache();
-        this.broadcast();
+        await this.publishUpdate();
 
         // Send notification
         const projectName = repoPath.split('/').pop() || 'project';
@@ -567,7 +615,7 @@ class WorkstreamDaemon {
         instance.claudeStatus.isWaiting = false;
         instance.claudeStatus.isWorking = false;
         await this.writeCache();
-        this.broadcast();
+        await this.publishUpdate();
 
         // Send notification
         const projectName = repoPath.split('/').pop() || 'project';

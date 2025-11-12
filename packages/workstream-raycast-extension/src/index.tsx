@@ -5,7 +5,7 @@ import { getGitInfo } from './utils/git';
 import { getPRStatus } from './utils/github';
 import { isClaudeCodeActive } from './utils/claude';
 import { getCachedInstances, setCachedInstances, clearCache, recordUsage, getUsageHistory } from './utils/cache';
-import { loadFromDaemon, triggerDaemonRefresh, subscribeToUpdates, type DaemonCache } from './utils/daemon-client';
+import { loadFromDaemon, loadFromRedis, triggerDaemonRefresh, subscribeToUpdates, type DaemonCache } from './utils/daemon-client';
 import { getTmuxSessionOutput, createTmuxSession, attachToTmuxSession, killTmuxSession } from './utils/tmux';
 import type { InstanceWithStatus } from './types';
 
@@ -58,9 +58,9 @@ export default function Command() {
       const triggered = await triggerDaemonRefresh();
       if (triggered) {
         console.log('Triggered daemon refresh');
-        // Wait a bit for daemon to update cache
+        // Wait a bit for daemon to update Redis/cache
         await new Promise(resolve => setTimeout(resolve, 500));
-        // WebSocket will automatically update the UI, so we can return early
+        // Redis pub/sub will automatically update the UI, so we can return early
         if (isRealtimeMode) {
           setIsLoading(false);
           return;
@@ -68,28 +68,48 @@ export default function Command() {
       }
     }
 
-    // If we're in real-time mode and not forcing a refresh, let WebSocket handle updates
+    // If we're in real-time mode and not forcing a refresh, let Redis pub/sub handle updates
     if (isRealtimeMode && !forceRefresh && instances.length > 0) {
       console.log('Using real-time mode, skipping manual fetch');
       setIsLoading(false);
       return;
     }
 
-    // Try to load from daemon first (fastest - ~10ms)
+    // Try to load from Redis first (fastest - direct access)
     if (!forceRefresh) {
+      const redisCache = await loadFromRedis();
+      if (redisCache && redisCache.instances.length > 0) {
+        console.log('Using Redis cache:', redisCache.instances.length);
+        setInstances(sortByUsageHistory(redisCache.instances));
+        setLastRefreshTime(new Date(redisCache.timestamp));
+        setIsLoading(false);
+        return;
+      }
+
+      // Fallback to file cache if Redis not available
       const daemonCache = await loadFromDaemon();
       if (daemonCache && daemonCache.instances.length > 0) {
-        console.log('Using daemon cache:', daemonCache.instances.length);
+        console.log('Using daemon file cache:', daemonCache.instances.length);
         setInstances(sortByUsageHistory(daemonCache.instances));
         setLastRefreshTime(new Date(daemonCache.timestamp));
         setIsLoading(false);
         return;
       }
     } else {
-      // On force refresh, always try daemon first (it should have fresh data now)
+      // On force refresh, always try Redis first (it should have fresh data now)
+      const redisCache = await loadFromRedis();
+      if (redisCache && redisCache.instances.length > 0) {
+        console.log('Using refreshed Redis cache:', redisCache.instances.length);
+        setInstances(sortByUsageHistory(redisCache.instances));
+        setLastRefreshTime(new Date(redisCache.timestamp));
+        setIsLoading(false);
+        return;
+      }
+
+      // Fallback to file cache
       const daemonCache = await loadFromDaemon();
       if (daemonCache && daemonCache.instances.length > 0) {
-        console.log('Using refreshed daemon cache:', daemonCache.instances.length);
+        console.log('Using refreshed daemon file cache:', daemonCache.instances.length);
         setInstances(sortByUsageHistory(daemonCache.instances));
         setLastRefreshTime(new Date(daemonCache.timestamp));
         setIsLoading(false);

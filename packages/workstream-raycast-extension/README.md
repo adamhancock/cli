@@ -9,7 +9,7 @@ Quick switcher for VS Code windows with git status, PR info, and Claude Code int
 - **GitHub PR Status**: Displays PR information and CI check results
 - **Claude Code Detection**: Shows if Claude Code is active and whether it's working or idle
 - **Quick Switching**: Focus VS Code windows with keyboard shortcuts
-- **Real-time Updates**: WebSocket connection to daemon for instant status updates (optional)
+- **Real-time Updates**: Redis pub/sub connection to daemon for instant status updates (optional)
 - **Smart Caching**: Caches metadata for 30 seconds for instant subsequent loads
 - **Progressive Loading**: Shows basic info immediately, enriches with metadata in background
 - **Auto Fallback**: Works standalone without daemon, or with daemon for enhanced performance
@@ -125,12 +125,12 @@ workstream start    # Start the daemon
 
 **With daemon:**
 - **Every load**: < 10ms (instant)
-- **Real-time updates**: Changes appear automatically via WebSocket
+- **Real-time updates**: Changes appear automatically via Redis pub/sub
 - **No manual refresh needed**: Status updates as they happen
 - **Search bar indicator**: "⚡ Real-time" shows when connected
 - **Auto fallback**: If daemon stops, automatically falls back to standalone mode
 
-The daemon polls VS Code instances every 5 seconds and maintains a pre-computed cache, making the extension incredibly fast!
+The daemon polls VS Code instances every 5 seconds and maintains a pre-computed cache in Redis, making the extension incredibly fast!
 
 ## How It Works
 

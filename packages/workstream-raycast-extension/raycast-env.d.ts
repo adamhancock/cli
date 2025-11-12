@@ -17,6 +17,8 @@ declare namespace Preferences {
   export type Index = ExtensionPreferences & {}
   /** Preferences accessible in the `create-worktree` command */
   export type CreateWorktree = ExtensionPreferences & {}
+  /** Preferences accessible in the `cleanup-environments` command */
+  export type CleanupEnvironments = ExtensionPreferences & {}
 }
 
 declare namespace Arguments {
@@ -24,5 +26,7 @@ declare namespace Arguments {
   export type Index = {}
   /** Arguments passed to the `create-worktree` command */
   export type CreateWorktree = {}
+  /** Arguments passed to the `cleanup-environments` command */
+  export type CleanupEnvironments = {}
 }
 

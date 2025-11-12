@@ -1,11 +1,17 @@
 import { readFile } from 'fs/promises';
 import { join } from 'path';
 import { homedir } from 'os';
-import WebSocket from 'ws';
+import Redis from 'ioredis';
+import {
+  getRedisClient,
+  getPublisherClient,
+  isRedisAvailable,
+  REDIS_KEYS,
+  REDIS_CHANNELS,
+} from './redis-client';
 import type { InstanceWithStatus } from '../types';
 
 const DAEMON_CACHE_FILE = join(homedir(), '.workstream-daemon', 'instances.json');
-const DAEMON_WS_URL = 'ws://localhost:58234';
 
 export interface DaemonCache {
   instances: InstanceWithStatus[];
@@ -13,7 +19,7 @@ export interface DaemonCache {
 }
 
 /**
- * Try to load instances from the daemon cache
+ * Try to load instances from the daemon cache file
  * Returns null if daemon is not running or cache is not available
  */
 export async function loadFromDaemon(): Promise<DaemonCache | null> {
@@ -37,103 +43,162 @@ export async function loadFromDaemon(): Promise<DaemonCache | null> {
 }
 
 /**
- * Trigger daemon to refresh instances immediately via WebSocket
- * Returns true if message was sent successfully
+ * Load instances directly from Redis
+ * Returns null if Redis is not available or no data found
  */
-export async function triggerDaemonRefresh(): Promise<boolean> {
-  return new Promise((resolve) => {
-    try {
-      const ws = new WebSocket(DAEMON_WS_URL);
-
-      ws.on('open', () => {
-        ws.send(JSON.stringify({ type: 'refresh' }));
-        ws.close();
-        resolve(true);
-      });
-
-      ws.on('error', () => {
-        resolve(false);
-      });
-
-      // Timeout after 1 second
-      setTimeout(() => {
-        ws.close();
-        resolve(false);
-      }, 1000);
-    } catch {
-      resolve(false);
+export async function loadFromRedis(): Promise<DaemonCache | null> {
+  try {
+    // Check if Redis is available
+    if (!(await isRedisAvailable())) {
+      return null;
     }
-  });
+
+    const redis = getRedisClient();
+
+    // Get timestamp
+    const timestampStr = await redis.get(REDIS_KEYS.TIMESTAMP);
+    if (!timestampStr) {
+      return null;
+    }
+    const timestamp = parseInt(timestampStr, 10);
+
+    // Check if data is recent (within last 10 minutes)
+    const age = Date.now() - timestamp;
+    if (age > 600000) {
+      console.log('Redis data is stale');
+      return null;
+    }
+
+    // Get instance paths
+    const paths = await redis.smembers(REDIS_KEYS.INSTANCES_LIST);
+    if (!paths || paths.length === 0) {
+      return null;
+    }
+
+    // Get each instance data
+    const pipeline = redis.pipeline();
+    for (const path of paths) {
+      pipeline.get(REDIS_KEYS.INSTANCE(path));
+    }
+
+    const results = await pipeline.exec();
+    if (!results) {
+      return null;
+    }
+
+    const instances: InstanceWithStatus[] = [];
+    for (const [err, result] of results) {
+      if (!err && result && typeof result === 'string') {
+        try {
+          instances.push(JSON.parse(result));
+        } catch {
+          // Skip invalid JSON
+        }
+      }
+    }
+
+    console.log(`Loaded ${instances.length} instances from Redis (age: ${age}ms)`);
+    return { instances, timestamp };
+  } catch (error) {
+    console.error('Failed to load from Redis:', error);
+    return null;
+  }
 }
 
 /**
- * Subscribe to real-time updates from the daemon via WebSocket
+ * Trigger daemon to refresh instances immediately via Redis pub/sub
+ * Returns true if message was sent successfully
+ */
+export async function triggerDaemonRefresh(): Promise<boolean> {
+  try {
+    if (!(await isRedisAvailable())) {
+      return false;
+    }
+
+    const publisher = getPublisherClient();
+    await publisher.publish(
+      REDIS_CHANNELS.REFRESH,
+      JSON.stringify({ type: 'refresh' })
+    );
+
+    console.log('Triggered daemon refresh via Redis');
+    return true;
+  } catch (error) {
+    console.error('Failed to trigger refresh:', error);
+    return false;
+  }
+}
+
+/**
+ * Subscribe to real-time updates from the daemon via Redis pub/sub
  * Returns a cleanup function to close the connection
  */
 export function subscribeToUpdates(
   onUpdate: (instances: InstanceWithStatus[], timestamp?: number) => void,
   onError?: () => void
 ): () => void {
-  let ws: WebSocket | null = null;
-  let reconnectTimer: NodeJS.Timeout | null = null;
+  let subscriber: Redis | null = null;
   let isClosing = false;
 
-  const connect = () => {
+  const connect = async () => {
     if (isClosing) return;
 
     try {
-      ws = new WebSocket(DAEMON_WS_URL);
+      // Check if Redis is available
+      if (!(await isRedisAvailable())) {
+        console.log('Redis not available, cannot subscribe');
+        onError?.();
+        return;
+      }
 
-      ws.on('open', () => {
-        console.log('WebSocket connected to daemon');
+      subscriber = new Redis({
+        host: 'localhost',
+        port: 6379,
+        lazyConnect: false,
+        retryStrategy: (times) => {
+          if (isClosing || times > 5) {
+            return null;
+          }
+          return Math.min(times * 1000, 5000);
+        },
       });
 
-      ws.on('message', async (data: Buffer) => {
+      subscriber.on('error', (error) => {
+        console.error('Redis subscriber error:', error.message);
+        if (!isClosing) {
+          onError?.();
+        }
+      });
+
+      subscriber.on('message', async (channel, message) => {
         try {
-          const message = JSON.parse(data.toString());
-          if (message.type === 'instances' && message.data) {
-            console.log(`Received update: ${message.data.length} instances`);
-
-            // Try to get the timestamp from the cache file
-            let timestamp: number | undefined;
-            try {
-              const cacheContent = await readFile(DAEMON_CACHE_FILE, 'utf-8');
-              const cache: DaemonCache = JSON.parse(cacheContent);
-              timestamp = cache.timestamp;
-            } catch {
-              // If we can't read the cache, use current time
-              timestamp = Date.now();
+          if (channel === REDIS_CHANNELS.UPDATES) {
+            const data = JSON.parse(message);
+            if (data.type === 'instances') {
+              // Load instances from Redis
+              const cache = await loadFromRedis();
+              if (cache) {
+                console.log(`Received update: ${cache.instances.length} instances`);
+                onUpdate(cache.instances, cache.timestamp);
+              }
             }
-
-            onUpdate(message.data, timestamp);
           }
         } catch (error) {
-          console.error('Failed to parse WebSocket message:', error);
+          console.error('Failed to parse Redis message:', error);
         }
       });
 
-      ws.on('error', (error) => {
-        console.error('WebSocket error:', error);
-        onError?.();
-      });
+      await subscriber.subscribe(REDIS_CHANNELS.UPDATES);
+      console.log('Subscribed to Redis updates channel');
 
-      ws.on('close', () => {
-        console.log('WebSocket disconnected');
-        // Attempt to reconnect after 5 seconds if not intentionally closing
-        if (!isClosing) {
-          reconnectTimer = setTimeout(() => {
-            console.log('Attempting to reconnect...');
-            connect();
-          }, 5000);
-        }
-      });
-    } catch (error) {
-      console.error('Failed to create WebSocket:', error);
-      onError?.();
-      // Try to reconnect after 5 seconds
-      if (!isClosing) {
-        reconnectTimer = setTimeout(connect, 5000);
+      // Load initial data
+      const cache = await loadFromRedis();
+      if (cache) {
+        onUpdate(cache.instances, cache.timestamp);
       }
+    } catch (error) {
+      console.error('Failed to subscribe:', error);
+      onError?.();
     }
   };
 
@@ -143,26 +208,10 @@ export function subscribeToUpdates(
   // Return cleanup function
   return () => {
     isClosing = true;
-    if (reconnectTimer) {
-      clearTimeout(reconnectTimer);
-      reconnectTimer = null;
-    }
-    if (ws) {
-      // Remove all event listeners first to prevent any events from firing during/after cleanup
-      ws.removeAllListeners();
-
-      // Check readyState before closing to avoid "WebSocket was closed before the connection was established" error
-      // CONNECTING (0): Connection has not yet been established
-      // OPEN (1): Connection is open and ready to communicate
-      // CLOSING (2): Connection is in the process of closing
-      // CLOSED (3): Connection is closed
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.close();
-      }
-      // For CONNECTING state, don't call close() or terminate() - both throw errors
-      // Just abandon the connection by setting isClosing=true and removing listeners
-      // The underlying connection will be garbage collected
-      ws = null;
+    if (subscriber) {
+      subscriber.unsubscribe().catch(() => {});
+      subscriber.quit().catch(() => {});
+      subscriber = null;
     }
   };
 }
