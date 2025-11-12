@@ -12,6 +12,7 @@ on:
       - main
     paths:
       - 'packages/**/package.json'
+      - '!packages/workstream-raycast-extension/**'
 
 jobs:
   publish:
@@ -56,13 +57,21 @@ jobs:
       - name: Publish specific package
         if: github.event.inputs.package
         run: |
+          # Packages to exclude from publishing
+          EXCLUDED_PACKAGES="workstream-raycast-extension"
+
+          if echo "$EXCLUDED_PACKAGES" | grep -q "${{ github.event.inputs.package }}"; then
+            echo "Skipping excluded package: ${{ github.event.inputs.package }}"
+            exit 0
+          fi
+
           cd packages/${{ github.event.inputs.package }}
           PACKAGE_NAME=$(node -p "require('./package.json').name")
           VERSION=$(node -p "require('./package.json').version")
-          
+
           # Publish to NPM
           pnpm publish --no-git-checks --access public
-          
+
           # Create git tag
           TAG="${PACKAGE_NAME}@${VERSION}"
           git tag -a "$TAG" -m "Release $TAG"
@@ -73,28 +82,39 @@ jobs:
       - name: Publish changed packages
         if: github.event_name == 'push' && !github.event.inputs.package
         run: |
+          # Packages to exclude from publishing
+          EXCLUDED_PACKAGES="workstream-raycast-extension"
+
           # Get changed package directories
           CHANGED_PACKAGES=$(git diff --name-only HEAD~1 HEAD | grep '^packages/.*/package.json$' | cut -d'/' -f1,2 | sort -u)
-          
+
           if [ -z "$CHANGED_PACKAGES" ]; then
             echo "No packages changed"
             exit 0
           fi
-          
+
           # Publish each changed package
           for pkg_dir in $CHANGED_PACKAGES; do
             if [ -d "$pkg_dir" ]; then
+              PKG_NAME=$(basename "$pkg_dir")
+
+              # Skip excluded packages
+              if echo "$EXCLUDED_PACKAGES" | grep -q "$PKG_NAME"; then
+                echo "Skipping excluded package: $PKG_NAME"
+                continue
+              fi
+
               echo "Publishing $pkg_dir"
               cd "$pkg_dir"
-              
+
               PACKAGE_NAME=$(node -p "require('./package.json').name")
               CURRENT_VERSION=$(node -p "require('./package.json').version")
               PUBLISHED_VERSION=$(npm view "$PACKAGE_NAME" version 2>/dev/null || echo "0.0.0")
-              
+
               if [ "$CURRENT_VERSION" != "$PUBLISHED_VERSION" ]; then
                 # Publish to NPM
                 pnpm publish --no-git-checks --access public
-                
+
                 # Create git tag
                 TAG="${PACKAGE_NAME}@${CURRENT_VERSION}"
                 git tag -a "$TAG" -m "Release $TAG"
@@ -102,7 +122,7 @@ jobs:
               else
                 echo "Version $CURRENT_VERSION already published, skipping"
               fi
-              
+
               cd - > /dev/null
             fi
           done
@@ -112,21 +132,32 @@ jobs:
       - name: Publish all packages (manual trigger)
         if: github.event_name == 'workflow_dispatch' && !github.event.inputs.package
         run: |
+          # Packages to exclude from publishing
+          EXCLUDED_PACKAGES="workstream-raycast-extension"
+
           # Publish all packages with version changes
           for pkg_dir in packages/*; do
             if [ -d "$pkg_dir" ] && [ -f "$pkg_dir/package.json" ]; then
+              PKG_NAME=$(basename "$pkg_dir")
+
+              # Skip excluded packages
+              if echo "$EXCLUDED_PACKAGES" | grep -q "$PKG_NAME"; then
+                echo "Skipping excluded package: $PKG_NAME"
+                continue
+              fi
+
               cd "$pkg_dir"
-              
+
               PACKAGE_NAME=$(node -p "require('./package.json').name")
               CURRENT_VERSION=$(node -p "require('./package.json').version")
               PUBLISHED_VERSION=$(npm view "$PACKAGE_NAME" version 2>/dev/null || echo "0.0.0")
-              
+
               if [ "$CURRENT_VERSION" != "$PUBLISHED_VERSION" ]; then
                 echo "Publishing $PACKAGE_NAME v$CURRENT_VERSION"
-                
+
                 # Publish to NPM
                 pnpm publish --no-git-checks --access public
-                
+
                 # Create git tag
                 TAG="${PACKAGE_NAME}@${CURRENT_VERSION}"
                 git tag -a "$TAG" -m "Release $TAG"
@@ -134,7 +165,7 @@ jobs:
               else
                 echo "$PACKAGE_NAME v$CURRENT_VERSION already published, skipping"
               fi
-              
+
               cd - > /dev/null
             fi
           done

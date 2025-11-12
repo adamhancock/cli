@@ -1,0 +1,15 @@
+# Dependencies
+node_modules
+
+# Build
+dist
+
+# IDE
+.idea
+*.iml
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+
+# Misc
+.DS_Store
