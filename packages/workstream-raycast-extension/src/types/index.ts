@@ -53,9 +53,16 @@ export interface ClaudeStatus {
   lastActivityTime?: Date;
 }
 
+export interface TmuxStatus {
+  name: string;
+  exists: boolean;
+  lastOutput?: string;
+}
+
 export interface InstanceWithStatus extends VSCodeInstance {
   gitInfo?: GitInfo;
   prStatus?: PRStatus;
   claudeStatus?: ClaudeStatus;
+  tmuxStatus?: TmuxStatus;
   error?: string;
 }

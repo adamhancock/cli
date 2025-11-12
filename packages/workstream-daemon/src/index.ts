@@ -50,10 +50,16 @@ interface ClaudeStatus {
   isWaiting?: boolean;
 }
 
+interface TmuxStatus {
+  name: string;
+  exists: boolean;
+}
+
 interface InstanceWithMetadata extends VSCodeInstance {
   gitInfo?: GitInfo;
   prStatus?: PRStatus;
   claudeStatus?: ClaudeStatus;
+  tmuxStatus?: TmuxStatus;
   lastUpdated: number;
 }
 
@@ -325,6 +331,9 @@ class WorkstreamDaemon {
     // Get Claude status (local, fast)
     enriched.claudeStatus = await this.getClaudeStatus(instance.path);
 
+    // Get tmux status (local, fast)
+    enriched.tmuxStatus = await this.getTmuxStatus(instance.path, enriched.gitInfo?.branch);
+
     return enriched;
   }
 
@@ -468,6 +477,32 @@ class WorkstreamDaemon {
       }
 
       return undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async getTmuxStatus(repoPath: string, branch?: string): Promise<TmuxStatus | undefined> {
+    try {
+      // Get folder name
+      const folderName = repoPath.split('/').pop() || 'unknown';
+
+      // Create session name using tmuxdev logic: {folderName}-{branchName}
+      const sessionName = branch ? `${folderName}-${branch}` : folderName;
+
+      // Check if session exists
+      let exists = false;
+      try {
+        await $`tmux has-session -t ${sessionName} 2>/dev/null`.quiet();
+        exists = true;
+      } catch {
+        exists = false;
+      }
+
+      return {
+        name: sessionName,
+        exists,
+      };
     } catch {
       return undefined;
     }

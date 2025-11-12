@@ -6,6 +6,7 @@ import { getPRStatus } from './utils/github';
 import { isClaudeCodeActive } from './utils/claude';
 import { getCachedInstances, setCachedInstances, clearCache, recordUsage, getUsageHistory } from './utils/cache';
 import { loadFromDaemon, triggerDaemonRefresh, subscribeToUpdates } from './utils/daemon-client';
+import { getTmuxSessionOutput, createTmuxSession, attachToTmuxSession } from './utils/tmux';
 import type { InstanceWithStatus } from './types';
 
 export default function Command() {
@@ -364,6 +365,14 @@ export default function Command() {
       });
     }
 
+    // Show tmux session status
+    if (instance.tmuxStatus?.exists) {
+      accessories.push({
+        icon: { source: Icon.Terminal, tintColor: Color.Green },
+        tooltip: `tmux session: ${instance.tmuxStatus.name}`,
+      });
+    }
+
     if (instance.prStatus?.checks) {
       const { passing, failing, pending, total } = instance.prStatus.checks;
       accessories.push({
@@ -537,6 +546,22 @@ export default function Command() {
                         )}
                       </>
                     )}
+
+                    {instance.tmuxStatus && (
+                      <>
+                        <List.Item.Detail.Metadata.Separator />
+                        <List.Item.Detail.Metadata.Label
+                          title="Tmux Session"
+                          text={instance.tmuxStatus.name}
+                        />
+                        <List.Item.Detail.Metadata.TagList title="Status">
+                          <List.Item.Detail.Metadata.TagList.Item
+                            text={instance.tmuxStatus.exists ? 'Active' : 'Not running'}
+                            color={instance.tmuxStatus.exists ? Color.Green : Color.SecondaryText}
+                          />
+                        </List.Item.Detail.Metadata.TagList>
+                      </>
+                    )}
                   </List.Item.Detail.Metadata>
                 }
               />
@@ -553,6 +578,80 @@ export default function Command() {
                 {instance.prStatus && (
                   <Action.OpenInBrowser title="Open PR" url={instance.prStatus.url} icon={Icon.Globe} />
                 )}
+
+                {instance.tmuxStatus?.exists && (
+                  <>
+                    <Action
+                      title="View Tmux Logs"
+                      onAction={async () => {
+                        try {
+                          const output = await getTmuxSessionOutput(instance.tmuxStatus!.name, 25);
+                          await showToast({
+                            style: Toast.Style.Success,
+                            title: 'Tmux Session Output',
+                            message: output.split('\n').slice(-3).join('\n'),
+                          });
+                        } catch (error) {
+                          await showToast({
+                            style: Toast.Style.Failure,
+                            title: 'Failed to get tmux output',
+                            message: error instanceof Error ? error.message : 'Unknown error',
+                          });
+                        }
+                      }}
+                      icon={Icon.Eye}
+                      shortcut={{ modifiers: ['cmd'], key: 't' }}
+                    />
+                    <Action
+                      title="Attach to Tmux Session"
+                      onAction={async () => {
+                        try {
+                          await attachToTmuxSession(instance.tmuxStatus!.name);
+                          await showToast({
+                            style: Toast.Style.Success,
+                            title: 'Opening tmux session',
+                            message: `Attaching to ${instance.tmuxStatus!.name}`,
+                          });
+                        } catch (error) {
+                          await showToast({
+                            style: Toast.Style.Failure,
+                            title: 'Failed to attach to tmux',
+                            message: error instanceof Error ? error.message : 'Unknown error',
+                          });
+                        }
+                      }}
+                      icon={Icon.Terminal}
+                      shortcut={{ modifiers: ['cmd', 'shift'], key: 't' }}
+                    />
+                  </>
+                )}
+
+                {instance.tmuxStatus && !instance.tmuxStatus.exists && (
+                  <Action
+                    title="Create Tmux Session"
+                    onAction={async () => {
+                      try {
+                        await createTmuxSession(instance.tmuxStatus!.name, instance.path);
+                        await showToast({
+                          style: Toast.Style.Success,
+                          title: 'Tmux session created',
+                          message: `Created ${instance.tmuxStatus!.name}`,
+                        });
+                        // Refresh to show new session status
+                        await loadInstances(true);
+                      } catch (error) {
+                        await showToast({
+                          style: Toast.Style.Failure,
+                          title: 'Failed to create tmux session',
+                          message: error instanceof Error ? error.message : 'Unknown error',
+                        });
+                      }
+                    }}
+                    icon={Icon.Plus}
+                    shortcut={{ modifiers: ['cmd'], key: 't' }}
+                  />
+                )}
+
                 <Action.ShowInFinder path={instance.path} />
                 <Action.CopyToClipboard title="Copy Path" content={instance.path} />
                 <Action
@@ -722,6 +821,21 @@ function getDetailMarkdown(instance: InstanceWithStatus): string {
       const ageMinutes = Math.floor(ageSeconds / 60);
       const timeStr = ageMinutes > 0 ? `${ageMinutes} minute${ageMinutes > 1 ? 's' : ''} ago` : 'just now';
       sections.push(`- **Last Activity:** ${timeStr}`);
+    }
+    sections.push('');
+  }
+
+  if (instance.tmuxStatus) {
+    const emoji = instance.tmuxStatus.exists ? '✅' : '⏸️';
+    const status = instance.tmuxStatus.exists ? 'Active' : 'Not running';
+    sections.push(`## Tmux Session ${emoji}\n`);
+    sections.push(`- **Name:** ${instance.tmuxStatus.name}`);
+    sections.push(`- **Status:** ${status}`);
+
+    if (instance.tmuxStatus.exists) {
+      sections.push(`\nUse **Cmd+T** to view logs or **Cmd+Shift+T** to attach`);
+    } else {
+      sections.push(`\nUse **Cmd+T** to create session`);
     }
     sections.push('');
   }
