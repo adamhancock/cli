@@ -512,12 +512,22 @@ class WorkstreamDaemon {
     try {
       const instance = this.instances.get(repoPath);
       if (instance && instance.claudeStatus) {
+        const wasWaiting = instance.claudeStatus.isWaiting;
         instance.claudeStatus.isWorking = true;
         instance.claudeStatus.isWaiting = false;
         await this.writeCache();
         this.broadcast();
 
         const projectName = repoPath.split('/').pop() || 'project';
+
+        // Only notify when resuming from waiting state (to reduce noise)
+        if (wasWaiting) {
+          await this.sendNotification(
+            'Claude Code',
+            `▶️ Claude resumed working in ${projectName}`
+          );
+        }
+
         log(`Claude started working in ${projectName}`);
       }
     } catch (error) {
