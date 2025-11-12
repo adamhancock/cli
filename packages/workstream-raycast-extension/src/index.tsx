@@ -1,20 +1,50 @@
 import { List, ActionPanel, Action, Icon, Color, showToast, Toast, closeMainWindow } from '@raycast/api';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { getVSCodeInstances, focusVSCodeInstance } from './utils/vscode';
 import { getGitInfo } from './utils/git';
 import { getPRStatus } from './utils/github';
 import { isClaudeCodeActive } from './utils/claude';
 import { getCachedInstances, setCachedInstances, clearCache } from './utils/cache';
-import { loadFromDaemon, triggerDaemonRefresh } from './utils/daemon-client';
+import { loadFromDaemon, triggerDaemonRefresh, subscribeToUpdates } from './utils/daemon-client';
 import type { InstanceWithStatus } from './types';
 
 export default function Command() {
   const [instances, setInstances] = useState<InstanceWithStatus[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadingMetadata, setLoadingMetadata] = useState(false);
+  const [isRealtimeMode, setIsRealtimeMode] = useState(false);
+  const cleanupRef = useRef<(() => void) | null>(null);
 
+  // Initial load
   useEffect(() => {
     loadInstances();
+  }, []);
+
+  // Subscribe to real-time updates from daemon
+  useEffect(() => {
+    console.log('Setting up WebSocket subscription...');
+
+    const cleanup = subscribeToUpdates(
+      (updatedInstances) => {
+        console.log('Received real-time update:', updatedInstances.length);
+        setIsRealtimeMode(true);
+        setInstances(updatedInstances);
+        setIsLoading(false);
+      },
+      () => {
+        // On error, fall back to polling/cache mode
+        console.log('WebSocket error, falling back to cache mode');
+        setIsRealtimeMode(false);
+      }
+    );
+
+    cleanupRef.current = cleanup;
+
+    // Cleanup on unmount
+    return () => {
+      console.log('Cleaning up WebSocket connection');
+      cleanup();
+    };
   }, []);
 
   async function loadInstances(forceRefresh = false, includePR = false) {
@@ -27,7 +57,19 @@ export default function Command() {
         console.log('Triggered daemon refresh');
         // Wait a bit for daemon to update cache
         await new Promise(resolve => setTimeout(resolve, 500));
+        // WebSocket will automatically update the UI, so we can return early
+        if (isRealtimeMode) {
+          setIsLoading(false);
+          return;
+        }
       }
+    }
+
+    // If we're in real-time mode and not forcing a refresh, let WebSocket handle updates
+    if (isRealtimeMode && !forceRefresh && instances.length > 0) {
+      console.log('Using real-time mode, skipping manual fetch');
+      setIsLoading(false);
+      return;
     }
 
     // Try to load from daemon first (fastest - ~10ms)
@@ -279,7 +321,11 @@ export default function Command() {
   return (
     <List
       isLoading={isLoading}
-      searchBarPlaceholder="Search VS Code instances..."
+      searchBarPlaceholder={
+        isRealtimeMode
+          ? "Search VS Code instances... ⚡ Real-time"
+          : "Search VS Code instances..."
+      }
     >
       {instances.length === 0 && !isLoading ? (
         <List.EmptyView

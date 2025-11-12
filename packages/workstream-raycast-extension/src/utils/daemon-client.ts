@@ -65,3 +65,79 @@ export async function triggerDaemonRefresh(): Promise<boolean> {
     }
   });
 }
+
+/**
+ * Subscribe to real-time updates from the daemon via WebSocket
+ * Returns a cleanup function to close the connection
+ */
+export function subscribeToUpdates(
+  onUpdate: (instances: InstanceWithStatus[]) => void,
+  onError?: () => void
+): () => void {
+  let ws: WebSocket | null = null;
+  let reconnectTimer: NodeJS.Timeout | null = null;
+  let isClosing = false;
+
+  const connect = () => {
+    if (isClosing) return;
+
+    try {
+      ws = new WebSocket(DAEMON_WS_URL);
+
+      ws.on('open', () => {
+        console.log('WebSocket connected to daemon');
+      });
+
+      ws.on('message', (data: Buffer) => {
+        try {
+          const message = JSON.parse(data.toString());
+          if (message.type === 'instances' && message.data) {
+            console.log(`Received update: ${message.data.length} instances`);
+            onUpdate(message.data);
+          }
+        } catch (error) {
+          console.error('Failed to parse WebSocket message:', error);
+        }
+      });
+
+      ws.on('error', (error) => {
+        console.error('WebSocket error:', error);
+        onError?.();
+      });
+
+      ws.on('close', () => {
+        console.log('WebSocket disconnected');
+        // Attempt to reconnect after 5 seconds if not intentionally closing
+        if (!isClosing) {
+          reconnectTimer = setTimeout(() => {
+            console.log('Attempting to reconnect...');
+            connect();
+          }, 5000);
+        }
+      });
+    } catch (error) {
+      console.error('Failed to create WebSocket:', error);
+      onError?.();
+      // Try to reconnect after 5 seconds
+      if (!isClosing) {
+        reconnectTimer = setTimeout(connect, 5000);
+      }
+    }
+  };
+
+  // Start initial connection
+  connect();
+
+  // Return cleanup function
+  return () => {
+    isClosing = true;
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+    if (ws) {
+      ws.close();
+      ws = null;
+    }
+  };
+}

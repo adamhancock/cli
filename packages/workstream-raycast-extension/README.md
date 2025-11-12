@@ -9,8 +9,10 @@ Quick switcher for VS Code windows with git status, PR info, and Claude Code int
 - **GitHub PR Status**: Displays PR information and CI check results
 - **Claude Code Detection**: Shows if Claude Code is active and whether it's working or idle
 - **Quick Switching**: Focus VS Code windows with keyboard shortcuts
+- **Real-time Updates**: WebSocket connection to daemon for instant status updates (optional)
 - **Smart Caching**: Caches metadata for 30 seconds for instant subsequent loads
 - **Progressive Loading**: Shows basic info immediately, enriches with metadata in background
+- **Auto Fallback**: Works standalone without daemon, or with daemon for enhanced performance
 
 ## Requirements
 
@@ -96,6 +98,8 @@ The detail panel shows:
 
 ## Performance & Caching
 
+### Standalone Mode (No Daemon)
+
 The extension uses intelligent caching to provide instant results:
 
 - **First load**: ~2-3 seconds (fetches all data)
@@ -109,7 +113,24 @@ The extension loads data progressively:
 2. Enriches with git info (~500ms)
 3. Adds PR status and checks (~2-3s)
 
-This means you see results instantly on subsequent invocations!
+### With Daemon (Recommended)
+
+Install the optional [@adamhancock/workstream-daemon](https://www.npmjs.com/package/@adamhancock/workstream-daemon) for enhanced performance:
+
+```bash
+pnpm add -g @adamhancock/workstream-daemon
+workstream install  # Install as macOS service
+workstream start    # Start the daemon
+```
+
+**With daemon:**
+- **Every load**: < 10ms (instant)
+- **Real-time updates**: Changes appear automatically via WebSocket
+- **No manual refresh needed**: Status updates as they happen
+- **Search bar indicator**: "⚡ Real-time" shows when connected
+- **Auto fallback**: If daemon stops, automatically falls back to standalone mode
+
+The daemon polls VS Code instances every 5 seconds and maintains a pre-computed cache, making the extension incredibly fast!
 
 ## How It Works
 
@@ -142,16 +163,27 @@ Uses GitHub CLI (`gh`) to fetch:
 
 ### Claude Code Detection
 
+**Standalone mode:**
 Checks for active Claude Code sessions by:
 1. Inspecting Claude process PIDs and their working directories
 2. Reading lock files from `~/.claude/ide/` directory
 3. Verifying processes are still running
-4. Monitoring CPU usage to detect if Claude is actively working (>5% CPU)
-5. Tracking lock file modification time for last activity
+4. Tracking lock file modification time for last activity
+
+**With daemon (hook-based, more accurate):**
+The daemon uses Claude Code hooks for real-time status tracking:
+1. Detects when you submit a prompt (UserPromptSubmit hook)
+2. Detects when Claude uses any tool (PreToolUse hook)
+3. Detects when Claude needs input (AskUserQuestion, ExitPlanMode)
+4. Detects when Claude finishes (Stop hook)
+5. Sends macOS notifications for waiting/finished events
 
 **Status Indicators:**
-- 🔥 **Working** (Purple): Claude Code is actively processing (high CPU usage)
-- 💤 **Idle** (Gray): Claude Code is running but idle (low CPU usage)
+- 🔥 **Working** (Purple): Claude is actively processing a task
+- 🤔 **Waiting** (Orange): Claude needs your input (plan approval, question, etc.)
+- 💤 **Idle** (Gray): Claude session exists but is inactive
+
+See the [daemon README](../workstream-daemon/README.md) for Claude Code hook setup instructions.
 
 ## Development
 
