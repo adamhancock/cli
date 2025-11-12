@@ -16,7 +16,7 @@ export interface DaemonCache {
  * Try to load instances from the daemon cache
  * Returns null if daemon is not running or cache is not available
  */
-export async function loadFromDaemon(): Promise<InstanceWithStatus[] | null> {
+export async function loadFromDaemon(): Promise<DaemonCache | null> {
   try {
     const content = await readFile(DAEMON_CACHE_FILE, 'utf-8');
     const cache: DaemonCache = JSON.parse(content);
@@ -29,7 +29,7 @@ export async function loadFromDaemon(): Promise<InstanceWithStatus[] | null> {
     }
 
     console.log(`Loaded ${cache.instances.length} instances from daemon (age: ${age}ms)`);
-    return cache.instances;
+    return cache;
   } catch (error) {
     // Daemon not running or cache not available
     return null;
@@ -71,7 +71,7 @@ export async function triggerDaemonRefresh(): Promise<boolean> {
  * Returns a cleanup function to close the connection
  */
 export function subscribeToUpdates(
-  onUpdate: (instances: InstanceWithStatus[]) => void,
+  onUpdate: (instances: InstanceWithStatus[], timestamp?: number) => void,
   onError?: () => void
 ): () => void {
   let ws: WebSocket | null = null;
@@ -88,12 +88,24 @@ export function subscribeToUpdates(
         console.log('WebSocket connected to daemon');
       });
 
-      ws.on('message', (data: Buffer) => {
+      ws.on('message', async (data: Buffer) => {
         try {
           const message = JSON.parse(data.toString());
           if (message.type === 'instances' && message.data) {
             console.log(`Received update: ${message.data.length} instances`);
-            onUpdate(message.data);
+
+            // Try to get the timestamp from the cache file
+            let timestamp: number | undefined;
+            try {
+              const cacheContent = await readFile(DAEMON_CACHE_FILE, 'utf-8');
+              const cache: DaemonCache = JSON.parse(cacheContent);
+              timestamp = cache.timestamp;
+            } catch {
+              // If we can't read the cache, use current time
+              timestamp = Date.now();
+            }
+
+            onUpdate(message.data, timestamp);
           }
         } catch (error) {
           console.error('Failed to parse WebSocket message:', error);

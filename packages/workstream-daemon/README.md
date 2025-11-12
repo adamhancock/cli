@@ -167,25 +167,21 @@ The daemon can receive real-time notifications from Claude Code via hooks:
      "hooks": {
        "UserPromptSubmit": [{
          "matcher": "*",
-         "hooks": [{"type": "command", "command": "~/.claude/notify-daemon.sh work_started"}]
+         "hooks": [{"type": "command", "command": "~/.claude/notify-daemon.sh"}]
        }],
-       "PreToolUse": [
-         {
-           "matcher": "AskUserQuestion|ExitPlanMode",
-           "hooks": [{"type": "command", "command": "~/.claude/notify-daemon.sh waiting_for_input"}]
-         },
-         {
-           "matcher": "*",
-           "hooks": [{"type": "command", "command": "~/.claude/notify-daemon.sh work_started"}]
-         }
-       ],
+       "PreToolUse": [{
+         "matcher": "*",
+         "hooks": [{"type": "command", "command": "~/.claude/notify-daemon.sh"}]
+       }],
        "Stop": [{
          "matcher": "*",
-         "hooks": [{"type": "command", "command": "~/.claude/notify-daemon.sh work_stopped"}]
+         "hooks": [{"type": "command", "command": "~/.claude/notify-daemon.sh"}]
        }]
      }
    }
    ```
+
+   **Note**: The hook script automatically parses the event type from Claude's JSON context. It detects when AskUserQuestion or ExitPlanMode tools are used and sends `waiting_for_input` instead of `work_started`. No arguments needed!
 
 ### What It Does
 

@@ -5,7 +5,7 @@ import { getGitInfo } from './utils/git';
 import { getPRStatus } from './utils/github';
 import { isClaudeCodeActive } from './utils/claude';
 import { getCachedInstances, setCachedInstances, clearCache, recordUsage, getUsageHistory } from './utils/cache';
-import { loadFromDaemon, triggerDaemonRefresh, subscribeToUpdates } from './utils/daemon-client';
+import { loadFromDaemon, triggerDaemonRefresh, subscribeToUpdates, type DaemonCache } from './utils/daemon-client';
 import { getTmuxSessionOutput, createTmuxSession, attachToTmuxSession } from './utils/tmux';
 import type { InstanceWithStatus } from './types';
 
@@ -14,6 +14,7 @@ export default function Command() {
   const [isLoading, setIsLoading] = useState(true);
   const [loadingMetadata, setLoadingMetadata] = useState(false);
   const [isRealtimeMode, setIsRealtimeMode] = useState(false);
+  const [lastRefreshTime, setLastRefreshTime] = useState<Date | null>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
 
   // Initial load
@@ -26,10 +27,11 @@ export default function Command() {
     console.log('Setting up WebSocket subscription...');
 
     const cleanup = subscribeToUpdates(
-      (updatedInstances) => {
+      (updatedInstances, timestamp) => {
         console.log('Received real-time update:', updatedInstances.length);
         setIsRealtimeMode(true);
         setInstances(sortByUsageHistory(updatedInstances));
+        setLastRefreshTime(timestamp ? new Date(timestamp) : new Date());
         setIsLoading(false);
       },
       () => {
@@ -75,19 +77,21 @@ export default function Command() {
 
     // Try to load from daemon first (fastest - ~10ms)
     if (!forceRefresh) {
-      const daemonInstances = await loadFromDaemon();
-      if (daemonInstances && daemonInstances.length > 0) {
-        console.log('Using daemon cache:', daemonInstances.length);
-        setInstances(sortByUsageHistory(daemonInstances));
+      const daemonCache = await loadFromDaemon();
+      if (daemonCache && daemonCache.instances.length > 0) {
+        console.log('Using daemon cache:', daemonCache.instances.length);
+        setInstances(sortByUsageHistory(daemonCache.instances));
+        setLastRefreshTime(new Date(daemonCache.timestamp));
         setIsLoading(false);
         return;
       }
     } else {
       // On force refresh, always try daemon first (it should have fresh data now)
-      const daemonInstances = await loadFromDaemon();
-      if (daemonInstances && daemonInstances.length > 0) {
-        console.log('Using refreshed daemon cache:', daemonInstances.length);
-        setInstances(sortByUsageHistory(daemonInstances));
+      const daemonCache = await loadFromDaemon();
+      if (daemonCache && daemonCache.instances.length > 0) {
+        console.log('Using refreshed daemon cache:', daemonCache.instances.length);
+        setInstances(sortByUsageHistory(daemonCache.instances));
+        setLastRefreshTime(new Date(daemonCache.timestamp));
         setIsLoading(false);
         return;
       }
@@ -99,6 +103,7 @@ export default function Command() {
       if (cached && cached.length > 0) {
         console.log('Using Raycast cache:', cached.length);
         setInstances(sortByUsageHistory(cached));
+        // Don't set lastRefreshTime here - we don't have the daemon timestamp
         setIsLoading(false);
         return;
       }
@@ -169,6 +174,7 @@ export default function Command() {
 
       const sortedEnriched = sortByUsageHistory(fullyEnriched);
       setInstances(sortedEnriched);
+      // Don't set lastRefreshTime here - this is a direct fetch, not from daemon
 
       // Cache the fully enriched instances (sorted)
       setCachedInstances(sortedEnriched);
@@ -217,6 +223,24 @@ export default function Command() {
       // If both never used or same time, sort alphabetically
       return a.name.localeCompare(b.name);
     });
+  }
+
+  function getRelativeTimeString(date: Date | null): string {
+    if (!date) return '';
+
+    const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
+
+    if (seconds < 5) return 'just now';
+    if (seconds < 60) return `${seconds}s ago`;
+
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+
+    const days = Math.floor(hours / 24);
+    return `${days}d ago`;
   }
 
   function getStatusIcon(instance: InstanceWithStatus): Icon {
@@ -398,8 +422,8 @@ export default function Command() {
       isLoading={isLoading}
       searchBarPlaceholder={
         isRealtimeMode
-          ? "Search VS Code instances... ⚡ Real-time"
-          : "Search VS Code instances..."
+          ? `Search VS Code instances... ⚡ Real-time${lastRefreshTime ? ` • GitHub data ${getRelativeTimeString(lastRefreshTime)}` : ''}`
+          : `Search VS Code instances...${lastRefreshTime ? ` • GitHub data ${getRelativeTimeString(lastRefreshTime)}` : ''}`
       }
     >
       {instances.length === 0 && !isLoading ? (
