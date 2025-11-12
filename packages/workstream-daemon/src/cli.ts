@@ -124,6 +124,45 @@ async function uninstall() {
   }
 }
 
+async function runInConsole() {
+  const running = await isRunning();
+  if (running) {
+    console.log('⚠️  Daemon is already running in background');
+    console.log('Stop it first with: workstream stop');
+    process.exit(1);
+  }
+
+  console.log('🚀 Starting workstream daemon in console mode...');
+  console.log('Press Ctrl+C to stop\n');
+
+  const indexPath = join(__dirname, 'index.ts');
+  const child = spawn('tsx', [indexPath], {
+    stdio: 'inherit', // Show output in current terminal
+  });
+
+  // Handle Ctrl+C
+  process.on('SIGINT', () => {
+    console.log('\n\n🛑 Stopping daemon...');
+    child.kill('SIGTERM');
+    setTimeout(() => {
+      process.exit(0);
+    }, 100);
+  });
+
+  child.on('exit', (code) => {
+    if (code !== 0 && code !== null) {
+      console.error(`\n❌ Daemon exited with code ${code}`);
+      process.exit(code);
+    }
+    process.exit(0);
+  });
+
+  child.on('error', (error) => {
+    console.error('❌ Failed to start daemon:', error);
+    process.exit(1);
+  });
+}
+
 async function logs() {
   const logsType = process.argv[3] || 'all';
 
@@ -186,6 +225,7 @@ Usage:
 Commands:
   start       Start the daemon in the background
   stop        Stop the running daemon
+  console     Run the daemon in the foreground with live output
   status      Check if daemon is running
   logs        Watch daemon logs in real-time
               Options: all (default), stdout, stderr
@@ -194,7 +234,8 @@ Commands:
   help        Show this help message
 
 Examples:
-  workstream start         # Start the daemon
+  workstream start         # Start the daemon in background
+  workstream console       # Run in foreground (useful for debugging)
   workstream status        # Check status
   workstream logs          # Watch all logs
   workstream logs stderr   # Watch only error logs
@@ -211,6 +252,9 @@ async function main() {
       break;
     case 'stop':
       await stop();
+      break;
+    case 'console':
+      await runInConsole();
       break;
     case 'status':
       await status();

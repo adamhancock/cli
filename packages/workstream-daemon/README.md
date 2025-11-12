@@ -55,6 +55,7 @@ This will:
 ```bash
 workstream start         # Start daemon in background
 workstream stop          # Stop running daemon
+workstream console       # Run daemon in foreground with live output (debugging)
 workstream status        # Check if daemon is running
 workstream logs          # Watch all logs in real-time
 workstream logs stdout   # Watch only stdout logs
@@ -65,6 +66,14 @@ workstream help          # Show help message
 ```
 
 ### Running Manually (for development)
+
+The easiest way to run the daemon with live output:
+
+```bash
+workstream console
+```
+
+Or run directly with pnpm (same behavior):
 
 ```bash
 pnpm start
