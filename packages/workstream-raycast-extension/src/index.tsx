@@ -265,26 +265,63 @@ export default function Command() {
   function getSubtitle(instance: InstanceWithStatus): string {
     const parts: string[] = [];
 
+    // Branch name with icon
     if (instance.gitInfo) {
-      parts.push(instance.gitInfo.branch);
+      parts.push(`⎇ ${instance.gitInfo.branch}`);
 
-      if (instance.gitInfo.ahead || instance.gitInfo.behind) {
-        const syncInfo: string[] = [];
-        if (instance.gitInfo.ahead) syncInfo.push(`↑${instance.gitInfo.ahead}`);
-        if (instance.gitInfo.behind) syncInfo.push(`↓${instance.gitInfo.behind}`);
-        parts.push(syncInfo.join(' '));
+      // PR info (compact) - show PR number with status emoji
+      if (instance.prStatus) {
+        let prDisplay = `#${instance.prStatus.number}`;
+
+        if (instance.prStatus.state === 'OPEN') {
+          // Add check status for open PRs
+          if (instance.prStatus.checks) {
+            if (instance.prStatus.checks.conclusion === 'success') {
+              prDisplay += ' ✅';
+            } else if (instance.prStatus.checks.conclusion === 'failure') {
+              prDisplay += ' ❌';
+            } else if (instance.prStatus.checks.conclusion === 'pending') {
+              prDisplay += ' 🟡';
+            }
+          }
+          // Add merge conflict warning
+          if (instance.prStatus.mergeable === 'CONFLICTING') {
+            prDisplay += ' ⚠️';
+          }
+        } else if (instance.prStatus.state === 'MERGED') {
+          prDisplay += ' ✓';
+        } else if (instance.prStatus.state === 'CLOSED') {
+          prDisplay += ' ✗';
+        }
+
+        parts.push(prDisplay);
       }
 
+      // Working directory status - compact format
       if (instance.gitInfo.isDirty) {
-        parts.push('✱');
+        if (instance.gitInfo.modified > 0) {
+          parts.push(`±${instance.gitInfo.modified}`);
+        }
+        if (instance.gitInfo.staged > 0) {
+          parts.push(`●${instance.gitInfo.staged}`);
+        }
+        if (instance.gitInfo.untracked > 0) {
+          parts.push(`?${instance.gitInfo.untracked}`);
+        }
+      } else {
+        parts.push('✓');
+      }
+
+      // Ahead/behind
+      if (instance.gitInfo.ahead && instance.gitInfo.ahead > 0) {
+        parts.push(`↑${instance.gitInfo.ahead}`);
+      }
+      if (instance.gitInfo.behind && instance.gitInfo.behind > 0) {
+        parts.push(`↓${instance.gitInfo.behind}`);
       }
     }
 
-    if (instance.prStatus) {
-      parts.push(`PR #${instance.prStatus.number}`);
-    }
-
-    return parts.join(' • ');
+    return parts.length > 0 ? `[${parts.join(' ')}]` : '';
   }
 
   function getAccessories(instance: InstanceWithStatus): List.Item.Accessory[] {
@@ -544,22 +581,51 @@ function getDetailMarkdown(instance: InstanceWithStatus): string {
 
   if (instance.gitInfo) {
     sections.push(`## Git Status\n`);
-    sections.push(`- **Branch:** ${instance.gitInfo.branch}`);
 
-    if (instance.gitInfo.remoteBranch) {
-      sections.push(`- **Remote:** ${instance.gitInfo.remoteBranch}`);
-    }
+    // Branch info
+    const branchInfo = instance.gitInfo.remoteBranch
+      ? `${instance.gitInfo.branch} → ${instance.gitInfo.remoteBranch}`
+      : instance.gitInfo.branch;
+    sections.push(`- **Branch:** ⎇ ${branchInfo}`);
 
-    if (instance.gitInfo.ahead || instance.gitInfo.behind) {
-      sections.push(`- **Sync:** ↑${instance.gitInfo.ahead || 0} commits ahead, ↓${instance.gitInfo.behind || 0} commits behind`);
-    }
-
-    sections.push(`- **Status:** ${instance.gitInfo.isDirty ? '✱ Dirty' : '✓ Clean'}`);
-
+    // Working directory status
     if (instance.gitInfo.isDirty) {
-      sections.push(
-        `- **Changes:** ${instance.gitInfo.modified} modified, ${instance.gitInfo.staged} staged, ${instance.gitInfo.untracked} untracked`
-      );
+      const statusParts: string[] = [];
+      if (instance.gitInfo.staged > 0) {
+        statusParts.push(`●${instance.gitInfo.staged} staged`);
+      }
+      if (instance.gitInfo.modified > 0) {
+        statusParts.push(`±${instance.gitInfo.modified} modified`);
+      }
+      if (instance.gitInfo.untracked > 0) {
+        statusParts.push(`?${instance.gitInfo.untracked} untracked`);
+      }
+      sections.push(`- **Working tree:** ${statusParts.join(', ')}`);
+    } else {
+      sections.push(`- **Working tree:** ✓ clean`);
+    }
+
+    // Remote sync status
+    if (instance.gitInfo.remoteBranch) {
+      const remoteParts: string[] = [];
+      if (instance.gitInfo.ahead && instance.gitInfo.ahead > 0) {
+        remoteParts.push(`↑${instance.gitInfo.ahead} ahead`);
+      }
+      if (instance.gitInfo.behind && instance.gitInfo.behind > 0) {
+        remoteParts.push(`↓${instance.gitInfo.behind} behind`);
+      }
+
+      if (remoteParts.length > 0) {
+        sections.push(`- **Remote sync:** ${remoteParts.join(', ')}`);
+      } else if (instance.gitInfo.ahead === 0 && instance.gitInfo.behind === 0) {
+        sections.push(`- **Remote sync:** ✓ up to date`);
+      }
+    }
+
+    // Last commit
+    if (instance.gitInfo.lastCommit) {
+      sections.push(`- **Last commit:** ${instance.gitInfo.lastCommit.message}`);
+      sections.push(`  - by ${instance.gitInfo.lastCommit.author} • ${instance.gitInfo.lastCommit.date}`);
     }
 
     sections.push('');
