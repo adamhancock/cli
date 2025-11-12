@@ -147,6 +147,9 @@ importers:
 
   packages/workstream-daemon:
     dependencies:
+      tsx:
+        specifier: ^4.19.2
+        version: 4.20.5
       ws:
         specifier: ^8.18.0
         version: 8.18.3
@@ -160,9 +163,6 @@ importers:
       '@types/ws':
         specifier: ^8.5.13
         version: 8.18.1
-      tsx:
-        specifier: ^4.19.2
-        version: 4.20.5
       typescript:
         specifier: ^5.4.5
         version: 5.9.2
