@@ -319,6 +319,14 @@ export default function Command() {
       });
     }
 
+    // Show merge conflict warning
+    if (instance.prStatus?.mergeable === 'CONFLICTING') {
+      accessories.push({
+        icon: { source: Icon.ExclamationMark, tintColor: Color.Red },
+        tooltip: 'PR has merge conflicts',
+      });
+    }
+
     if (instance.prStatus?.checks) {
       const { passing, failing, pending, total } = instance.prStatus.checks;
       accessories.push({
@@ -426,6 +434,27 @@ export default function Command() {
                         />
                         <List.Item.Detail.Metadata.Label title="State" text={instance.prStatus.state} />
                         <List.Item.Detail.Metadata.Label title="Author" text={instance.prStatus.author} />
+
+                        {instance.prStatus.mergeable && (
+                          <List.Item.Detail.Metadata.TagList title="Mergeable">
+                            <List.Item.Detail.Metadata.TagList.Item
+                              text={
+                                instance.prStatus.mergeable === 'MERGEABLE'
+                                  ? 'Ready to merge'
+                                  : instance.prStatus.mergeable === 'CONFLICTING'
+                                    ? 'Has conflicts'
+                                    : 'Calculating...'
+                              }
+                              color={
+                                instance.prStatus.mergeable === 'MERGEABLE'
+                                  ? Color.Green
+                                  : instance.prStatus.mergeable === 'CONFLICTING'
+                                    ? Color.Red
+                                    : Color.Yellow
+                              }
+                            />
+                          </List.Item.Detail.Metadata.TagList>
+                        )}
 
                         {instance.prStatus.checks && (
                           <>
@@ -540,7 +569,18 @@ function getDetailMarkdown(instance: InstanceWithStatus): string {
     sections.push(`## Pull Request\n`);
     sections.push(`**[#${instance.prStatus.number} ${instance.prStatus.title}](${instance.prStatus.url})**\n`);
     sections.push(`- **State:** ${instance.prStatus.state}`);
-    sections.push(`- **Author:** ${instance.prStatus.author}\n`);
+    sections.push(`- **Author:** ${instance.prStatus.author}`);
+
+    if (instance.prStatus.mergeable) {
+      const mergeText =
+        instance.prStatus.mergeable === 'MERGEABLE'
+          ? '✅ Ready to merge'
+          : instance.prStatus.mergeable === 'CONFLICTING'
+            ? '⚠️ Has merge conflicts'
+            : '⏳ Calculating...';
+      sections.push(`- **Mergeable:** ${mergeText}`);
+    }
+    sections.push('');
 
     if (instance.prStatus.checks) {
       const { passing, failing, pending, conclusion } = instance.prStatus.checks;

@@ -28,7 +28,7 @@ export async function getPRStatus(repoPath: string, branch?: string): Promise<PR
 
     // Get basic PR information using branch name and repo URL
     const { stdout: prInfo } = await execAsync(
-      `/opt/homebrew/bin/gh pr view "${branch}" --repo="$(/usr/bin/git -C "${repoPath}" remote get-url origin)" --json number,title,url,state,author 2>/dev/null`
+      `/opt/homebrew/bin/gh pr view "${branch}" --repo="$(/usr/bin/git -C "${repoPath}" remote get-url origin)" --json number,title,url,state,author,mergeable 2>/dev/null`
     );
 
     if (!prInfo.trim()) {
@@ -86,6 +86,7 @@ export async function getPRStatus(repoPath: string, branch?: string): Promise<PR
       url: pr.url,
       state: pr.state,
       author: pr.author?.login || pr.author?.name || 'Unknown',
+      mergeable: pr.mergeable,
       checks,
     };
   } catch (error) {
