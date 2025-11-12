@@ -1,6 +1,6 @@
 {
   "name": "@adamhancock/workstream-daemon",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Background daemon that maintains real-time VS Code instance metadata for instant access",
   "type": "module",
   "bin": {

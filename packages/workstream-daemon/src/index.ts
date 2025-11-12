@@ -273,7 +273,7 @@ class WorkstreamDaemon {
       // Log both limits for visibility
       const corePercent = Math.round((coreLimit.remaining / coreLimit.limit) * 100);
       const graphqlPercent = Math.round((graphqlLimit.remaining / graphqlLimit.limit) * 100);
-      log(`GitHub Rate Limits - Core: ${corePercent}% (${coreLimit.remaining}/${coreLimit.limit}), GraphQL: ${graphqlPercent}% (${graphqlLimit.remaining}/${graphqlLimit.limit})`);
+      log(`GitHub Rate Limits - Core: ${corePercent}% remaining (${coreLimit.remaining}/${coreLimit.limit}), GraphQL: ${graphqlPercent}% remaining (${graphqlLimit.remaining}/${graphqlLimit.limit})`);
 
       // Adjust polling interval based on rate limit
       if (this.ghRateLimit!.remaining < RATE_LIMIT_THRESHOLD) {
