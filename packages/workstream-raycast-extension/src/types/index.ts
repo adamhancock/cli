@@ -3,6 +3,8 @@ export interface VSCodeInstance {
   path: string;
   branch?: string;
   isGitRepo: boolean;
+  lastActivityTime: Date;
+  windowOrder?: number; // Lower number = more recently focused window
 }
 
 export interface GitInfo {
