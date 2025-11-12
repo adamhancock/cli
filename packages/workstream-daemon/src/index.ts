@@ -135,19 +135,25 @@ class WorkstreamDaemon {
     this.subscriber.on('message', async (channel, message) => {
       try {
         const data = JSON.parse(message);
+        log(`📨 Received message on ${channel}: ${data.type}`);
 
         if (channel === REDIS_CHANNELS.REFRESH) {
           // Handle general refresh requests
           if (data.type === 'refresh') {
+            log('  🔄 Triggering forced PR refresh');
             this.pollInstances(true); // Force PR refresh
           }
         } else if (channel === REDIS_CHANNELS.CLAUDE) {
           // Handle Claude-specific events
+          const projectName = data.path?.split('/').pop() || 'unknown';
           if (data.type === 'work_started') {
+            log(`  ▶️  Claude started working in ${projectName}`);
             await this.handleClaudeStarted(data.path);
           } else if (data.type === 'waiting_for_input') {
+            log(`  ⏸️  Claude waiting for input in ${projectName}`);
             await this.handleClaudeWaiting(data.path);
           } else if (data.type === 'work_stopped') {
+            log(`  ⏹️  Claude stopped in ${projectName}`);
             await this.handleClaudeFinished(data.path);
           }
         }
@@ -200,23 +206,32 @@ class WorkstreamDaemon {
   }
 
   async start() {
-    log('Workstream Daemon starting...');
+    log('🚀 Workstream Daemon starting...');
 
     // Ensure cache directory exists
+    log('📁 Setting up cache directory...');
     await mkdir(CACHE_DIR, { recursive: true });
 
     // Check initial rate limit
+    log('🔍 Checking GitHub rate limits...');
     await this.checkGitHubRateLimit();
 
     // Initial poll
+    log('🔄 Running initial poll...');
     await this.pollInstances();
 
     // Start polling with dynamic interval
     this.scheduleNextPoll();
 
-    log(`Daemon running. Initial polling interval: ${this.currentPollInterval}ms`);
-    log(`Cache file: ${CACHE_FILE}`);
-    log(`Redis pub/sub channels: ${REDIS_CHANNELS.UPDATES}, ${REDIS_CHANNELS.REFRESH}, ${REDIS_CHANNELS.CLAUDE}`);
+    log('');
+    log('✅ Daemon running');
+    log(`   Polling interval: ${this.currentPollInterval}ms`);
+    log(`   Cache file: ${CACHE_FILE}`);
+    log(`   Redis channels:`);
+    log(`     - Updates: ${REDIS_CHANNELS.UPDATES}`);
+    log(`     - Refresh: ${REDIS_CHANNELS.REFRESH}`);
+    log(`     - Claude: ${REDIS_CHANNELS.CLAUDE}`);
+    log('');
   }
 
   private scheduleNextPoll() {
@@ -256,9 +271,9 @@ class WorkstreamDaemon {
       this.ghRateLimit = effectiveLimit;
 
       // Log both limits for visibility
-      log(`GitHub Rate Limits:`);
-      log(`  Core REST: ${coreLimit.remaining}/${coreLimit.limit} (resets at ${new Date(coreLimit.reset * 1000).toLocaleTimeString()})`);
-      log(`  GraphQL: ${graphqlLimit.remaining}/${graphqlLimit.limit} (resets at ${new Date(graphqlLimit.reset * 1000).toLocaleTimeString()})`);
+      const corePercent = Math.round((coreLimit.remaining / coreLimit.limit) * 100);
+      const graphqlPercent = Math.round((graphqlLimit.remaining / graphqlLimit.limit) * 100);
+      log(`GitHub Rate Limits - Core: ${corePercent}% (${coreLimit.remaining}/${coreLimit.limit}), GraphQL: ${graphqlPercent}% (${graphqlLimit.remaining}/${graphqlLimit.limit})`);
 
       // Adjust polling interval based on rate limit
       if (this.ghRateLimit!.remaining < RATE_LIMIT_THRESHOLD) {
@@ -275,18 +290,24 @@ class WorkstreamDaemon {
 
   private async pollInstances(forcePR: boolean = false) {
     try {
+      log(`🔄 Starting poll${forcePR ? ' (forced PR refresh)' : ''}...`);
+
       // Check rate limit FIRST to have latest values before enriching
       await this.checkGitHubRateLimit();
 
       const instances = await this.getVSCodeInstances();
+      log(`📁 Found ${instances.length} VS Code instances`);
 
       // Update instances map
       const newPaths = new Set(instances.map(i => i.path));
 
       // Remove instances that no longer exist
+      let removedCount = 0;
       for (const [path] of this.instances) {
         if (!newPaths.has(path)) {
           this.instances.delete(path);
+          removedCount++;
+          log(`  ➖ Removed closed instance: ${path.split('/').pop()}`);
         }
       }
 
@@ -295,9 +316,17 @@ class WorkstreamDaemon {
         log('⚠️  Skipping PR status updates due to rate limit exhaustion');
       }
 
-      // Update or add instances
+      // Update or add instances (in parallel for speed)
+      const enrichmentTasks: Array<{
+        instance: VSCodeInstance;
+        shouldUpdatePR: boolean;
+        projectName: string;
+      }> = [];
+
+      let skippedCount = 0;
       for (const instance of instances) {
         const existing = this.instances.get(instance.path);
+        const projectName = instance.path.split('/').pop() || instance.path;
 
         // Always update git and Claude (local, no rate limits)
         // Only refresh PR status if we have rate limit and it's been 30+ seconds (or forced)
@@ -305,18 +334,60 @@ class WorkstreamDaemon {
         const shouldUpdatePR = forcePR || !existing || (Date.now() - existing.lastUpdated) > 30000; // 30 seconds
 
         if (shouldUpdateLocal) {
-          const enriched = await this.enrichInstance(instance, shouldUpdatePR);
-          this.instances.set(instance.path, enriched);
+          enrichmentTasks.push({ instance, shouldUpdatePR, projectName });
+        } else {
+          skippedCount++;
+        }
+      }
+
+      // Enrich all instances in parallel
+      let updatedCount = 0;
+      if (enrichmentTasks.length > 0) {
+        log(`  🔍 Enriching ${enrichmentTasks.length} instances in parallel...`);
+        const enrichmentResults = await Promise.all(
+          enrichmentTasks.map(async ({ instance, shouldUpdatePR, projectName }) => {
+            try {
+              const enriched = await this.enrichInstance(instance, shouldUpdatePR);
+              return { success: true, enriched, projectName, shouldUpdatePR };
+            } catch (error) {
+              logError(`  ❌ Failed to enrich ${projectName}:`, error);
+              return { success: false, projectName };
+            }
+          })
+        );
+
+        // Process results and update instances map
+        for (const result of enrichmentResults) {
+          if (result.success && 'enriched' in result) {
+            this.instances.set(result.enriched.path, result.enriched);
+            updatedCount++;
+
+            // Log key status info
+            const enriched = result.enriched;
+            log(`  ✅ ${result.projectName}${result.shouldUpdatePR ? ' (with PR)' : ''}`);
+            if (enriched.gitInfo) {
+              log(`     📊 Git: ${enriched.gitInfo.branch}${enriched.gitInfo.isDirty ? ' (dirty)' : ' (clean)'}`);
+            }
+            if (enriched.prStatus) {
+              log(`     🔀 PR #${enriched.prStatus.number}: ${enriched.prStatus.state}`);
+            }
+            if (enriched.claudeStatus?.active) {
+              const claudeState = enriched.claudeStatus.isWaiting ? 'waiting' : enriched.claudeStatus.isWorking ? 'working' : 'idle';
+              log(`     🤖 Claude: ${claudeState} (pid ${enriched.claudeStatus.pid})`);
+            }
+          }
         }
       }
 
       // Write to cache file (for compatibility)
       await this.writeCache();
+      log(`💾 Wrote cache file`);
 
       // Publish to Redis
       await this.publishUpdate();
+      log(`📡 Published ${this.instances.size} instances to Redis`);
 
-      log(`Updated ${this.instances.size} instances${forcePR ? ' (forced PR refresh)' : ''}`);
+      log(`✅ Poll complete: ${updatedCount} updated, ${skippedCount} skipped, ${removedCount} removed`);
     } catch (error) {
       logError('Error polling instances:', error);
     }
