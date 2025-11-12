@@ -14,8 +14,6 @@ interface VSCodeInstance {
   path: string;
   branch?: string;
   isGitRepo: boolean;
-  lastActivityTime: Date;
-  windowOrder?: number; // Lower number = more recently focused window
 }
 
 interface GitInfo {
@@ -263,61 +261,6 @@ class WorkstreamDaemon {
     await writeFile(CACHE_FILE, JSON.stringify(data, null, 2));
   }
 
-  private async getVSCodeWindowOrder(): Promise<Map<string, number>> {
-    const orderMap = new Map<string, number>();
-
-    try {
-      const script = `
-        tell application "System Events"
-          if not (exists process "Code") then
-            return ""
-          end if
-
-          tell process "Code"
-            set windowNames to name of every window
-            return windowNames as text
-          end tell
-        end tell
-      `;
-
-      const result = await $`/usr/bin/osascript -e ${script}`.quiet();
-
-      if (!result.stdout.trim()) {
-        return orderMap;
-      }
-
-      // Window names are comma-separated, frontmost (most recent) is first
-      const windowNames = result.stdout.trim().split(', ');
-      windowNames.forEach((windowName: string, index: number) => {
-        // VS Code window titles often end with " - folder-name"
-        const match = windowName.match(/^(.+?)\s*(?:—|-)?\s*([^—-]+)$/);
-        if (match && match[2]) {
-          const folderName = match[2].trim();
-          orderMap.set(folderName, index);
-        }
-      });
-    } catch {
-      // Silent fail - window order is optional
-    }
-
-    return orderMap;
-  }
-
-  private async getLastActivityTime(folderPath: string): Promise<Date> {
-    try {
-      const result = await $`/usr/bin/find ${folderPath} -type f -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/dist/*" -not -path "*/build/*" -exec stat -f "%m %N" {} + 2>/dev/null | sort -rn | head -1`.quiet();
-
-      if (result.stdout.trim()) {
-        const timestamp = parseInt(result.stdout.trim().split(' ')[0]);
-        return new Date(timestamp * 1000);
-      }
-    } catch {
-      // Ignore errors
-    }
-
-    return new Date();
-  }
-
   private async getVSCodeInstances(): Promise<VSCodeInstance[]> {
     try {
       const result = await $`/usr/sbin/lsof -c "Code Helper" -a -d cwd -Fn | grep '^n/' | cut -c2- | sort -u`;
@@ -331,9 +274,6 @@ class WorkstreamDaemon {
         .split('\n')
         .filter(Boolean)
         .filter((p: string) => p !== '/' && p.length > 1);
-
-      // Get window order for accurate "last used" ordering
-      const windowOrder = await this.getVSCodeWindowOrder();
 
       const instances: VSCodeInstance[] = [];
 
@@ -350,32 +290,8 @@ class WorkstreamDaemon {
           // Not a git repo
         }
 
-        // Get last activity time for sorting
-        const lastActivityTime = await this.getLastActivityTime(folderPath);
-
-        instances.push({
-          name,
-          path: folderPath,
-          branch,
-          isGitRepo,
-          lastActivityTime,
-          windowOrder: windowOrder.get(name),
-        });
+        instances.push({ name, path: folderPath, branch, isGitRepo });
       }
-
-      // Sort by window order first (if available), then by last activity time
-      instances.sort((a, b) => {
-        // If both have window order, use that (lower index = more recent)
-        if (a.windowOrder !== undefined && b.windowOrder !== undefined) {
-          return a.windowOrder - b.windowOrder;
-        }
-        // If only one has window order, prioritize it
-        if (a.windowOrder !== undefined) return -1;
-        if (b.windowOrder !== undefined) return 1;
-
-        // Fall back to last activity time (more recent first)
-        return b.lastActivityTime.getTime() - a.lastActivityTime.getTime();
-      });
 
       return instances;
     } catch {
