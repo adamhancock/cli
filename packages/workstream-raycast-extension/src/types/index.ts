@@ -50,6 +50,7 @@ export interface ClaudeStatus {
   pid: number;
   ideName: string;
   isWorking: boolean; // true if Claude is actively processing
+  isWaiting?: boolean; // true if Claude is waiting for user input
   lastActivityTime?: Date;
 }
 

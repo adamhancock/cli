@@ -11,6 +11,7 @@ export interface ClaudeSession {
   workspaceFolders: string[];
   ideName: string;
   isWorking: boolean;
+  isWaiting?: boolean;
   lastActivityTime?: Date;
 }
 
