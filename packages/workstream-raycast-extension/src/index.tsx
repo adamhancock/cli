@@ -748,12 +748,12 @@ function getDetailMarkdown(instance: InstanceWithStatus): string {
     sections.push('');
 
     if (instance.prStatus.checks) {
-      const { passing, failing, pending, conclusion, runs } = instance.prStatus.checks;
+      const { passing, failing, pending, conclusion, runs, total } = instance.prStatus.checks;
 
       // Overall check status
       let checksStatus = '';
       if (conclusion === 'success') {
-        checksStatus = `✅ All checks passing (${passing}/${runs.length})`;
+        checksStatus = `✅ All checks passing (${passing}/${total})`;
       } else if (conclusion === 'failure') {
         checksStatus = `❌ ${failing} checks failing`;
         if (passing > 0) {
@@ -762,7 +762,7 @@ function getDetailMarkdown(instance: InstanceWithStatus): string {
         if (pending > 0) {
           checksStatus += `, ${pending} pending`;
         }
-        checksStatus += ` (${runs.length} total)`;
+        checksStatus += ` (${total} total)`;
       } else if (conclusion === 'pending') {
         checksStatus = `🟡 ${pending} checks pending`;
         if (passing > 0) {
@@ -771,7 +771,7 @@ function getDetailMarkdown(instance: InstanceWithStatus): string {
         if (failing > 0) {
           checksStatus += `, ${failing} failing`;
         }
-        checksStatus += ` (${runs.length} total)`;
+        checksStatus += ` (${total} total)`;
       }
 
       sections.push(`### Checks\n`);
