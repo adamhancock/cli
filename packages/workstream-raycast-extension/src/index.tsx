@@ -649,13 +649,64 @@ function getDetailMarkdown(instance: InstanceWithStatus): string {
     sections.push('');
 
     if (instance.prStatus.checks) {
-      const { passing, failing, pending, conclusion } = instance.prStatus.checks;
-      const emoji =
-        conclusion === 'success' ? '✅' : conclusion === 'failure' ? '❌' : '⏳';
-      sections.push(`### Checks ${emoji}\n`);
-      sections.push(`- ${passing} passing`);
-      sections.push(`- ${failing} failing`);
-      sections.push(`- ${pending} pending\n`);
+      const { passing, failing, pending, conclusion, runs } = instance.prStatus.checks;
+
+      // Overall check status
+      let checksStatus = '';
+      if (conclusion === 'success') {
+        checksStatus = `✅ All checks passing (${passing}/${runs.length})`;
+      } else if (conclusion === 'failure') {
+        checksStatus = `❌ ${failing} checks failing`;
+        if (passing > 0) {
+          checksStatus += `, ${passing} passing`;
+        }
+        if (pending > 0) {
+          checksStatus += `, ${pending} pending`;
+        }
+        checksStatus += ` (${runs.length} total)`;
+      } else if (conclusion === 'pending') {
+        checksStatus = `🟡 ${pending} checks pending`;
+        if (passing > 0) {
+          checksStatus += `, ${passing} passing`;
+        }
+        if (failing > 0) {
+          checksStatus += `, ${failing} failing`;
+        }
+        checksStatus += ` (${runs.length} total)`;
+      }
+
+      sections.push(`### Checks\n`);
+      sections.push(`${checksStatus}\n`);
+
+      // Individual check details
+      if (runs && runs.length > 0) {
+        sections.push(`**Check details:**\n`);
+        for (const run of runs) {
+          let statusIcon = '○';
+
+          if (run.bucket === 'pass') {
+            statusIcon = '✅';
+          } else if (run.bucket === 'fail' || run.bucket === 'cancel') {
+            statusIcon = '❌';
+          } else if (run.bucket === 'pending') {
+            statusIcon = '🔄';
+          } else if (run.bucket === 'skipping') {
+            statusIcon = '⏭️';
+          } else {
+            // Fallback to state if bucket is unclear
+            if (run.state === 'success') {
+              statusIcon = '✅';
+            } else if (run.state === 'failure') {
+              statusIcon = '❌';
+            } else {
+              statusIcon = '⏳';
+            }
+          }
+
+          sections.push(`- ${statusIcon} ${run.name}`);
+        }
+        sections.push('');
+      }
     }
   }
 
