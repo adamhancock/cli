@@ -11,7 +11,7 @@ import {
 import { useState, useEffect } from 'react';
 import { loadFromDaemon, loadFromRedis } from './utils/daemon-client';
 import { getUsageHistory, recordUsage } from './utils/cache';
-import { findChromeTab, switchToChromeTab, openNewChromeTab } from './utils/chrome';
+import { findChromeTab, switchToChromeTab, openNewChromeTab, normalizeUrl, getChromeWindows, type ChromeWindow } from './utils/chrome';
 import type { InstanceWithStatus } from './types';
 
 function sortByUsageHistory(instances: InstanceWithStatus[]): InstanceWithStatus[] {

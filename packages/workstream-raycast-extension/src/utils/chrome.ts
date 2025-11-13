@@ -18,16 +18,17 @@ export interface ChromeWindow {
 }
 
 /**
- * Normalize a URL to hostname:port for tab matching.
- * This allows matching tabs on the same host/port regardless of path.
+ * Normalize a URL including path for more specific tab matching.
+ * This allows matching tabs with the same hostname, port, and path.
  */
 export function normalizeUrl(url: string): string {
   try {
     const urlObj = new URL(url);
-    // Match by hostname and port only (ignore path/query/hash)
+    // Match by hostname, port, and path (ignore query/hash)
     const hostname = urlObj.hostname.replace(/^www\./, '');
     const port = urlObj.port || (urlObj.protocol === 'https:' ? '443' : '80');
-    return `${hostname}:${port}`;
+    const pathname = urlObj.pathname;
+    return `${hostname}:${port}${pathname}`;
   } catch {
     return url;
   }
@@ -56,7 +57,7 @@ export async function getChromeWindows(): Promise<ChromeWindow[]> {
 }
 
 /**
- * Find a Chrome tab matching the target URL (by hostname:port).
+ * Find a Chrome tab matching the target URL (by hostname:port:path).
  */
 export async function findChromeTab(targetUrl: string): Promise<{ windowId: number; tabIndex: number } | null> {
   const windows = await getChromeWindows();
