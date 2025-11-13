@@ -72,6 +72,19 @@ interface CaddyHost {
   isActive?: boolean;
 }
 
+interface ChromeTab {
+  index: number;
+  title: string;
+  url: string;
+  favicon?: string;
+}
+
+interface ChromeWindow {
+  id: number;
+  tabs: ChromeTab[];
+  lastUpdated: number;
+}
+
 interface InstanceWithMetadata extends VSCodeInstance {
   gitInfo?: GitInfo;
   prStatus?: PRStatus;
@@ -106,6 +119,7 @@ interface GitHubRateLimit {
 
 class WorkstreamDaemon {
   private instances: Map<string, InstanceWithMetadata> = new Map();
+  private chromeWindows: ChromeWindow[] = [];
   private redis: Redis;
   private publisher: Redis;
   private subscriber: Redis;
@@ -215,6 +229,33 @@ class WorkstreamDaemon {
     }
   }
 
+  private async publishChromeUpdate() {
+    try {
+      const timestamp = Date.now();
+
+      // Store Chrome windows in Redis with TTL
+      await this.redis.set(
+        REDIS_KEYS.CHROME_WINDOWS,
+        JSON.stringify(this.chromeWindows),
+        'EX',
+        INSTANCE_TTL
+      );
+
+      // Publish update notification
+      await this.publisher.publish(
+        REDIS_CHANNELS.CHROME_UPDATES,
+        JSON.stringify({
+          type: 'chrome',
+          windowCount: this.chromeWindows.length,
+          tabCount: this.chromeWindows.reduce((sum, w) => sum + w.tabs.length, 0),
+          timestamp,
+        })
+      );
+    } catch (error) {
+      logError('Error publishing Chrome update:', error);
+    }
+  }
+
   async start() {
     log('🚀 Workstream Daemon starting...');
 
@@ -241,6 +282,7 @@ class WorkstreamDaemon {
     log(`     - Updates: ${REDIS_CHANNELS.UPDATES}`);
     log(`     - Refresh: ${REDIS_CHANNELS.REFRESH}`);
     log(`     - Claude: ${REDIS_CHANNELS.CLAUDE}`);
+    log(`     - Chrome Updates: ${REDIS_CHANNELS.CHROME_UPDATES}`);
     log('');
   }
 
@@ -402,6 +444,12 @@ class WorkstreamDaemon {
         }
       }
 
+      // Get Chrome windows (in parallel with other operations)
+      const chromeWindows = await this.getChromeWindows();
+      this.chromeWindows = chromeWindows;
+      const tabCount = chromeWindows.reduce((sum, w) => sum + w.tabs.length, 0);
+      log(`🌐 Found ${chromeWindows.length} Chrome windows with ${tabCount} tabs`);
+
       // Write to cache file (for compatibility)
       await this.writeCache();
       log(`💾 Wrote cache file`);
@@ -409,6 +457,10 @@ class WorkstreamDaemon {
       // Publish to Redis
       await this.publishUpdate();
       log(`📡 Published ${this.instances.size} instances to Redis`);
+
+      // Publish Chrome update
+      await this.publishChromeUpdate();
+      log(`🌐 Published ${chromeWindows.length} Chrome windows to Redis`);
 
       log(`✅ Poll complete: ${updatedCount} updated, ${skippedCount} skipped, ${removedCount} removed`);
     } catch (error) {
@@ -837,6 +889,70 @@ class WorkstreamDaemon {
       } catch (error) {
         // Silent fail - notifications are nice-to-have
       }
+    }
+  }
+
+  private async getChromeWindows(): Promise<ChromeWindow[]> {
+    try {
+      // Check if Chrome is running
+      const chromeCheck = await $`/usr/bin/pgrep -x "Google Chrome"`.quiet();
+      if (!chromeCheck.stdout.trim()) {
+        return [];
+      }
+
+      // Use AppleScript to query Chrome windows and tabs
+      const script = `
+        tell application "Google Chrome"
+          set _output to ""
+          repeat with w in windows
+            set _w_id to get id of w
+            set _tab_index to 0
+            repeat with t in tabs of w
+              set _title to get title of t
+              set _url to get URL of t
+              set _output to (_output & _w_id & "~~~" & _tab_index & "~~~" & _title & "~~~" & _url & "\\n")
+              set _tab_index to _tab_index + 1
+            end repeat
+          end repeat
+          return _output
+        end tell
+      `;
+
+      const result = await $`/usr/bin/osascript -e ${script}`.quiet();
+
+      if (!result.stdout.trim()) {
+        return [];
+      }
+
+      // Parse the output
+      const lines = result.stdout.trim().split('\n').filter(Boolean);
+      const windowsMap = new Map<number, ChromeWindow>();
+
+      for (const line of lines) {
+        const [windowIdStr, indexStr, title, url] = line.split('~~~');
+        const windowId = parseInt(windowIdStr, 10);
+        const index = parseInt(indexStr, 10);
+
+        if (!windowsMap.has(windowId)) {
+          windowsMap.set(windowId, {
+            id: windowId,
+            tabs: [],
+            lastUpdated: Date.now(),
+          });
+        }
+
+        const window = windowsMap.get(windowId)!;
+        window.tabs.push({
+          index,
+          title: title || 'Untitled',
+          url: url || '',
+        });
+      }
+
+      return Array.from(windowsMap.values());
+    } catch (error) {
+      // Chrome not installed or not running, return empty array
+      return [];
     }
   }
 }

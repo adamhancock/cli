@@ -21,6 +21,10 @@ declare namespace Preferences {
   export type CleanupEnvironments = ExtensionPreferences & {}
   /** Preferences accessible in the `open-dev-environment` command */
   export type OpenDevEnvironment = ExtensionPreferences & {}
+  /** Preferences accessible in the `chrome-tabs` command */
+  export type ChromeTabs = ExtensionPreferences & {}
+  /** Preferences accessible in the `open-active-dev-instance` command */
+  export type OpenActiveDevInstance = ExtensionPreferences & {}
 }
 
 declare namespace Arguments {
@@ -32,5 +36,9 @@ declare namespace Arguments {
   export type CleanupEnvironments = {}
   /** Arguments passed to the `open-dev-environment` command */
   export type OpenDevEnvironment = {}
+  /** Arguments passed to the `chrome-tabs` command */
+  export type ChromeTabs = {}
+  /** Arguments passed to the `open-active-dev-instance` command */
+  export type OpenActiveDevInstance = {}
 }
 

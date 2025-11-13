@@ -1,7 +1,7 @@
 {
   "name": "@adamhancock/workstream-daemon",
-  "version": "0.1.6",
-  "description": "Background daemon that maintains real-time VS Code instance metadata for instant access",
+  "version": "0.1.7",
+  "description": "Background daemon that maintains real-time VS Code instance and Chrome tab metadata for instant access",
   "type": "module",
   "bin": {
     "workstream": "./src/cli.ts"

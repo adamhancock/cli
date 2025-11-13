@@ -2,11 +2,11 @@
   "$schema": "https://www.raycast.com/schemas/extension.json",
   "name": "workstream",
   "title": "Workstream",
-  "description": "Quick switcher for VS Code windows with git status, PR info, and Claude Code integration",
+  "description": "Quick switcher for VS Code windows with git status, PR info, Claude Code integration, and Chrome tab search",
   "icon": "window-icon.png",
   "author": "adamhancock",
   "license": "MIT",
-  "version": "0.1.2",
+  "version": "0.1.4",
   "commands": [
     {
       "name": "index",
@@ -35,6 +35,20 @@
       "subtitle": "Workstream",
       "description": "Quick access to open your Caddy-hosted development environments in the browser",
       "mode": "view"
+    },
+    {
+      "name": "chrome-tabs",
+      "title": "Search Chrome Tabs",
+      "subtitle": "Workstream",
+      "description": "Search and switch between Chrome windows and tabs",
+      "mode": "view"
+    },
+    {
+      "name": "open-active-dev-instance",
+      "title": "Open Active Dev Instance",
+      "subtitle": "Workstream",
+      "description": "Open the active VS Code window's dev environment in Chrome (or switch to existing tab)",
+      "mode": "no-view"
     }
   ],
   "dependencies": {

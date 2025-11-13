@@ -5,12 +5,14 @@ export const REDIS_KEYS = {
   INSTANCES_LIST: 'workstream:instances:list',
   INSTANCE: (path: string) => `workstream:instance:${Buffer.from(path).toString('base64')}`,
   TIMESTAMP: 'workstream:timestamp',
+  CHROME_WINDOWS: 'workstream:chrome:windows',
 } as const;
 
 export const REDIS_CHANNELS = {
   UPDATES: 'workstream:updates',
   REFRESH: 'workstream:refresh',
   CLAUDE: 'workstream:claude',
+  CHROME_UPDATES: 'workstream:chrome:updates',
 } as const;
 
 // TTL for instance data (30 seconds - auto-expires if daemon stops)
