@@ -305,17 +305,11 @@ export default function OpenPRInChromeCommand() {
   }
 
   function getSubtitle(instance: InstanceWithStatus): string {
-    const parts: string[] = [];
-
+    // Show PR title as subtitle
     if (instance.prStatus) {
-      parts.push(`#${instance.prStatus.number}`);
+      return instance.prStatus.title;
     }
-
-    if (instance.gitInfo) {
-      parts.push(`⎇ ${instance.gitInfo.branch}`);
-    }
-
-    return parts.join(' • ');
+    return '';
   }
 
   function getAccessories(instance: InstanceWithStatus): List.Item.Accessory[] {
@@ -398,8 +392,8 @@ export default function OpenPRInChromeCommand() {
           <List.Item
             key={instance.path}
             icon={{ source: getStatusIcon(instance), tintColor: getStatusColor(instance) }}
-            title={instance.prStatus?.title || instance.name}
-            subtitle={`${instance.name} • ${getSubtitle(instance)}`}
+            title={instance.name}
+            subtitle={getSubtitle(instance)}
             accessories={getAccessories(instance)}
             actions={
               <ActionPanel>
