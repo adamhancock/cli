@@ -10,6 +10,7 @@ import { isClaudeCodeActive } from './utils/claude';
 import { getCachedInstances, setCachedInstances, clearCache, recordUsage, getUsageHistory } from './utils/cache';
 import { loadFromDaemon, loadFromRedis, triggerDaemonRefresh, subscribeToUpdates, type DaemonCache } from './utils/daemon-client';
 import { getTmuxSessionOutput, createTmuxSession, attachToTmuxSession, killTmuxSession } from './utils/tmux';
+import { startNotificationListener, stopNotificationListener } from './utils/notification-listener';
 import type { InstanceWithStatus } from './types';
 
 const execAsync = promisify(exec);
@@ -143,6 +144,18 @@ export default function Command() {
   // Load Chrome windows for tab detection
   useEffect(() => {
     loadChromeWindows();
+  }, []);
+
+  // Start notification listener
+  useEffect(() => {
+    console.log('Starting notification listener...');
+    startNotificationListener();
+
+    // Cleanup on unmount
+    return () => {
+      console.log('Stopping notification listener...');
+      stopNotificationListener();
+    };
   }, []);
 
   async function loadChromeWindows() {

@@ -13,6 +13,7 @@ export const REDIS_CHANNELS = {
   REFRESH: 'workstream:refresh',
   CLAUDE: 'workstream:claude',
   CHROME_UPDATES: 'workstream:chrome:updates',
+  NOTIFICATIONS: 'workstream:notifications',
 } as const;
 
 // TTL for instance data (30 seconds - auto-expires if daemon stops)

@@ -6,7 +6,7 @@
   "icon": "window-icon.png",
   "author": "adamhancock",
   "license": "MIT",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "commands": [
     {
       "name": "index",

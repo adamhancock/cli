@@ -11,6 +11,7 @@ export const REDIS_CHANNELS = {
   UPDATES: 'workstream:updates',
   REFRESH: 'workstream:refresh',
   CLAUDE: 'workstream:claude',
+  NOTIFICATIONS: 'workstream:notifications',
 } as const;
 
 let redisClient: Redis | null = null;

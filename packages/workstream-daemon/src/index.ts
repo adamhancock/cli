@@ -37,6 +37,12 @@ interface GitInfo {
   untracked: number;
 }
 
+interface PRCheck {
+  name: string;
+  state: string;
+  bucket: 'pass' | 'fail' | 'pending' | 'cancel' | 'skipping';
+}
+
 interface PRStatus {
   number: number;
   title: string;
@@ -49,6 +55,7 @@ interface PRStatus {
     pending: number;
     total: number;
     conclusion: 'success' | 'failure' | 'pending';
+    runs: PRCheck[];
   };
 }
 
@@ -137,6 +144,7 @@ class WorkstreamDaemon {
   private pollTimer?: NodeJS.Timeout;
   private currentPollInterval: number = POLL_INTERVAL;
   private ghRateLimit?: GitHubRateLimit;
+  private previousPRStates: Map<string, { conclusion: 'success' | 'failure' | 'pending'; mergeable?: string }> = new Map();
 
   constructor() {
     this.redis = getRedisClient();
@@ -421,17 +429,17 @@ class WorkstreamDaemon {
           enrichmentTasks.map(async ({ instance, shouldUpdatePR, projectName }) => {
             try {
               const enriched = await this.enrichInstance(instance, shouldUpdatePR);
-              return { success: true, enriched, projectName, shouldUpdatePR };
+              return { success: true as const, enriched, projectName, shouldUpdatePR };
             } catch (error) {
               logError(`  ❌ Failed to enrich ${projectName}:`, error);
-              return { success: false, projectName };
+              return { success: false as const, projectName, enriched: undefined };
             }
           })
         );
 
         // Process results and update instances map
         for (const result of enrichmentResults) {
-          if (result.success && 'enriched' in result) {
+          if (result.success && result.enriched) {
             this.instances.set(result.enriched.path, result.enriched);
             updatedCount++;
 
@@ -539,6 +547,63 @@ class WorkstreamDaemon {
     // Get PR status only if requested and we have rate limit remaining
     if (updatePR && enriched.gitInfo && this.ghRateLimit && this.ghRateLimit.remaining > 0) {
       enriched.prStatus = await this.getPRStatus(instance.path, enriched.gitInfo.branch);
+
+      // Check for PR state changes and send notifications
+      if (enriched.prStatus) {
+        const previousState = this.previousPRStates.get(instance.path);
+        const currentConclusion = enriched.prStatus.checks?.conclusion;
+        const currentMergeable = enriched.prStatus.mergeable;
+        const projectName = instance.path.split('/').pop() || 'project';
+
+        // Detect check failure transition
+        if (currentConclusion === 'failure' && previousState?.conclusion !== 'failure') {
+          const failedChecks = enriched.prStatus.checks?.runs
+            ?.filter(check => check.bucket === 'fail' || check.bucket === 'cancel')
+            .map(check => check.name) || [];
+
+          const failCount = enriched.prStatus.checks?.failing || failedChecks.length;
+          const checkNames = failedChecks.slice(0, 3).join(', '); // Limit to first 3 names
+          const moreText = failedChecks.length > 3 ? `, +${failedChecks.length - 3} more` : '';
+
+          await this.sendNotification(
+            'PR Check Failed',
+            `❌ ${failCount} check(s) failed in ${projectName}: ${checkNames}${moreText}`,
+            'pr_check_failed',
+            'failure',
+            instance.path
+          );
+        }
+
+        // Detect check success transition (recovery from failure)
+        if (currentConclusion === 'success' && previousState?.conclusion === 'failure') {
+          await this.sendNotification(
+            'PR Checks Passing',
+            `✅ All checks passed in ${projectName} (PR #${enriched.prStatus.number})`,
+            'pr_check_success',
+            'success',
+            instance.path
+          );
+        }
+
+        // Detect merge conflict (blocked)
+        if (currentMergeable === 'CONFLICTING' && previousState?.mergeable !== 'CONFLICTING') {
+          await this.sendNotification(
+            'PR Merge Blocked',
+            `⚠️ ${projectName} has merge conflicts (PR #${enriched.prStatus.number})`,
+            'pr_merge_blocked',
+            'failure',
+            instance.path
+          );
+        }
+
+        // Update state tracking
+        if (currentConclusion) {
+          this.previousPRStates.set(instance.path, {
+            conclusion: currentConclusion,
+            mergeable: currentMergeable,
+          });
+        }
+      }
     } else {
       // Preserve existing PR status if not updating
       const existing = this.instances.get(instance.path);
@@ -646,7 +711,7 @@ class WorkstreamDaemon {
       let checks: PRStatus['checks'] | undefined;
       if (pr.state === 'OPEN') {
         try {
-          const checksInfoResult = await $`/opt/homebrew/bin/gh pr checks ${branch} --repo=${remoteUrlResult.stdout.trim()} --json bucket 2>/dev/null || echo ""`.quiet();
+          const checksInfoResult = await $`/opt/homebrew/bin/gh pr checks ${branch} --repo=${remoteUrlResult.stdout.trim()} --json bucket,name,state 2>/dev/null || echo ""`.quiet();
 
           if (checksInfoResult.stdout.trim()) {
             const checkResults = JSON.parse(checksInfoResult.stdout);
@@ -661,6 +726,11 @@ class WorkstreamDaemon {
               pending,
               total,
               conclusion: pending > 0 ? 'pending' : failing > 0 ? 'failure' : 'success',
+              runs: checkResults.map((c: any) => ({
+                name: c.name,
+                state: c.state,
+                bucket: c.bucket,
+              })),
             };
           }
         } catch {
@@ -938,7 +1008,10 @@ class WorkstreamDaemon {
         if (wasWaiting) {
           await this.sendNotification(
             'Claude Code',
-            `▶️ Claude resumed working in ${projectName}`
+            `▶️ Claude resumed working in ${projectName}`,
+            'claude_started',
+            'success',
+            repoPath
           );
         }
 
@@ -963,7 +1036,10 @@ class WorkstreamDaemon {
         const projectName = repoPath.split('/').pop() || 'project';
         await this.sendNotification(
           'Claude Code',
-          `🤔 Claude needs your attention in ${projectName}`
+          `🤔 Claude needs your attention in ${projectName}`,
+          'claude_waiting',
+          'failure',
+          repoPath
         );
 
         log(`Claude waiting for input in ${projectName}`);
@@ -987,7 +1063,10 @@ class WorkstreamDaemon {
         const projectName = repoPath.split('/').pop() || 'project';
         await this.sendNotification(
           'Claude Code',
-          `✅ Claude finished working in ${projectName}`
+          `✅ Claude finished working in ${projectName}`,
+          'claude_finished',
+          'success',
+          repoPath
         );
 
         log(`Claude finished in ${projectName}`);
@@ -997,17 +1076,43 @@ class WorkstreamDaemon {
     }
   }
 
-  private async sendNotification(title: string, message: string) {
+  private async sendNotification(
+    title: string,
+    message: string,
+    type: 'claude_started' | 'claude_waiting' | 'claude_finished' | 'pr_check_failed' | 'pr_check_success' | 'pr_merge_blocked' | 'notification' = 'notification',
+    style: 'success' | 'failure' | 'info' = 'info',
+    projectPath?: string
+  ) {
     try {
-      // Try terminal-notifier first (already approved in permissions)
-      await $`/opt/homebrew/bin/terminal-notifier -title ${title} -message ${message}`.quiet();
-    } catch {
-      // Fallback to osascript (built-in macOS)
+      // 1. Publish to Redis for Raycast Toast notifications
+      await this.publisher.publish(
+        REDIS_CHANNELS.NOTIFICATIONS,
+        JSON.stringify({
+          type,
+          title,
+          message,
+          style,
+          timestamp: Date.now(),
+          projectPath,
+          projectName: projectPath?.split('/').pop() || 'unknown',
+        })
+      );
+
+      // 2. Keep system notifications as fallback (for users without Raycast open)
       try {
-        await $`/usr/bin/osascript -e 'display notification "${message}" with title "${title}"'`.quiet();
-      } catch (error) {
-        // Silent fail - notifications are nice-to-have
+        // Try terminal-notifier first (already approved in permissions)
+        await $`/opt/homebrew/bin/terminal-notifier -title ${title} -message ${message}`.quiet();
+      } catch {
+        // Fallback to osascript (built-in macOS)
+        try {
+          await $`/usr/bin/osascript -e 'display notification "${message}" with title "${title}"'`.quiet();
+        } catch (error) {
+          // Silent fail - notifications are nice-to-have
+        }
       }
+    } catch (error) {
+      // Don't crash if notification fails
+      logError('Failed to send notification:', error);
     }
   }
 
