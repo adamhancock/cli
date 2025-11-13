@@ -61,12 +61,22 @@ export interface TmuxStatus {
   lastOutput?: string;
 }
 
+export interface SpotlightStatus {
+  port: number;
+  isOnline: boolean;
+  errorCount: number;
+  traceCount: number;
+  logCount: number;
+  lastChecked: number;
+}
+
 export interface InstanceWithStatus extends VSCodeInstance {
   gitInfo?: GitInfo;
   prStatus?: PRStatus;
   claudeStatus?: ClaudeStatus;
   tmuxStatus?: TmuxStatus;
   caddyHost?: CaddyHost;
+  spotlightStatus?: SpotlightStatus;
   error?: string;
 }
 

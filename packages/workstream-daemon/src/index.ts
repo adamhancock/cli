@@ -13,6 +13,7 @@ import {
   REDIS_CHANNELS,
   INSTANCE_TTL
 } from './redis-client.js';
+import { spotlightMonitor } from './spotlight-monitor.js';
 
 // Disable verbose output from zx
 $.verbose = false;
@@ -72,6 +73,15 @@ interface CaddyHost {
   isActive?: boolean;
 }
 
+interface SpotlightStatus {
+  port: number;
+  isOnline: boolean;
+  errorCount: number;
+  traceCount: number;
+  logCount: number;
+  lastChecked: number;
+}
+
 interface ChromeTab {
   index: number;
   title: string;
@@ -91,6 +101,7 @@ interface InstanceWithMetadata extends VSCodeInstance {
   claudeStatus?: ClaudeStatus;
   tmuxStatus?: TmuxStatus;
   caddyHost?: CaddyHost;
+  spotlightStatus?: SpotlightStatus;
   lastUpdated: number;
 }
 
@@ -545,6 +556,15 @@ class WorkstreamDaemon {
     // Get Caddy host info (local API call, fast)
     enriched.caddyHost = await this.getCaddyHost(instance.path);
 
+    // Get Spotlight status (health check + stream counts)
+    if (enriched.caddyHost && enriched.gitInfo?.branch) {
+      enriched.spotlightStatus = await this.getSpotlightStatus(
+        instance.path,
+        enriched.caddyHost,
+        enriched.gitInfo.branch
+      );
+    }
+
     return enriched;
   }
 
@@ -799,6 +819,105 @@ class WorkstreamDaemon {
       return undefined;
     } catch (error) {
       // Caddy might not be running, silently return undefined
+      return undefined;
+    }
+  }
+
+  private async getSpotlightStatus(
+    instancePath: string,
+    caddyHost: CaddyHost,
+    branch: string
+  ): Promise<SpotlightStatus | undefined> {
+    try {
+      // Extract spotlight port from Caddy routes (same logic as Raycast)
+      const routes = (caddyHost.routes || []) as any[];
+
+      const findSpotlightPort = (routeList: any[]): number | null => {
+        for (const route of routeList) {
+          // If this is a subroute, search its nested routes
+          if (route.handler === 'subroute' && route.routes) {
+            const result = findSpotlightPort(route.routes);
+            if (result) return result;
+          }
+
+          // Check if this route matches /_spotlight
+          if (route.match?.[0]?.path?.some((p: string) => p.includes('/_spotlight'))) {
+            // Look through handlers to find reverse_proxy with upstreams
+            for (const handler of route.handle || []) {
+              if (handler.handler === 'reverse_proxy' && handler.upstreams?.[0]?.dial) {
+                const upstream = handler.upstreams[0].dial;
+                if (typeof upstream === 'string') {
+                  const parts = upstream.split(':');
+                  if (parts.length === 2) {
+                    return parseInt(parts[1], 10);
+                  }
+                }
+              }
+            }
+          }
+        }
+        return null;
+      };
+
+      const port = findSpotlightPort(routes);
+      if (!port) {
+        return undefined;
+      }
+
+      const instanceName = instancePath.split('/').pop() || instancePath;
+      log(`[Spotlight] Found spotlight port ${port} for ${instanceName}`);
+
+      // Check if spotlight is online
+      const isOnline = await spotlightMonitor.checkHealth(port);
+      log(`[Spotlight] Health check for ${instanceName} (port ${port}): ${isOnline ? 'ONLINE' : 'OFFLINE'}`);
+
+      // Get or initialize counts
+      let counts = spotlightMonitor.getCounts(instancePath);
+
+      if (isOnline) {
+        // If online and not connected, start the stream connection
+        const isConnected = spotlightMonitor.isConnected(instancePath);
+        log(`[Spotlight] ${instanceName} connection status: ${isConnected ? 'already connected' : 'not connected'}`);
+
+        if (!isConnected) {
+          log(`[Spotlight] Starting stream connection for ${instanceName} on port ${port}`);
+          spotlightMonitor.connectStream(port, instancePath);
+          // Initialize counts if not present
+          if (!counts) {
+            counts = {
+              errors: 0,
+              traces: 0,
+              logs: 0,
+              lastUpdated: Date.now(),
+            };
+          }
+        } else {
+          log(`[Spotlight] ${instanceName} already has active stream connection`);
+        }
+      } else {
+        // If offline, disconnect any existing stream
+        if (spotlightMonitor.isConnected(instancePath)) {
+          log(`[Spotlight] Disconnecting stream for ${instanceName} (offline)`);
+          spotlightMonitor.disconnectStream(instancePath);
+        }
+      }
+
+      const status = {
+        port,
+        isOnline,
+        errorCount: counts?.errors || 0,
+        traceCount: counts?.traces || 0,
+        logCount: counts?.logs || 0,
+        lastChecked: Date.now(),
+      };
+
+      if (counts && (counts.errors > 0 || counts.traces > 0 || counts.logs > 0)) {
+        log(`[Spotlight] ${instanceName} counts: E:${counts.errors} T:${counts.traces} L:${counts.logs}`);
+      }
+
+      return status;
+    } catch (error) {
+      logError('[Spotlight] Error getting spotlight status:', error);
       return undefined;
     }
   }

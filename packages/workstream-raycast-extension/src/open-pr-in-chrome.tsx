@@ -94,15 +94,10 @@ async function switchToChromeTab(windowId: number, tabIndex: number) {
 }
 
 async function openNewChromeTab(url: string) {
-  // Escape single quotes in URL
-  const escapedUrl = url.replace(/'/g, "'\"'\"'");
-  const script = `
-    tell application "Google Chrome"
-      activate
-      open location "${escapedUrl}"
-    end tell
-  `;
-  await execAsync(`osascript -e '${script}'`);
+  // Use open command with profile directory to force specific Chrome profile
+  const profile = 'Default'; // Chrome profile to use
+  const command = `open -a "Google Chrome" --args --profile-directory="${profile}" "${url}"`;
+  await execAsync(command);
 }
 
 function sortByUsageHistory(instances: InstanceWithStatus[]): InstanceWithStatus[] {
@@ -122,13 +117,13 @@ function sortByUsageHistory(instances: InstanceWithStatus[]): InstanceWithStatus
   });
 }
 
-export default function OpenDevEnvironmentCommand() {
+export default function OpenPRInChromeCommand() {
   const [instances, setInstances] = useState<InstanceWithStatus[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [chromeWindows, setChromeWindows] = useState<ChromeWindow[]>([]);
 
   useEffect(() => {
-    loadEnvironments();
+    loadInstances();
     loadChromeWindows();
   }, []);
 
@@ -157,16 +152,16 @@ export default function OpenDevEnvironmentCommand() {
     return false;
   }
 
-  async function loadEnvironments() {
+  async function loadInstances() {
     setIsLoading(true);
 
     try {
       // Try daemon first (fastest)
       const daemonCache = await loadFromDaemon();
       if (daemonCache && daemonCache.instances.length > 0) {
-        // Filter to only instances with Caddy hosts
-        const withCaddy = daemonCache.instances.filter((i) => i.caddyHost);
-        setInstances(sortByUsageHistory(withCaddy));
+        // Filter to only instances with PRs
+        const withPR = daemonCache.instances.filter((i) => i.prStatus);
+        setInstances(sortByUsageHistory(withPR));
         setIsLoading(false);
         return;
       }
@@ -202,14 +197,14 @@ export default function OpenDevEnvironmentCommand() {
         })
       );
 
-      // Filter to only instances with Caddy hosts (from daemon)
-      const withCaddy = enriched.filter((i) => i.caddyHost);
-      setInstances(sortByUsageHistory(withCaddy));
+      // Filter to only instances with PRs
+      const withPR = enriched.filter((i) => i.prStatus);
+      setInstances(sortByUsageHistory(withPR));
       setIsLoading(false);
     } catch (error) {
       await showToast({
         style: Toast.Style.Failure,
-        title: 'Failed to load dev environments',
+        title: 'Failed to load PRs',
         message: error instanceof Error ? error.message : 'Unknown error',
       });
       setInstances([]);
@@ -217,11 +212,11 @@ export default function OpenDevEnvironmentCommand() {
     }
   }
 
-  async function openInBrowser(instance: InstanceWithStatus) {
-    if (!instance.caddyHost) return;
+  async function openPRInBrowser(instance: InstanceWithStatus) {
+    if (!instance.prStatus) return;
 
     try {
-      const url = instance.caddyHost.url;
+      const url = instance.prStatus.url;
 
       // Record usage for sorting next time
       recordUsage(instance.path);
@@ -257,43 +252,7 @@ export default function OpenDevEnvironmentCommand() {
     } catch (error) {
       await showToast({
         style: Toast.Style.Failure,
-        title: 'Failed to open URL',
-        message: error instanceof Error ? error.message : 'Unknown error',
-      });
-    }
-  }
-
-  async function openAndSwitchToVSCode(instance: InstanceWithStatus) {
-    if (!instance.caddyHost) return;
-
-    try {
-      // Record usage for sorting next time
-      recordUsage(instance.path);
-
-      // Open in browser first
-      await fetch(instance.caddyHost.url, { method: 'HEAD' }).catch(() => {
-        // Ignore fetch errors, just trying to open the URL
-      });
-
-      // Open browser
-      const url = instance.caddyHost.url;
-      await new Promise((resolve) => {
-        const script = `open "${url}"`;
-        require('child_process').exec(script, resolve);
-      });
-
-      // Small delay to let browser start opening
-      await new Promise((resolve) => setTimeout(resolve, 500));
-
-      // Switch to VS Code
-      await focusVSCodeInstance(instance.path);
-
-      // Close Raycast
-      await closeMainWindow();
-    } catch (error) {
-      await showToast({
-        style: Toast.Style.Failure,
-        title: 'Failed to open environment',
+        title: 'Failed to open PR',
         message: error instanceof Error ? error.message : 'Unknown error',
       });
     }
@@ -319,7 +278,7 @@ export default function OpenDevEnvironmentCommand() {
       }
     }
 
-    return Icon.Globe;
+    return Icon.Link;
   }
 
   function getStatusColor(instance: InstanceWithStatus): Color {
@@ -348,78 +307,15 @@ export default function OpenDevEnvironmentCommand() {
   function getSubtitle(instance: InstanceWithStatus): string {
     const parts: string[] = [];
 
-    if (instance.caddyHost) {
-      parts.push(instance.caddyHost.url);
+    if (instance.prStatus) {
+      parts.push(`#${instance.prStatus.number}`);
     }
 
     if (instance.gitInfo) {
       parts.push(`⎇ ${instance.gitInfo.branch}`);
-
-      if (instance.prStatus) {
-        let prDisplay = `#${instance.prStatus.number}`;
-
-        if (instance.prStatus.state === 'OPEN') {
-          if (instance.prStatus.checks) {
-            if (instance.prStatus.checks.conclusion === 'success') {
-              prDisplay += ' ✅';
-            } else if (instance.prStatus.checks.conclusion === 'failure') {
-              prDisplay += ' ❌';
-            } else if (instance.prStatus.checks.conclusion === 'pending') {
-              prDisplay += ' 🟡';
-            }
-          }
-        } else if (instance.prStatus.state === 'MERGED') {
-          prDisplay += ' ✓';
-        } else if (instance.prStatus.state === 'CLOSED') {
-          prDisplay += ' ✗';
-        }
-
-        parts.push(prDisplay);
-      }
     }
 
     return parts.join(' • ');
-  }
-
-  function getSpotlightUrl(instance: InstanceWithStatus): string | null {
-    if (!instance.caddyHost) return null;
-    if (!instance.gitInfo?.branch) return null;
-
-    const branch = instance.gitInfo.branch;
-
-    // Caddy routes can be nested - check for subroute handler
-    const routes = (instance.caddyHost.routes || []) as any[];
-
-    // Helper function to search for spotlight route recursively
-    const findSpotlightRoute = (routeList: any[]): string | null => {
-      for (const route of routeList) {
-        // If this is a subroute, search its nested routes
-        if (route.handler === 'subroute' && route.routes) {
-          const result = findSpotlightRoute(route.routes);
-          if (result) return result;
-        }
-
-        // Check if this route matches /_spotlight
-        if (route.match?.[0]?.path?.some((p: string) => p.includes('/_spotlight'))) {
-          // Look through handlers to find reverse_proxy with upstreams
-          for (const handler of route.handle || []) {
-            if (handler.handler === 'reverse_proxy' && handler.upstreams?.[0]?.dial) {
-              const upstream = handler.upstreams[0].dial;
-              if (typeof upstream === 'string') {
-                const parts = upstream.split(':');
-                if (parts.length === 2) {
-                  const port = parts[1];
-                  return `http://${branch}.assurix.localhost:${port}/`;
-                }
-              }
-            }
-          }
-        }
-      }
-      return null;
-    };
-
-    return findSpotlightRoute(routes);
   }
 
   function getAccessories(instance: InstanceWithStatus): List.Item.Accessory[] {
@@ -486,58 +382,36 @@ export default function OpenDevEnvironmentCommand() {
       }
     }
 
-    if (instance.tmuxStatus?.exists) {
-      accessories.push({
-        icon: { source: Icon.Terminal, tintColor: Color.Green },
-        tooltip: `tmux: ${instance.tmuxStatus.name}`,
-      });
-    }
-
-    if (instance.caddyHost?.upstreams && instance.caddyHost.upstreams.length > 0) {
-      accessories.push({
-        text: instance.caddyHost.upstreams[0],
-        tooltip: 'Backend upstream',
-      });
-    }
-
     return accessories;
   }
 
   return (
-    <List isLoading={isLoading} searchBarPlaceholder="Search dev environments...">
+    <List isLoading={isLoading} searchBarPlaceholder="Search PRs...">
       {instances.length === 0 && !isLoading ? (
         <List.EmptyView
-          icon={Icon.Globe}
-          title="No dev environments found"
-          description="No Caddy routes detected. Make sure Caddy is running and has worktree routes configured."
+          icon={Icon.Link}
+          title="No PRs found"
+          description="No VS Code instances with open PRs detected"
         />
       ) : (
         instances.map((instance) => (
           <List.Item
             key={instance.path}
             icon={{ source: getStatusIcon(instance), tintColor: getStatusColor(instance) }}
-            title={instance.name}
-            subtitle={getSubtitle(instance)}
+            title={instance.prStatus?.title || instance.name}
+            subtitle={`${instance.name} • ${getSubtitle(instance)}`}
             accessories={getAccessories(instance)}
             actions={
               <ActionPanel>
                 <Action
-                  title="Open in Browser"
-                  onAction={() => openInBrowser(instance)}
-                  icon={Icon.Globe}
+                  title="Open PR in Chrome"
+                  onAction={() => openPRInBrowser(instance)}
+                  icon={Icon.Link}
                 />
-                {getSpotlightUrl(instance) && (
-                  <Action.OpenInBrowser
-                    title="Open Spotlight"
-                    url={getSpotlightUrl(instance)!}
-                    icon={Icon.Eye}
-                    shortcut={{ modifiers: ['cmd', 'shift'], key: 's' }}
-                  />
-                )}
-                <Action
-                  title="Open & Switch to VS Code"
-                  onAction={() => openAndSwitchToVSCode(instance)}
-                  icon={Icon.Window}
+                <Action.OpenInBrowser
+                  title="Open PR in Browser"
+                  url={instance.prStatus!.url}
+                  icon={Icon.Globe}
                   shortcut={{ modifiers: ['cmd'], key: 'o' }}
                 />
                 <Action
@@ -550,23 +424,15 @@ export default function OpenDevEnvironmentCommand() {
                   icon={Icon.Code}
                   shortcut={{ modifiers: ['cmd'], key: 's' }}
                 />
-                {instance.prStatus && (
-                  <Action.OpenInBrowser
-                    title="Open PR"
-                    url={instance.prStatus.url}
-                    icon={Icon.Link}
-                    shortcut={{ modifiers: ['cmd'], key: 'p' }}
-                  />
-                )}
                 <Action
                   title="Refresh"
-                  onAction={loadEnvironments}
+                  onAction={loadInstances}
                   icon={Icon.ArrowClockwise}
                   shortcut={{ modifiers: ['cmd'], key: 'r' }}
                 />
                 <Action.CopyToClipboard
-                  title="Copy URL"
-                  content={instance.caddyHost!.url}
+                  title="Copy PR URL"
+                  content={instance.prStatus!.url}
                   shortcut={{ modifiers: ['cmd'], key: 'c' }}
                 />
                 <Action.ShowInFinder path={instance.path} />

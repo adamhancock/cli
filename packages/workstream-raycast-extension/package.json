@@ -6,7 +6,7 @@
   "icon": "window-icon.png",
   "author": "adamhancock",
   "license": "MIT",
-  "version": "0.1.4",
+  "version": "0.1.7",
   "commands": [
     {
       "name": "index",
@@ -49,6 +49,20 @@
       "subtitle": "Workstream",
       "description": "Open the active VS Code window's dev environment in Chrome (or switch to existing tab)",
       "mode": "no-view"
+    },
+    {
+      "name": "open-spotlight-environment",
+      "title": "Open Spotlight Environment",
+      "subtitle": "Workstream",
+      "description": "Browse and open spotlight environments in Chrome with smart tab detection",
+      "mode": "view"
+    },
+    {
+      "name": "open-pr-in-chrome",
+      "title": "Open PR in Chrome",
+      "subtitle": "Workstream",
+      "description": "Open pull requests in Chrome with smart tab detection - switches to existing tab or opens new one",
+      "mode": "view"
     }
   ],
   "dependencies": {

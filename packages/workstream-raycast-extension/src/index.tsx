@@ -1,5 +1,8 @@
 import { List, ActionPanel, Action, Icon, Color, showToast, Toast, closeMainWindow } from '@raycast/api';
 import { useState, useEffect, useRef } from 'react';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+import Redis from 'ioredis';
 import { getVSCodeInstances, focusVSCodeInstance, closeVSCodeInstance } from './utils/vscode';
 import { getGitInfo } from './utils/git';
 import { getPRStatus } from './utils/github';
@@ -9,12 +12,99 @@ import { loadFromDaemon, loadFromRedis, triggerDaemonRefresh, subscribeToUpdates
 import { getTmuxSessionOutput, createTmuxSession, attachToTmuxSession, killTmuxSession } from './utils/tmux';
 import type { InstanceWithStatus } from './types';
 
+const execAsync = promisify(exec);
+
+interface ChromeTab {
+  index: number;
+  title: string;
+  url: string;
+  favicon?: string;
+}
+
+interface ChromeWindow {
+  id: number;
+  tabs: ChromeTab[];
+  lastUpdated: number;
+}
+
+// Helper functions for Chrome tab management
+function normalizeUrl(url: string): string {
+  try {
+    const urlObj = new URL(url);
+    // Remove protocol, trailing slashes, and www for consistent comparison
+    const hostname = urlObj.hostname.replace(/^www\./, '');
+    const pathname = urlObj.pathname.replace(/\/$/, '');
+    return `${hostname}${pathname}${urlObj.search}${urlObj.hash}`;
+  } catch {
+    return url;
+  }
+}
+
+async function getChromeWindows(): Promise<ChromeWindow[]> {
+  try {
+    const redis = new Redis({
+      host: 'localhost',
+      port: 6379,
+    });
+
+    const data = await redis.get('workstream:chrome:windows');
+    await redis.quit();
+
+    if (data) {
+      return JSON.parse(data) as ChromeWindow[];
+    }
+  } catch (error) {
+    console.error('Failed to load Chrome windows:', error);
+  }
+  return [];
+}
+
+async function findChromeTab(targetUrl: string): Promise<{ windowId: number; tabIndex: number } | null> {
+  const windows = await getChromeWindows();
+  const normalizedTarget = normalizeUrl(targetUrl);
+
+  for (const window of windows) {
+    for (const tab of window.tabs) {
+      if (normalizeUrl(tab.url) === normalizedTarget) {
+        return { windowId: window.id, tabIndex: tab.index };
+      }
+    }
+  }
+
+  return null;
+}
+
+async function switchToChromeTab(windowId: number, tabIndex: number) {
+  const script = `
+    tell application "Google Chrome"
+      activate
+      set _wnd to first window where id is ${windowId}
+      set index of _wnd to 1
+      set active tab index of _wnd to ${tabIndex + 1}
+    end tell
+  `;
+  await execAsync(`osascript -e '${script}'`);
+}
+
+async function openNewChromeTab(url: string) {
+  // Escape single quotes in URL
+  const escapedUrl = url.replace(/'/g, "'\"'\"'");
+  const script = `
+    tell application "Google Chrome"
+      activate
+      open location "${escapedUrl}"
+    end tell
+  `;
+  await execAsync(`osascript -e '${script}'`);
+}
+
 export default function Command() {
   const [instances, setInstances] = useState<InstanceWithStatus[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadingMetadata, setLoadingMetadata] = useState(false);
   const [isRealtimeMode, setIsRealtimeMode] = useState(false);
   const [lastRefreshTime, setLastRefreshTime] = useState<Date | null>(null);
+  const [chromeWindows, setChromeWindows] = useState<ChromeWindow[]>([]);
   const cleanupRef = useRef<(() => void) | null>(null);
 
   // Initial load
@@ -49,6 +139,20 @@ export default function Command() {
       cleanup();
     };
   }, []);
+
+  // Load Chrome windows for tab detection
+  useEffect(() => {
+    loadChromeWindows();
+  }, []);
+
+  async function loadChromeWindows() {
+    try {
+      const windows = await getChromeWindows();
+      setChromeWindows(windows);
+    } catch (error) {
+      console.error('Failed to load Chrome windows:', error);
+    }
+  }
 
   async function loadInstances(forceRefresh = false, includePR = false) {
     setIsLoading(true);
@@ -229,6 +333,22 @@ export default function Command() {
     }
   }
 
+  function isPROpenInChrome(instance: InstanceWithStatus): boolean {
+    if (!instance.prStatus) return false;
+
+    const normalizedTarget = normalizeUrl(instance.prStatus.url);
+
+    for (const window of chromeWindows) {
+      for (const tab of window.tabs) {
+        if (normalizeUrl(tab.url) === normalizedTarget) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
   function getSpotlightUrl(instance: InstanceWithStatus): string | null {
     if (!instance.caddyHost) return null;
 
@@ -385,6 +505,75 @@ export default function Command() {
   function getAccessories(instance: InstanceWithStatus): List.Item.Accessory[] {
     const accessories: List.Item.Accessory[] = [];
 
+    // PR status section
+    if (instance.prStatus) {
+      // Chrome tab indicator - show if PR is open in Chrome
+      if (isPROpenInChrome(instance)) {
+        accessories.push({
+          icon: { source: Icon.Globe, tintColor: Color.Blue },
+          tooltip: 'PR open in Chrome',
+        });
+      }
+
+      // PR state icon
+      if (instance.prStatus.state === 'MERGED') {
+        accessories.push({
+          icon: { source: Icon.CheckCircle, tintColor: Color.Purple },
+          tooltip: 'PR merged',
+        });
+      } else if (instance.prStatus.state === 'CLOSED') {
+        accessories.push({
+          icon: { source: Icon.XMarkCircle, tintColor: Color.SecondaryText },
+          tooltip: 'PR closed',
+        });
+      } else if (instance.prStatus.state === 'OPEN') {
+        accessories.push({
+          icon: { source: Icon.Circle, tintColor: Color.Green },
+          tooltip: 'PR open',
+        });
+      }
+
+      // CI checks summary
+      if (instance.prStatus.checks) {
+        const { passing, failing, pending, total, conclusion } = instance.prStatus.checks;
+        let checkIcon: Icon;
+        let checkColor: Color;
+
+        if (conclusion === 'success') {
+          checkIcon = Icon.Check;
+          checkColor = Color.Green;
+        } else if (conclusion === 'failure') {
+          checkIcon = Icon.XMarkCircle;
+          checkColor = Color.Red;
+        } else {
+          checkIcon = Icon.Clock;
+          checkColor = Color.Yellow;
+        }
+
+        accessories.push({
+          text: `${passing}/${total}`,
+          icon: { source: checkIcon, tintColor: checkColor },
+          tooltip: `Checks: ${passing} passing${failing > 0 ? `, ${failing} failing` : ''}${pending > 0 ? `, ${pending} pending` : ''}`,
+        });
+      }
+
+      // Merge conflict warning
+      if (instance.prStatus.mergeable === 'CONFLICTING') {
+        accessories.push({
+          icon: { source: Icon.ExclamationMark, tintColor: Color.Red },
+          tooltip: 'PR has merge conflicts',
+        });
+      }
+
+      // Show preview label icon
+      if (instance.prStatus.labels?.includes('preview')) {
+        accessories.push({
+          icon: { source: Icon.Eye, tintColor: Color.Blue },
+          tooltip: 'Preview deployment available',
+        });
+      }
+    }
+
     if (instance.claudeStatus?.active) {
       const isWaiting = instance.claudeStatus.isWaiting;
       const isWorking = instance.claudeStatus.isWorking;
@@ -414,22 +603,6 @@ export default function Command() {
       });
     }
 
-    // Show preview label icon
-    if (instance.prStatus?.labels?.includes('preview')) {
-      accessories.push({
-        icon: { source: Icon.Eye, tintColor: Color.Blue },
-        tooltip: 'Preview deployment available',
-      });
-    }
-
-    // Show merge conflict warning
-    if (instance.prStatus?.mergeable === 'CONFLICTING') {
-      accessories.push({
-        icon: { source: Icon.ExclamationMark, tintColor: Color.Red },
-        tooltip: 'PR has merge conflicts',
-      });
-    }
-
     // Show tmux session status
     if (instance.tmuxStatus?.exists) {
       accessories.push({
@@ -441,16 +614,8 @@ export default function Command() {
     // Show Caddy host status
     if (instance.caddyHost) {
       accessories.push({
-        icon: { source: Icon.Globe, tintColor: Color.Blue },
+        icon: { source: Icon.Link, tintColor: Color.Blue },
         tooltip: `Dev environment: ${instance.caddyHost.url}`,
-      });
-    }
-
-    if (instance.prStatus?.checks) {
-      const { passing, failing, pending, total } = instance.prStatus.checks;
-      accessories.push({
-        text: `${passing}/${total}`,
-        tooltip: `Checks: ${passing} passing, ${failing} failing, ${pending} pending`,
       });
     }
 

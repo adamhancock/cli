@@ -25,6 +25,10 @@ declare namespace Preferences {
   export type ChromeTabs = ExtensionPreferences & {}
   /** Preferences accessible in the `open-active-dev-instance` command */
   export type OpenActiveDevInstance = ExtensionPreferences & {}
+  /** Preferences accessible in the `open-spotlight-environment` command */
+  export type OpenSpotlightEnvironment = ExtensionPreferences & {}
+  /** Preferences accessible in the `open-pr-in-chrome` command */
+  export type OpenPrInChrome = ExtensionPreferences & {}
 }
 
 declare namespace Arguments {
@@ -40,5 +44,9 @@ declare namespace Arguments {
   export type ChromeTabs = {}
   /** Arguments passed to the `open-active-dev-instance` command */
   export type OpenActiveDevInstance = {}
+  /** Arguments passed to the `open-spotlight-environment` command */
+  export type OpenSpotlightEnvironment = {}
+  /** Arguments passed to the `open-pr-in-chrome` command */
+  export type OpenPrInChrome = {}
 }
 

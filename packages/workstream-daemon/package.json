@@ -21,6 +21,7 @@
   "author": "adamhancock",
   "license": "MIT",
   "dependencies": {
+    "eventsource": "^2.0.2",
     "ioredis": "^5.4.1",
     "tsx": "^4.19.2",
     "zx": "^8.2.4"
