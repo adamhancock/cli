@@ -18,14 +18,28 @@ export interface ChromeWindow {
 }
 
 /**
- * Normalize a URL including path for more specific tab matching.
- * This allows matching tabs with the same hostname, port, and path.
+ * Normalize a URL for tab matching.
+ * - For localhost/dev with explicit port: Match by hostname:port (e.g., Spotlight on :9018)
+ * - For localhost/dev with default port: Match by hostname only (HTTP vs HTTPS handling)
+ * - For external sites: Include full path for specific matching
  */
 export function normalizeUrl(url: string): string {
   try {
     const urlObj = new URL(url);
-    // Match by hostname, port, and path (ignore query/hash)
     const hostname = urlObj.hostname.replace(/^www\./, '');
+
+    // For localhost/dev environments
+    if (hostname === 'localhost' || hostname.endsWith('.localhost')) {
+      // If there's an explicit port (not default), include it to distinguish
+      // different services (e.g., main app on :443 vs Spotlight on :9018)
+      if (urlObj.port) {
+        return `${hostname}:${urlObj.port}`;
+      }
+      // For default ports (80/443), just match by hostname to handle HTTP vs HTTPS
+      return hostname;
+    }
+
+    // For external sites, include full path for more specific matching
     const port = urlObj.port || (urlObj.protocol === 'https:' ? '443' : '80');
     const pathname = urlObj.pathname;
     return `${hostname}:${port}${pathname}`;
@@ -57,20 +71,28 @@ export async function getChromeWindows(): Promise<ChromeWindow[]> {
 }
 
 /**
- * Find a Chrome tab matching the target URL (by hostname:port:path).
+ * Find a Chrome tab matching the target URL.
+ * - For localhost/dev: matches by hostname:port
+ * - For external sites: matches by hostname:port:path
  */
 export async function findChromeTab(targetUrl: string): Promise<{ windowId: number; tabIndex: number } | null> {
   const windows = await getChromeWindows();
   const normalizedTarget = normalizeUrl(targetUrl);
 
+  console.log('[Tab Detection] Looking for:', targetUrl);
+  console.log('[Tab Detection] Normalized target:', normalizedTarget);
+
   for (const window of windows) {
     for (const tab of window.tabs) {
-      if (normalizeUrl(tab.url) === normalizedTarget) {
+      const normalizedTab = normalizeUrl(tab.url);
+      if (normalizedTab === normalizedTarget) {
+        console.log('[Tab Detection] ✓ FOUND matching tab:', tab.url);
         return { windowId: window.id, tabIndex: tab.index };
       }
     }
   }
 
+  console.log('[Tab Detection] ✗ No matching tab found');
   return null;
 }
 
