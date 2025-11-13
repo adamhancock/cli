@@ -9,96 +9,20 @@ import {
   closeMainWindow,
 } from '@raycast/api';
 import { useState, useEffect } from 'react';
-import { exec } from 'child_process';
-import { promisify } from 'util';
-import Redis from 'ioredis';
 import { getVSCodeInstances, focusVSCodeInstance } from './utils/vscode';
 import { getGitInfo } from './utils/git';
 import { getPRStatus } from './utils/github';
 import { loadFromDaemon } from './utils/daemon-client';
 import { getUsageHistory, recordUsage } from './utils/cache';
+import {
+  normalizeUrl,
+  getChromeWindows,
+  findChromeTab,
+  switchToChromeTab,
+  openNewChromeTab,
+  type ChromeWindow,
+} from './utils/chrome';
 import type { InstanceWithStatus } from './types';
-
-const execAsync = promisify(exec);
-
-interface ChromeTab {
-  index: number;
-  title: string;
-  url: string;
-  favicon?: string;
-}
-
-interface ChromeWindow {
-  id: number;
-  tabs: ChromeTab[];
-  lastUpdated: number;
-}
-
-// Helper functions for Chrome tab management
-function normalizeUrl(url: string): string {
-  try {
-    const urlObj = new URL(url);
-    // Remove protocol, trailing slashes, and www for consistent comparison
-    const hostname = urlObj.hostname.replace(/^www\./, '');
-    const pathname = urlObj.pathname.replace(/\/$/, '');
-    return `${hostname}${pathname}${urlObj.search}${urlObj.hash}`;
-  } catch {
-    return url;
-  }
-}
-
-async function getChromeWindows(): Promise<ChromeWindow[]> {
-  try {
-    const redis = new Redis({
-      host: 'localhost',
-      port: 6379,
-    });
-
-    const data = await redis.get('workstream:chrome:windows');
-    await redis.quit();
-
-    if (data) {
-      return JSON.parse(data) as ChromeWindow[];
-    }
-  } catch (error) {
-    console.error('Failed to load Chrome windows:', error);
-  }
-  return [];
-}
-
-async function findChromeTab(targetUrl: string): Promise<{ windowId: number; tabIndex: number } | null> {
-  const windows = await getChromeWindows();
-  const normalizedTarget = normalizeUrl(targetUrl);
-
-  for (const window of windows) {
-    for (const tab of window.tabs) {
-      if (normalizeUrl(tab.url) === normalizedTarget) {
-        return { windowId: window.id, tabIndex: tab.index };
-      }
-    }
-  }
-
-  return null;
-}
-
-async function switchToChromeTab(windowId: number, tabIndex: number) {
-  const script = `
-    tell application "Google Chrome"
-      activate
-      set _wnd to first window where id is ${windowId}
-      set index of _wnd to 1
-      set active tab index of _wnd to ${tabIndex + 1}
-    end tell
-  `;
-  await execAsync(`osascript -e '${script}'`);
-}
-
-async function openNewChromeTab(url: string) {
-  // Use open command with profile directory to force specific Chrome profile
-  const profile = 'Default'; // Chrome profile to use
-  const command = `open -a "Google Chrome" --args --profile-directory="${profile}" "${url}"`;
-  await execAsync(command);
-}
 
 function sortByUsageHistory(instances: InstanceWithStatus[]): InstanceWithStatus[] {
   const usageHistory = getUsageHistory();
