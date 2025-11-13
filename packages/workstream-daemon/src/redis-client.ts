@@ -6,6 +6,7 @@ export const REDIS_KEYS = {
   INSTANCE: (path: string) => `workstream:instance:${Buffer.from(path).toString('base64')}`,
   TIMESTAMP: 'workstream:timestamp',
   CHROME_WINDOWS: 'workstream:chrome:windows',
+  DAEMON_LOCK: 'workstream:daemon:lock',
 } as const;
 
 export const REDIS_CHANNELS = {

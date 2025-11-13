@@ -110,6 +110,7 @@ interface InstanceWithMetadata extends VSCodeInstance {
   caddyHost?: CaddyHost;
   spotlightStatus?: SpotlightStatus;
   lastUpdated: number;
+  prLastUpdated?: number;
 }
 
 const CACHE_DIR = join(homedir(), '.workstream-daemon');
@@ -144,6 +145,7 @@ class WorkstreamDaemon {
   private pollTimer?: NodeJS.Timeout;
   private currentPollInterval: number = POLL_INTERVAL;
   private ghRateLimit?: GitHubRateLimit;
+  private lastRateLimitCheck: number = 0;
   private previousPRStates: Map<string, { conclusion: 'success' | 'failure' | 'pending'; mergeable?: string }> = new Map();
 
   constructor() {
@@ -278,13 +280,26 @@ class WorkstreamDaemon {
   async start() {
     log('🚀 Workstream Daemon starting...');
 
+    // Try to acquire the daemon lock with retry logic (2 minutes)
+    const acquired = await this.acquireLockWithRetry();
+    if (!acquired) {
+      const existingPid = await this.redis.get(REDIS_KEYS.DAEMON_LOCK);
+      log('❌ Unable to acquire daemon lock after 2 minutes');
+      log(`   Another daemon (PID: ${existingPid}) is still running`);
+      log('   Stop the existing daemon before starting a new one');
+      throw new Error('Daemon already running');
+    }
+
     // Ensure cache directory exists
     log('📁 Setting up cache directory...');
     await mkdir(CACHE_DIR, { recursive: true });
 
     // Check initial rate limit
-    log('🔍 Checking GitHub rate limits...');
     await this.checkGitHubRateLimit();
+    if (this.ghRateLimit) {
+      const percent = Math.round((this.ghRateLimit.remaining / this.ghRateLimit.limit) * 100);
+      log(`🔍 GitHub Rate Limit: ${percent}% remaining (${this.ghRateLimit.remaining}/${this.ghRateLimit.limit})`);
+    }
 
     // Initial poll
     log('🔄 Running initial poll...');
@@ -320,12 +335,106 @@ class WorkstreamDaemon {
       clearTimeout(this.pollTimer);
     }
 
+    // Disconnect all spotlight monitoring streams
+    spotlightMonitor.disconnectAll();
+
+    // Release the daemon lock
+    await this.releaseLock();
+
     // Unsubscribe and close Redis connections
     await this.subscriber.unsubscribe();
     await this.subscriber.quit();
     await closeRedisConnections();
 
     log('Daemon stopped');
+  }
+
+  /**
+   * Acquire the daemon lock using Redis SET NX (set if not exists)
+   * Lock expires after 30 seconds if not refreshed
+   */
+  private async acquireLock(): Promise<boolean> {
+    const pid = process.pid.toString();
+    const result = await this.redis.set(REDIS_KEYS.DAEMON_LOCK, pid, 'EX', 30, 'NX');
+    return result === 'OK';
+  }
+
+  /**
+   * Try to acquire the daemon lock with retry logic (up to 2 minutes)
+   * Checks if existing PID is still alive and waits for it to release
+   */
+  private async acquireLockWithRetry(): Promise<boolean> {
+    const maxRetries = 60; // 60 retries * 2 seconds = 2 minutes
+    const retryDelay = 2000; // 2 seconds
+
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      // Try to acquire the lock
+      const acquired = await this.acquireLock();
+      if (acquired) {
+        if (attempt > 0) {
+          log('✅ Successfully acquired daemon lock');
+        }
+        return true;
+      }
+
+      // Lock exists, check if the PID is still alive
+      const existingPid = await this.redis.get(REDIS_KEYS.DAEMON_LOCK);
+      if (existingPid) {
+        const isAlive = await this.isProcessAlive(existingPid);
+
+        if (!isAlive) {
+          // Process is dead, forcefully acquire the lock
+          log(`⚠️  Stale lock detected (PID ${existingPid} not running), acquiring lock`);
+          await this.redis.del(REDIS_KEYS.DAEMON_LOCK);
+          const acquired = await this.acquireLock();
+          if (acquired) {
+            return true;
+          }
+        } else {
+          // Process is alive, wait and retry
+          if (attempt === 0) {
+            log(`⏳ Waiting for existing daemon (PID ${existingPid}) to release lock...`);
+          } else if (attempt % 15 === 0) { // Log every 30 seconds
+            const elapsed = attempt * retryDelay / 1000;
+            const remaining = (maxRetries - attempt) * retryDelay / 1000;
+            log(`   Still waiting... (${elapsed}s elapsed, ${remaining}s remaining)`);
+          }
+        }
+      }
+
+      // Wait before retrying
+      await new Promise(resolve => setTimeout(resolve, retryDelay));
+    }
+
+    return false;
+  }
+
+  /**
+   * Check if a process is still running by PID
+   */
+  private async isProcessAlive(pid: string): Promise<boolean> {
+    try {
+      // Use kill -0 to check if process exists without actually killing it
+      const result = await $`kill -0 ${pid} 2>/dev/null`.quiet();
+      return result.exitCode === 0;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Refresh the lock TTL to prevent expiration while daemon is running
+   */
+  private async refreshLock(): Promise<void> {
+    const pid = process.pid.toString();
+    await this.redis.set(REDIS_KEYS.DAEMON_LOCK, pid, 'EX', 30, 'XX');
+  }
+
+  /**
+   * Release the daemon lock on shutdown
+   */
+  private async releaseLock(): Promise<void> {
+    await this.redis.del(REDIS_KEYS.DAEMON_LOCK);
   }
 
   private getMinutesUntilReset(resetTimestamp: number): number {
@@ -346,20 +455,21 @@ class WorkstreamDaemon {
       // Use the more restrictive limit
       const effectiveLimit = coreLimit.remaining < graphqlLimit.remaining ? coreLimit : graphqlLimit;
       this.ghRateLimit = effectiveLimit;
+      this.lastRateLimitCheck = Date.now();
 
-      // Calculate time until reset
-      const coreMinutesUntilReset = this.getMinutesUntilReset(coreLimit.reset);
-      const graphqlMinutesUntilReset = this.getMinutesUntilReset(graphqlLimit.reset);
-
-      // Log both limits for visibility with reset times
-      const corePercent = Math.round((coreLimit.remaining / coreLimit.limit) * 100);
-      const graphqlPercent = Math.round((graphqlLimit.remaining / graphqlLimit.limit) * 100);
-      log(`GitHub Rate Limits - Core: ${corePercent}% remaining (${coreLimit.remaining}/${coreLimit.limit}), resets in ${coreMinutesUntilReset}m, GraphQL: ${graphqlPercent}% remaining (${graphqlLimit.remaining}/${graphqlLimit.limit}), resets in ${graphqlMinutesUntilReset}m`);
-
-      // Adjust polling interval based on rate limit
+      // Adjust polling interval based on rate limit (but don't log unless it's low)
       if (this.ghRateLimit!.remaining < RATE_LIMIT_THRESHOLD) {
         this.currentPollInterval = MIN_POLL_INTERVAL;
-        log(`⚠️  Rate limit low (${this.ghRateLimit!.remaining} remaining), increasing poll interval to ${MIN_POLL_INTERVAL}ms`);
+
+        // Calculate time until reset
+        const coreMinutesUntilReset = this.getMinutesUntilReset(coreLimit.reset);
+        const graphqlMinutesUntilReset = this.getMinutesUntilReset(graphqlLimit.reset);
+
+        // Only log when rate limit is low
+        const corePercent = Math.round((coreLimit.remaining / coreLimit.limit) * 100);
+        const graphqlPercent = Math.round((graphqlLimit.remaining / graphqlLimit.limit) * 100);
+        log(`⚠️  GitHub Rate Limit Low - Core: ${corePercent}% remaining (${coreLimit.remaining}/${coreLimit.limit}), resets in ${coreMinutesUntilReset}m, GraphQL: ${graphqlPercent}% remaining (${graphqlLimit.remaining}/${graphqlLimit.limit}), resets in ${graphqlMinutesUntilReset}m`);
+        log(`⚠️  Increasing poll interval to ${MIN_POLL_INTERVAL}ms to preserve rate limit`);
       } else {
         this.currentPollInterval = POLL_INTERVAL;
       }
@@ -373,8 +483,8 @@ class WorkstreamDaemon {
     try {
       log(`🔄 Starting poll${forcePR ? ' (forced PR refresh)' : ''}...`);
 
-      // Check rate limit FIRST to have latest values before enriching
-      await this.checkGitHubRateLimit();
+      // Refresh the daemon lock to prevent expiration
+      await this.refreshLock();
 
       const instances = await this.getVSCodeInstances();
       log(`📁 Found ${instances.length} VS Code instances`);
@@ -388,6 +498,13 @@ class WorkstreamDaemon {
         if (!newPaths.has(path)) {
           this.instances.delete(path);
           removedCount++;
+
+          // Disconnect spotlight monitoring for removed instance
+          if (spotlightMonitor.isConnected(path)) {
+            log(`  🔌 Disconnecting spotlight stream for removed instance: ${path.split('/').pop()}`);
+            spotlightMonitor.disconnectStream(path);
+          }
+
           log(`  ➖ Removed closed instance: ${path.split('/').pop()}`);
         }
       }
@@ -404,6 +521,37 @@ class WorkstreamDaemon {
         projectName: string;
       }> = [];
 
+      // Load any missing instances from Redis (for daemon restart scenario)
+      const missingPaths = instances.filter(i => !this.instances.has(i.path)).map(i => i.path);
+      if (missingPaths.length > 0) {
+        log(`  📦 Loading ${missingPaths.length} instance(s) from Redis cache...`);
+        const pipeline = this.redis.pipeline();
+        for (const path of missingPaths) {
+          pipeline.get(REDIS_KEYS.INSTANCE(path));
+        }
+        const results = await pipeline.exec();
+
+        // Restore instances from Redis into memory
+        let restoredCount = 0;
+        if (results) {
+          for (let i = 0; i < results.length; i++) {
+            const [err, data] = results[i];
+            if (!err && data) {
+              try {
+                const cached = JSON.parse(data as string) as InstanceWithMetadata;
+                this.instances.set(missingPaths[i], cached);
+                restoredCount++;
+              } catch (e) {
+                // Ignore parse errors
+              }
+            }
+          }
+        }
+        if (restoredCount > 0) {
+          log(`  ✅ Restored ${restoredCount} instance(s) with previous metadata (including PR refresh times)`);
+        }
+      }
+
       let skippedCount = 0;
       for (const instance of instances) {
         const existing = this.instances.get(instance.path);
@@ -412,7 +560,7 @@ class WorkstreamDaemon {
         // Always update git and Claude (local, no rate limits)
         // Only refresh PR status if we have rate limit and it's been 30+ seconds (or forced)
         const shouldUpdateLocal = !existing || (Date.now() - existing.lastUpdated) > 5000; // 5 seconds
-        const shouldUpdatePR = forcePR || !existing || (Date.now() - existing.lastUpdated) > 30000; // 30 seconds
+        const shouldUpdatePR = forcePR || !existing || (Date.now() - (existing.prLastUpdated || 0)) > 30000; // 30 seconds
 
         if (shouldUpdateLocal) {
           enrichmentTasks.push({ instance, shouldUpdatePR, projectName });
@@ -424,7 +572,22 @@ class WorkstreamDaemon {
       // Enrich all instances in parallel
       let updatedCount = 0;
       if (enrichmentTasks.length > 0) {
+        const prUpdateCount = enrichmentTasks.filter(t => t.shouldUpdatePR).length;
         log(`  🔍 Enriching ${enrichmentTasks.length} instances in parallel...`);
+
+        // Check rate limit only when we're about to make GitHub API calls
+        // AND it's been more than 30 seconds since last check (or forced refresh)
+        const timeSinceLastCheck = Date.now() - this.lastRateLimitCheck;
+        if (prUpdateCount > 0 && (forcePR || timeSinceLastCheck > 30000)) {
+          await this.checkGitHubRateLimit();
+        }
+
+        // Log rate limit info only when we're actually making GitHub API calls
+        if (prUpdateCount > 0 && this.ghRateLimit) {
+          const percent = Math.round((this.ghRateLimit.remaining / this.ghRateLimit.limit) * 100);
+          log(`  📊 GitHub Rate Limit: ${percent}% remaining (${this.ghRateLimit.remaining}/${this.ghRateLimit.limit}), updating ${prUpdateCount} PR${prUpdateCount > 1 ? 's' : ''}`);
+        }
+
         const enrichmentResults = await Promise.all(
           enrichmentTasks.map(async ({ instance, shouldUpdatePR, projectName }) => {
             try {
@@ -547,6 +710,7 @@ class WorkstreamDaemon {
     // Get PR status only if requested and we have rate limit remaining
     if (updatePR && enriched.gitInfo && this.ghRateLimit && this.ghRateLimit.remaining > 0) {
       enriched.prStatus = await this.getPRStatus(instance.path, enriched.gitInfo.branch);
+      enriched.prLastUpdated = Date.now(); // Track when PR was last fetched
 
       // Check for PR state changes and send notifications
       if (enriched.prStatus) {
@@ -605,10 +769,16 @@ class WorkstreamDaemon {
         }
       }
     } else {
-      // Preserve existing PR status if not updating
+      // Preserve existing PR status and timestamp if not updating
       const existing = this.instances.get(instance.path);
-      if (existing?.prStatus) {
-        enriched.prStatus = existing.prStatus;
+      if (existing) {
+        // Always preserve prLastUpdated to track when we last checked for a PR
+        // This prevents unnecessary PR checks even when no PR exists
+        enriched.prLastUpdated = existing.prLastUpdated;
+        // Also preserve PR status if it exists
+        if (existing.prStatus) {
+          enriched.prStatus = existing.prStatus;
+        }
       }
     }
 
@@ -625,8 +795,7 @@ class WorkstreamDaemon {
     if (enriched.caddyHost && enriched.gitInfo?.branch) {
       enriched.spotlightStatus = await this.getSpotlightStatus(
         instance.path,
-        enriched.caddyHost,
-        enriched.gitInfo.branch
+        enriched.caddyHost
       );
     }
 
@@ -895,8 +1064,7 @@ class WorkstreamDaemon {
 
   private async getSpotlightStatus(
     instancePath: string,
-    caddyHost: CaddyHost,
-    branch: string
+    caddyHost: CaddyHost
   ): Promise<SpotlightStatus | undefined> {
     try {
       // Extract spotlight port from Caddy routes (same logic as Raycast)
