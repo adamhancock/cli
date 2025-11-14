@@ -200,6 +200,9 @@ class WorkstreamDaemon {
           } else if (data.type === 'work_stopped') {
             log(`  ⏹️  Claude stopped in ${projectName}`);
             await this.handleClaudeFinished(data.path);
+          } else if (data.type === 'clear_finished') {
+            log(`  🏁  Clearing finished flag for ${projectName}`);
+            await this.handleClearFinished(data.path);
           }
         }
       } catch (error) {
@@ -1224,6 +1227,7 @@ class WorkstreamDaemon {
       if (instance && instance.claudeStatus) {
         instance.claudeStatus.isWaiting = false;
         instance.claudeStatus.isWorking = false;
+        instance.claudeStatus.claudeFinished = true; // Set finished flag
         await this.writeCache();
         await this.publishUpdate();
 
@@ -1241,6 +1245,23 @@ class WorkstreamDaemon {
       }
     } catch (error) {
       logError('Error handling Claude finished:', error);
+    }
+  }
+
+  private async handleClearFinished(repoPath: string) {
+    try {
+      // Clear the finished flag when user switches to instance
+      const instance = this.instances.get(repoPath);
+      if (instance && instance.claudeStatus) {
+        instance.claudeStatus.claudeFinished = false;
+        await this.writeCache();
+        await this.publishUpdate();
+
+        const projectName = repoPath.split('/').pop() || 'project';
+        log(`Cleared finished flag for ${projectName}`);
+      }
+    } catch (error) {
+      logError('Error clearing finished flag:', error);
     }
   }
 

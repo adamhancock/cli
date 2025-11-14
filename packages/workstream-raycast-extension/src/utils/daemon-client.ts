@@ -130,6 +130,33 @@ export async function triggerDaemonRefresh(): Promise<boolean> {
 }
 
 /**
+ * Clear the Claude finished flag for a specific instance via Redis pub/sub
+ * Returns true if message was sent successfully
+ */
+export async function clearClaudeFinishedFlag(instancePath: string): Promise<boolean> {
+  try {
+    if (!(await isRedisAvailable())) {
+      return false;
+    }
+
+    const publisher = getPublisherClient();
+    await publisher.publish(
+      REDIS_CHANNELS.CLAUDE,
+      JSON.stringify({
+        type: 'clear_finished',
+        path: instancePath
+      })
+    );
+
+    console.log(`Cleared finished flag for ${instancePath}`);
+    return true;
+  } catch (error) {
+    console.error('Failed to clear finished flag:', error);
+    return false;
+  }
+}
+
+/**
  * Subscribe to real-time updates from the daemon via Redis pub/sub
  * Returns a cleanup function to close the connection
  */

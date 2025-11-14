@@ -94,3 +94,113 @@ export async function isGitRepository(repoPath: string): Promise<boolean> {
     return false;
   }
 }
+
+/**
+ * Get list of local branches
+ */
+export async function getLocalBranches(repoPath: string): Promise<string[]> {
+  try {
+    const { stdout } = await execAsync(
+      `/usr/bin/git -C "${repoPath}" branch --format='%(refname:short)'`
+    );
+    return stdout
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((branch) => branch.trim());
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Get list of remote branches
+ */
+export async function getRemoteBranches(repoPath: string, remote: string = 'origin'): Promise<string[]> {
+  try {
+    const { stdout } = await execAsync(
+      `/usr/bin/git -C "${repoPath}" branch -r --format='%(refname:short)'`
+    );
+    const prefix = `${remote}/`;
+    return stdout
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((branch) => branch.trim())
+      .filter((branch) => branch.startsWith(prefix))
+      .map((branch) => branch.substring(prefix.length))
+      .filter((branch) => branch !== 'HEAD'); // Filter out HEAD pointer
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Get list of unmerged branches (excludes branches already merged to base)
+ * Sorted by most recent commit date
+ */
+export async function getUnmergedBranches(
+  repoPath: string,
+  baseBranch: string = 'main',
+  remote: string = 'origin'
+): Promise<{ local: string[]; remote: string[] }> {
+  try {
+    const [localResult, remoteResult] = await Promise.allSettled([
+      execAsync(
+        `/usr/bin/git -C "${repoPath}" branch --no-merged ${remote}/${baseBranch} --sort=-committerdate --format='%(refname:short)'`
+      ),
+      execAsync(
+        `/usr/bin/git -C "${repoPath}" branch -r --no-merged ${remote}/${baseBranch} --sort=-committerdate --format='%(refname:short)'`
+      ),
+    ]);
+
+    const local =
+      localResult.status === 'fulfilled'
+        ? localResult.value.stdout
+            .trim()
+            .split('\n')
+            .filter(Boolean)
+            .map((branch) => branch.trim())
+        : [];
+
+    const prefix = `${remote}/`;
+    const remoteBranches =
+      remoteResult.status === 'fulfilled'
+        ? remoteResult.value.stdout
+            .trim()
+            .split('\n')
+            .filter(Boolean)
+            .map((branch) => branch.trim())
+            .filter((branch) => branch.startsWith(prefix))
+            .map((branch) => branch.substring(prefix.length))
+            .filter((branch) => branch !== 'HEAD')
+        : [];
+
+    return { local, remote: remoteBranches };
+  } catch {
+    return { local: [], remote: [] };
+  }
+}
+
+/**
+ * Check if a branch exists locally and/or remotely
+ */
+export async function branchExists(
+  repoPath: string,
+  branchName: string,
+  remote: string = 'origin'
+): Promise<{ local: boolean; remote: boolean }> {
+  try {
+    const [localResult, remoteResult] = await Promise.allSettled([
+      execAsync(`/usr/bin/git -C "${repoPath}" show-ref --verify --quiet refs/heads/${branchName}`),
+      execAsync(`/usr/bin/git -C "${repoPath}" show-ref --verify --quiet refs/remotes/${remote}/${branchName}`),
+    ]);
+
+    return {
+      local: localResult.status === 'fulfilled',
+      remote: remoteResult.status === 'fulfilled',
+    };
+  } catch {
+    return { local: false, remote: false };
+  }
+}

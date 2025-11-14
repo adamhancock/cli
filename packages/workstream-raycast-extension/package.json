@@ -7,6 +7,34 @@
   "author": "adamhancock",
   "license": "MIT",
   "version": "0.1.8",
+  "preferences": [
+    {
+      "name": "defaultRepoPath",
+      "type": "textfield",
+      "required": false,
+      "title": "Default Repository Path",
+      "description": "Default path to your repository (e.g., ~/Code/myrepo)",
+      "placeholder": "~/Code/myrepo"
+    },
+    {
+      "name": "codeFolder",
+      "type": "textfield",
+      "required": false,
+      "title": "Code Folder",
+      "description": "Default folder containing your git repositories (e.g., ~/Code)",
+      "default": "~/Code",
+      "placeholder": "~/Code"
+    },
+    {
+      "name": "devDomain",
+      "type": "textfield",
+      "required": false,
+      "title": "Dev Environment Domain",
+      "description": "Domain suffix for development environments (e.g., myproject.localhost)",
+      "default": "localhost",
+      "placeholder": "myproject.localhost"
+    }
+  ],
   "commands": [
     {
       "name": "index",
@@ -62,6 +90,13 @@
       "title": "Open PR in Chrome",
       "subtitle": "Workstream",
       "description": "Open pull requests in Chrome with smart tab detection - switches to existing tab or opens new one",
+      "mode": "view"
+    },
+    {
+      "name": "cleanup-stale-worktrees",
+      "title": "Cleanup Stale Worktrees",
+      "subtitle": "Workstream",
+      "description": "Remove stale git worktrees (merged/closed PRs, missing directories, locked worktrees)",
       "mode": "view"
     }
   ],

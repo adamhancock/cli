@@ -7,12 +7,18 @@ import {
   showToast,
   Toast,
   closeMainWindow,
+  getPreferenceValues,
 } from '@raycast/api';
 import { useState, useEffect } from 'react';
 import { loadFromDaemon, loadFromRedis } from './utils/daemon-client';
 import { getUsageHistory, recordUsage } from './utils/cache';
 import { findChromeTab, switchToChromeTab, openNewChromeTab, normalizeUrl, getChromeWindows, type ChromeWindow } from './utils/chrome';
 import type { InstanceWithStatus } from './types';
+
+interface Preferences {
+  defaultRepoPath?: string;
+  devDomain?: string;
+}
 
 function sortByUsageHistory(instances: InstanceWithStatus[]): InstanceWithStatus[] {
   const usageHistory = getUsageHistory();
@@ -32,6 +38,8 @@ function sortByUsageHistory(instances: InstanceWithStatus[]): InstanceWithStatus
 }
 
 export default function OpenSpotlightEnvironmentCommand() {
+  const preferences = getPreferenceValues<Preferences>();
+  const devDomain = preferences.devDomain || 'localhost';
   const [instances, setInstances] = useState<InstanceWithStatus[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [chromeWindows, setChromeWindows] = useState<ChromeWindow[]>([]);
@@ -131,7 +139,7 @@ export default function OpenSpotlightEnvironmentCommand() {
                 const parts = upstream.split(':');
                 if (parts.length === 2) {
                   const port = parts[1];
-                  return `http://${branch}.assurix.localhost:${port}/`;
+                  return `http://${branch}.${devDomain}:${port}/`;
                 }
               }
             }

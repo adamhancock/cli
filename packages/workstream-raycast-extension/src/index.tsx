@@ -8,7 +8,7 @@ import { getGitInfo } from './utils/git';
 import { getPRStatus } from './utils/github';
 import { isClaudeCodeActive } from './utils/claude';
 import { getCachedInstances, setCachedInstances, clearCache, recordUsage, getUsageHistory } from './utils/cache';
-import { loadFromDaemon, loadFromRedis, triggerDaemonRefresh, subscribeToUpdates, type DaemonCache } from './utils/daemon-client';
+import { loadFromDaemon, loadFromRedis, triggerDaemonRefresh, clearClaudeFinishedFlag, subscribeToUpdates, type DaemonCache } from './utils/daemon-client';
 import { getTmuxSessionOutput, createTmuxSession, attachToTmuxSession, killTmuxSession } from './utils/tmux';
 import { startNotificationListener, stopNotificationListener } from './utils/notification-listener';
 import type { InstanceWithStatus } from './types';
@@ -333,6 +333,11 @@ export default function Command() {
       // Record usage for sorting next time
       recordUsage(instance.path);
 
+      // Clear finished flag when switching to instance
+      if (instance.claudeStatus?.claudeFinished) {
+        await clearClaudeFinishedFlag(instance.path);
+      }
+
       await focusVSCodeInstance(instance.path);
 
       // Close Raycast window immediately after switching
@@ -410,7 +415,22 @@ export default function Command() {
   }
 
   function getStatusIcon(instance: InstanceWithStatus): Icon {
-    // Check PR state first
+    // Check Claude finished status first - highest priority
+    if (instance.claudeStatus?.claudeFinished) {
+      return Icon.CheckeredFlag;
+    }
+
+    // Check Claude waiting status - second priority
+    if (instance.claudeStatus?.active && instance.claudeStatus.isWaiting) {
+      return Icon.MagnifyingGlass;
+    }
+
+    // Check Claude working status - third priority
+    if (instance.claudeStatus?.active && instance.claudeStatus.isWorking) {
+      return Icon.Bolt;
+    }
+
+    // Check PR state
     if (instance.prStatus?.state === 'MERGED') {
       return Icon.CheckCircle;
     }
@@ -432,7 +452,17 @@ export default function Command() {
   }
 
   function getStatusColor(instance: InstanceWithStatus): Color {
-    // Check PR state first
+    // Check Claude finished status first - highest priority (green)
+    if (instance.claudeStatus?.claudeFinished) {
+      return Color.Green;
+    }
+
+    // Check Claude working status - second priority (purple)
+    if (instance.claudeStatus?.active && instance.claudeStatus.isWorking) {
+      return Color.Purple;
+    }
+
+    // Check PR state
     if (instance.prStatus?.state === 'MERGED') {
       return Color.Purple;
     }
@@ -546,6 +576,46 @@ export default function Command() {
         });
       }
 
+      // Claude status - prioritized before CI checks
+      if (instance.claudeStatus?.active) {
+        const isFinished = instance.claudeStatus.claudeFinished;
+        const isWaiting = instance.claudeStatus.isWaiting;
+        const isWorking = instance.claudeStatus.isWorking;
+
+        let statusText: string;
+        let tooltip: string;
+        let color: Color;
+        let icon: Icon;
+
+        if (isFinished) {
+          statusText = 'Finished';
+          tooltip = 'Claude Code: Work completed ✅';
+          color = Color.Green;
+          icon = Icon.CheckeredFlag;
+        } else if (isWaiting) {
+          statusText = 'Waiting';
+          tooltip = 'Claude Code: Waiting for your input ⏳';
+          color = Color.Orange;
+          icon = Icon.MagnifyingGlass;
+        } else if (isWorking) {
+          statusText = 'Working';
+          tooltip = 'Claude Code: Actively working 🔥';
+          color = Color.Purple;
+          icon = Icon.Bolt;
+        } else {
+          statusText = 'Idle';
+          tooltip = 'Claude Code: Idle (no recent activity)';
+          color = Color.SecondaryText;
+          icon = Icon.Bolt;
+        }
+
+        accessories.push({
+          text: statusText,
+          icon: { source: icon, tintColor: color },
+          tooltip,
+        });
+      }
+
       // CI checks summary
       if (instance.prStatus.checks) {
         const { passing, failing, pending, total, conclusion } = instance.prStatus.checks;
@@ -587,31 +657,42 @@ export default function Command() {
       }
     }
 
-    if (instance.claudeStatus?.active) {
+    // Claude status for instances without PR (moved outside prStatus block)
+    if (!instance.prStatus && instance.claudeStatus?.active) {
+      const isFinished = instance.claudeStatus.claudeFinished;
       const isWaiting = instance.claudeStatus.isWaiting;
       const isWorking = instance.claudeStatus.isWorking;
 
       let statusText: string;
       let tooltip: string;
       let color: Color;
+      let icon: Icon;
 
-      if (isWaiting) {
+      if (isFinished) {
+        statusText = 'Finished';
+        tooltip = 'Claude Code: Work completed ✅';
+        color = Color.Green;
+        icon = Icon.CheckeredFlag;
+      } else if (isWaiting) {
         statusText = 'Waiting';
         tooltip = 'Claude Code: Waiting for your input ⏳';
         color = Color.Orange;
+        icon = Icon.MagnifyingGlass;
       } else if (isWorking) {
         statusText = 'Working';
         tooltip = 'Claude Code: Actively working 🔥';
         color = Color.Purple;
+        icon = Icon.Bolt;
       } else {
         statusText = 'Idle';
         tooltip = 'Claude Code: Idle (no recent activity)';
         color = Color.SecondaryText;
+        icon = Icon.Bolt;
       }
 
       accessories.push({
         text: statusText,
-        icon: { source: Icon.Bolt, tintColor: color },
+        icon: { source: icon, tintColor: color },
         tooltip,
       });
     }

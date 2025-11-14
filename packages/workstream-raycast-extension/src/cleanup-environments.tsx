@@ -83,7 +83,7 @@ ${!isComplete ? '\n⏳ Working...' : ''}
 \`\`\`
 
 ${isComplete ? '\n## Summary\n' : ''}
-${isComplete ? results.map((r) => `- ${r.success ? '✅' : '❌'} **${r.instanceName}**${r.error ? ` - ${r.error}` : ''}\n  - VS Code: ${r.vscodeClosed ? '✅' : '❌'} | Tmux: ${r.tmuxClosed ? '✅' : '❌'} | Caddy: ${r.caddyRouteClosed ? '✅' : '❌'}`).join('\n') : ''}
+${isComplete ? results.map((r) => `- ${r.success ? '✅' : '❌'} **${r.instanceName}**${r.error ? ` - ${r.error}` : ''}\n  - VS Code: ${r.vscodeClosed ? '✅' : '❌'} | Tmux: ${r.tmuxClosed ? '✅' : '❌'} | Caddy: ${r.caddyRouteClosed ? '✅' : '❌'} | Worktree: ${r.worktreeRemoved ? '✅' : '❌'}`).join('\n') : ''}
   `;
 
   return (

@@ -7,7 +7,14 @@
 
 /* eslint-disable @typescript-eslint/ban-types */
 
-type ExtensionPreferences = {}
+type ExtensionPreferences = {
+  /** Default Repository Path - Default path to your repository (e.g., ~/Code/myrepo) */
+  "defaultRepoPath"?: string,
+  /** Code Folder - Default folder containing your git repositories (e.g., ~/Code) */
+  "codeFolder": string,
+  /** Dev Environment Domain - Domain suffix for development environments (e.g., myproject.localhost) */
+  "devDomain": string
+}
 
 /** Preferences accessible in all the extension's commands */
 declare type Preferences = ExtensionPreferences
@@ -29,6 +36,8 @@ declare namespace Preferences {
   export type OpenSpotlightEnvironment = ExtensionPreferences & {}
   /** Preferences accessible in the `open-pr-in-chrome` command */
   export type OpenPrInChrome = ExtensionPreferences & {}
+  /** Preferences accessible in the `cleanup-stale-worktrees` command */
+  export type CleanupStaleWorktrees = ExtensionPreferences & {}
 }
 
 declare namespace Arguments {
@@ -48,5 +57,7 @@ declare namespace Arguments {
   export type OpenSpotlightEnvironment = {}
   /** Arguments passed to the `open-pr-in-chrome` command */
   export type OpenPrInChrome = {}
+  /** Arguments passed to the `cleanup-stale-worktrees` command */
+  export type CleanupStaleWorktrees = {}
 }
 

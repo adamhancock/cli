@@ -1,13 +1,11 @@
-import { exec, spawn } from 'child_process';
-import { promisify } from 'util';
-import { homedir } from 'os';
-import { join } from 'path';
-
-const execAsync = promisify(exec);
+import { createWorktree as createWorktreeNative } from './worktree-core';
+import type { WorktreeRcConfig } from '../types/worktree-config';
 
 export interface WorktreeConfig {
   repoPath: string;
-  worktreeCommand?: string; // Path to worktree binary, defaults to ~/Library/pnpm/worktree
+  config?: WorktreeRcConfig; // Optional configuration override
+  baseBranch?: string; // Optional base branch to create from
+  force?: boolean; // Force remove existing directory and recreate
 }
 
 export interface WorktreeResult {
@@ -20,172 +18,79 @@ export interface WorktreeResult {
 export type OutputCallback = (chunk: string) => void;
 
 /**
- * Create a new git worktree using the worktree CLI tool
+ * Create a new git worktree using native TypeScript implementation
  */
-export async function createWorktree(
-  branchName: string,
-  config: WorktreeConfig
-): Promise<WorktreeResult> {
-  try {
-    // Replace spaces with dashes
-    const sanitizedBranchName = branchName.replace(/\s+/g, '-');
+export async function createWorktree(branchName: string, config: WorktreeConfig): Promise<WorktreeResult> {
+  // Replace spaces with dashes
+  const sanitizedBranchName = branchName.replace(/\s+/g, '-');
 
-    // Default to ~/Library/pnpm/worktree if not specified
-    const worktreeCommand = config.worktreeCommand || join(homedir(), 'Library', 'pnpm', 'worktree');
+  let fullOutput = '';
+  const appendOutput = (message: string) => {
+    fullOutput += message + '\n';
+  };
 
-    // Source NVM and execute the worktree command
-    const nvmDir = join(homedir(), '.nvm');
-    const command = `
-      export NVM_DIR="${nvmDir}"
-      [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-      cd "${config.repoPath}" && "${worktreeCommand}" "${sanitizedBranchName}"
-    `;
+  const result = await createWorktreeNative({
+    branchName: sanitizedBranchName,
+    repoPath: config.repoPath,
+    config: config.config,
+    baseBranch: config.baseBranch,
+    force: config.force,
+    onOutput: appendOutput,
+    skipVSCode: false,
+  });
 
-    // Set up a proper PATH with standard Unix tool locations
-    const properPath = [
-      '/usr/local/bin',
-      '/usr/bin',
-      '/bin',
-      '/usr/sbin',
-      '/sbin',
-      join(homedir(), '.nvm/versions/node'),
-      process.env.PATH || '',
-    ].filter(Boolean).join(':');
-
-    // Execute the worktree command in the repo directory
-    const { stdout, stderr } = await execAsync(command, {
-      env: {
-        ...process.env,
-        NVM_DIR: nvmDir,
-        PATH: properPath,
-        HOME: homedir(),
-      },
-      shell: '/bin/zsh',
-      maxBuffer: 10 * 1024 * 1024, // 10MB buffer for large outputs
-    });
-
-    const output = stdout + stderr;
-
-    // Extract the worktree path from output
-    // Look for "Opening VS Code at: /path/to/worktree"
-    const pathMatch = output.match(/Opening VS Code at:\s*(.+)/);
-    const worktreePath = pathMatch ? pathMatch[1].trim() : undefined;
-
-    return {
-      success: true,
-      output,
-      worktreePath,
-    };
-  } catch (error: any) {
-    // Get detailed error information
-    const stdout = error.stdout || '';
-    const stderr = error.stderr || '';
-    const errorMessage = error.message || String(error);
-    const fullOutput = `${stdout}\n${stderr}\n${errorMessage}`.trim();
-
-    return {
-      success: false,
-      output: fullOutput,
-      error: fullOutput || 'Unknown error occurred',
-    };
-  }
+  return {
+    success: result.success,
+    output: fullOutput,
+    worktreePath: result.worktreePath,
+    error: result.error,
+  };
 }
 
 /**
- * Create a new git worktree with streaming output
+ * Create a new git worktree with streaming output using native TypeScript implementation
  */
 export async function createWorktreeStreaming(
   branchName: string,
   config: WorktreeConfig,
   onOutput: OutputCallback
 ): Promise<WorktreeResult> {
-  return new Promise((resolve) => {
-    // Replace spaces with dashes
-    const sanitizedBranchName = branchName.replace(/\s+/g, '-');
+  // Replace spaces with dashes
+  const sanitizedBranchName = branchName.replace(/\s+/g, '-');
 
-    // Default to ~/Library/pnpm/worktree if not specified
-    const worktreeCommand = config.worktreeCommand || join(homedir(), 'Library', 'pnpm', 'worktree');
+  let fullOutput = '';
+  const wrappedOutput = (message: string, type?: 'info' | 'success' | 'warning' | 'error') => {
+    fullOutput += message + '\n';
+    onOutput(message + '\n');
+  };
 
-    // Source NVM and execute the worktree command
-    const nvmDir = join(homedir(), '.nvm');
-    const command = `
-      export NVM_DIR="${nvmDir}"
-      [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-      cd "${config.repoPath}" && "${worktreeCommand}" "${sanitizedBranchName}"
-    `;
-
-    // Set up a proper PATH with standard Unix tool locations
-    const properPath = [
-      '/usr/local/bin',
-      '/usr/bin',
-      '/bin',
-      '/usr/sbin',
-      '/sbin',
-      join(homedir(), '.nvm/versions/node'),
-      process.env.PATH || '',
-    ].filter(Boolean).join(':');
-
-    let fullOutput = '';
-
-    const child = spawn('/bin/zsh', ['-c', command], {
-      env: {
-        ...process.env,
-        NVM_DIR: nvmDir,
-        PATH: properPath,
-        HOME: homedir(),
-      },
-    });
-
-    child.stdout.on('data', (data) => {
-      const chunk = data.toString();
-      fullOutput += chunk;
-      onOutput(chunk);
-    });
-
-    child.stderr.on('data', (data) => {
-      const chunk = data.toString();
-      fullOutput += chunk;
-      onOutput(chunk);
-    });
-
-    child.on('close', (code) => {
-      // Extract the worktree path from output
-      const pathMatch = fullOutput.match(/Opening VS Code at:\s*(.+)/);
-      const worktreePath = pathMatch ? pathMatch[1].trim() : undefined;
-
-      if (code === 0) {
-        resolve({
-          success: true,
-          output: fullOutput,
-          worktreePath,
-        });
-      } else {
-        resolve({
-          success: false,
-          output: fullOutput,
-          error: fullOutput || 'Command failed',
-        });
-      }
-    });
-
-    child.on('error', (error) => {
-      const errorMessage = error.message || String(error);
-      fullOutput += `\nError: ${errorMessage}`;
-      onOutput(`\nError: ${errorMessage}`);
-
-      resolve({
-        success: false,
-        output: fullOutput,
-        error: errorMessage,
-      });
-    });
+  const result = await createWorktreeNative({
+    branchName: sanitizedBranchName,
+    repoPath: config.repoPath,
+    config: config.config,
+    baseBranch: config.baseBranch,
+    force: config.force,
+    onOutput: wrappedOutput,
+    skipVSCode: false,
   });
+
+  return {
+    success: result.success,
+    output: fullOutput,
+    worktreePath: result.worktreePath,
+    error: result.error,
+  };
 }
 
 /**
  * Open a worktree path in VS Code
+ * @deprecated This function is now handled by the worktree creation itself
  */
 export async function openWorktreeInVSCode(worktreePath: string): Promise<void> {
+  const { exec } = await import('child_process');
+  const { promisify } = await import('util');
+  const execAsync = promisify(exec);
+
   try {
     await execAsync(`open -a "Visual Studio Code" "${worktreePath}"`);
   } catch (error) {

@@ -7,6 +7,7 @@ import {
   showToast,
   Toast,
   closeMainWindow,
+  getPreferenceValues,
 } from '@raycast/api';
 import { useState, useEffect } from 'react';
 import { exec } from 'child_process';
@@ -24,6 +25,11 @@ import {
   type ChromeWindow,
 } from './utils/chrome';
 import type { InstanceWithStatus } from './types';
+
+interface Preferences {
+  defaultRepoPath?: string;
+  devDomain?: string;
+}
 
 function sortByUsageHistory(instances: InstanceWithStatus[]): InstanceWithStatus[] {
   const usageHistory = getUsageHistory();
@@ -43,6 +49,8 @@ function sortByUsageHistory(instances: InstanceWithStatus[]): InstanceWithStatus
 }
 
 export default function OpenDevEnvironmentCommand() {
+  const preferences = getPreferenceValues<Preferences>();
+  const devDomain = preferences.devDomain || 'localhost';
   const [instances, setInstances] = useState<InstanceWithStatus[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [chromeWindows, setChromeWindows] = useState<ChromeWindow[]>([]);
@@ -329,7 +337,7 @@ export default function OpenDevEnvironmentCommand() {
                 const parts = upstream.split(':');
                 if (parts.length === 2) {
                   const port = parts[1];
-                  return `http://${branch}.assurix.localhost:${port}/`;
+                  return `http://${branch}.${devDomain}:${port}/`;
                 }
               }
             }

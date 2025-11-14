@@ -2,8 +2,75 @@ import { InstanceWithStatus, CleanupCriteria, CleanupResult } from '../types';
 import { closeVSCodeInstance } from './vscode';
 import { killTmuxSession } from './tmux';
 import { deleteRouteByWorktreePath } from './caddy';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+import { existsSync } from 'fs';
+
+const execAsync = promisify(exec);
 
 const OLD_WORKTREE_THRESHOLD_DAYS = 7;
+
+/**
+ * Find the main git repository for a worktree path
+ */
+async function findMainRepo(worktreePath: string): Promise<string | null> {
+  try {
+    const { stdout } = await execAsync('git rev-parse --git-common-dir', { cwd: worktreePath });
+    const gitCommonDir = stdout.trim();
+
+    // If it's .git, we're in the main repo
+    if (gitCommonDir === '.git') {
+      return worktreePath;
+    }
+
+    // Otherwise, get the actual path
+    const { stdout: repoPath } = await execAsync('git rev-parse --show-toplevel', {
+      cwd: gitCommonDir.replace('/.git/worktrees', '').replace(/\/\.git$/, '')
+    });
+    return repoPath.trim();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Remove a git worktree
+ */
+async function removeWorktree(worktreePath: string): Promise<boolean> {
+  try {
+    // Check if path exists
+    if (!existsSync(worktreePath)) {
+      console.log(`Worktree path doesn't exist: ${worktreePath}`);
+      return true; // Consider it removed if it doesn't exist
+    }
+
+    // Find the main repo
+    const mainRepo = await findMainRepo(worktreePath);
+    if (!mainRepo) {
+      console.error('Could not find main repository for worktree');
+      return false;
+    }
+
+    // Remove the worktree using git worktree remove
+    try {
+      await execAsync(`git worktree remove "${worktreePath}" --force`, { cwd: mainRepo });
+      console.log(`Removed worktree: ${worktreePath}`);
+      return true;
+    } catch (error) {
+      // If remove fails, try prune and then rm -rf
+      console.log('Worktree remove failed, trying prune...');
+      await execAsync('git worktree prune', { cwd: mainRepo });
+
+      // Manually remove the directory
+      await execAsync(`rm -rf "${worktreePath}"`);
+      console.log(`Manually removed worktree directory: ${worktreePath}`);
+      return true;
+    }
+  } catch (error) {
+    console.error('Failed to remove worktree:', error);
+    return false;
+  }
+}
 
 /**
  * Find instances that match cleanup criteria
@@ -116,6 +183,7 @@ export async function closeEnvironmentCompletely(
     vscodeClosed: false,
     tmuxClosed: false,
     caddyRouteClosed: false,
+    worktreeRemoved: false,
   };
 
   try {
@@ -160,6 +228,20 @@ export async function closeEnvironmentCompletely(
       console.error('Failed to delete Caddy route:', error);
       // Don't fail the entire operation if Caddy cleanup fails
       result.caddyRouteClosed = false;
+    }
+
+    // Step 4: Remove the git worktree
+    if (instance.isGitRepo) {
+      onProgress?.('Removing git worktree...');
+      try {
+        result.worktreeRemoved = await removeWorktree(instance.path);
+      } catch (error) {
+        console.error('Failed to remove worktree:', error);
+        result.error = `Failed to remove worktree: ${error instanceof Error ? error.message : 'Unknown error'}`;
+        result.worktreeRemoved = false;
+      }
+    } else {
+      result.worktreeRemoved = true; // Not a git repo, nothing to remove
     }
 
     result.success = result.vscodeClosed; // Success if at least VS Code was closed

@@ -52,6 +52,7 @@ export interface ClaudeStatus {
   ideName: string;
   isWorking: boolean; // true if Claude is actively processing
   isWaiting?: boolean; // true if Claude is waiting for user input
+  claudeFinished?: boolean; // true if Claude completed work and user hasn't switched yet
   lastActivityTime?: Date;
 }
 
@@ -119,5 +120,6 @@ export interface CleanupResult {
   vscodeClosed: boolean;
   tmuxClosed: boolean;
   caddyRouteClosed: boolean;
+  worktreeRemoved: boolean;
   error?: string;
 }
