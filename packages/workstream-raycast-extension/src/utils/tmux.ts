@@ -1,5 +1,6 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import { existsSync } from 'fs';
 import path from 'path';
 
 const execAsync = promisify(exec);
@@ -65,7 +66,9 @@ export async function createTmuxSession(
   command: string = 'npm run dev'
 ): Promise<void> {
   try {
-    await execAsync(`tmux new-session -d -s "${sessionName}" -c "${workDir}" "${command}"`);
+    // Escape single quotes in the command
+    const escapedCommand = command.replace(/'/g, "'\"'\"'");
+    await execAsync(`tmux new-session -d -s "${sessionName}" -c "${workDir}" sh -c '${escapedCommand}'`);
   } catch (error) {
     throw new Error(`Failed to create tmux session: ${error instanceof Error ? error.message : 'Unknown error'}`);
   }
@@ -110,4 +113,23 @@ export async function isTmuxAvailable(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * Detect package manager by checking for lock files
+ * Returns 'pnpm', 'yarn', or 'npm' (default)
+ */
+export function detectPackageManager(repoPath: string): 'pnpm' | 'yarn' | 'npm' {
+  // Check for pnpm first (most specific)
+  if (existsSync(path.join(repoPath, 'pnpm-lock.yaml'))) {
+    return 'pnpm';
+  }
+
+  // Check for yarn
+  if (existsSync(path.join(repoPath, 'yarn.lock'))) {
+    return 'yarn';
+  }
+
+  // Default to npm (also covers package-lock.json)
+  return 'npm';
 }

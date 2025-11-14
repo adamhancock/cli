@@ -6,7 +6,7 @@
   "icon": "window-icon.png",
   "author": "adamhancock",
   "license": "MIT",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "preferences": [
     {
       "name": "defaultRepoPath",
@@ -97,6 +97,13 @@
       "title": "Cleanup Stale Worktrees",
       "subtitle": "Workstream",
       "description": "Remove stale git worktrees (merged/closed PRs, missing directories, locked worktrees)",
+      "mode": "view"
+    },
+    {
+      "name": "start-dev-environment",
+      "title": "Start Dev Environment",
+      "subtitle": "Workstream",
+      "description": "Start a development server in a tmux session with automatic package manager detection",
       "mode": "view"
     }
   ],

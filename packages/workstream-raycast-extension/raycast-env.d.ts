@@ -38,6 +38,8 @@ declare namespace Preferences {
   export type OpenPrInChrome = ExtensionPreferences & {}
   /** Preferences accessible in the `cleanup-stale-worktrees` command */
   export type CleanupStaleWorktrees = ExtensionPreferences & {}
+  /** Preferences accessible in the `start-dev-environment` command */
+  export type StartDevEnvironment = ExtensionPreferences & {}
 }
 
 declare namespace Arguments {
@@ -59,5 +61,7 @@ declare namespace Arguments {
   export type OpenPrInChrome = {}
   /** Arguments passed to the `cleanup-stale-worktrees` command */
   export type CleanupStaleWorktrees = {}
+  /** Arguments passed to the `start-dev-environment` command */
+  export type StartDevEnvironment = {}
 }
 

@@ -9,7 +9,7 @@ import { getPRStatus } from './utils/github';
 import { isClaudeCodeActive } from './utils/claude';
 import { getCachedInstances, setCachedInstances, clearCache, recordUsage, getUsageHistory } from './utils/cache';
 import { loadFromDaemon, loadFromRedis, triggerDaemonRefresh, clearClaudeFinishedFlag, subscribeToUpdates, type DaemonCache } from './utils/daemon-client';
-import { getTmuxSessionOutput, createTmuxSession, attachToTmuxSession, killTmuxSession } from './utils/tmux';
+import { getTmuxSessionOutput, createTmuxSession, attachToTmuxSession, killTmuxSession, detectPackageManager } from './utils/tmux';
 import { startNotificationListener, stopNotificationListener } from './utils/notification-listener';
 import type { InstanceWithStatus } from './types';
 
@@ -430,6 +430,11 @@ export default function Command() {
       return Icon.Bolt;
     }
 
+    // Check for merge conflicts - fourth priority (blocking issue)
+    if (instance.prStatus?.mergeable === 'CONFLICTING') {
+      return Icon.ExclamationMark;
+    }
+
     // Check PR state
     if (instance.prStatus?.state === 'MERGED') {
       return Icon.CheckCircle;
@@ -462,6 +467,11 @@ export default function Command() {
       return Color.Purple;
     }
 
+    // Check for merge conflicts - third priority (red for blocking issue)
+    if (instance.prStatus?.mergeable === 'CONFLICTING') {
+      return Color.Red;
+    }
+
     // Check PR state
     if (instance.prStatus?.state === 'MERGED') {
       return Color.Purple;
@@ -481,6 +491,53 @@ export default function Command() {
       }
     }
     return Color.PrimaryText;
+  }
+
+  function getStatusTooltip(instance: InstanceWithStatus): string {
+    // Check Claude finished status first - highest priority
+    if (instance.claudeStatus?.claudeFinished) {
+      return 'Claude Code: Work completed';
+    }
+
+    // Check Claude waiting status - second priority
+    if (instance.claudeStatus?.active && instance.claudeStatus.isWaiting) {
+      return 'Claude Code: Waiting for input';
+    }
+
+    // Check Claude working status - third priority
+    if (instance.claudeStatus?.active && instance.claudeStatus.isWorking) {
+      return 'Claude Code: Actively working';
+    }
+
+    // Check for merge conflicts - fourth priority (blocking issue)
+    if (instance.prStatus?.mergeable === 'CONFLICTING') {
+      return `PR #${instance.prStatus.number}: Has merge conflicts`;
+    }
+
+    // Check PR state
+    if (instance.prStatus?.state === 'MERGED') {
+      return `PR #${instance.prStatus.number}: Merged`;
+    }
+    if (instance.prStatus?.state === 'CLOSED') {
+      return `PR #${instance.prStatus.number}: Closed`;
+    }
+
+    // Then check CI status for open PRs
+    if (instance.prStatus?.checks) {
+      if (instance.prStatus.checks.conclusion === 'success') {
+        return `PR #${instance.prStatus.number}: All checks passing`;
+      } else if (instance.prStatus.checks.conclusion === 'failure') {
+        return `PR #${instance.prStatus.number}: ${instance.prStatus.checks.failing} check(s) failing`;
+      } else {
+        return `PR #${instance.prStatus.number}: Checks running`;
+      }
+    }
+
+    // Default
+    if (instance.isGitRepo) {
+      return 'Git repository';
+    }
+    return 'Project folder';
   }
 
   function getSubtitle(instance: InstanceWithStatus): string {
@@ -744,7 +801,7 @@ export default function Command() {
         instances.map((instance) => (
           <List.Item
             key={instance.path}
-            icon={{ source: getStatusIcon(instance), tintColor: getStatusColor(instance) }}
+            icon={{ source: getStatusIcon(instance), tintColor: getStatusColor(instance), tooltip: getStatusTooltip(instance) }}
             title={instance.name}
             subtitle={getSubtitle(instance)}
             accessories={getAccessories(instance)}
@@ -1016,6 +1073,56 @@ export default function Command() {
                     shortcut={{ modifiers: ['cmd'], key: 't' }}
                   />
                 )}
+
+                <Action
+                  title="Start Dev Environment"
+                  onAction={async () => {
+                    try {
+                      const sessionName = instance.tmuxStatus?.name ||
+                        `${instance.name}${instance.gitInfo ? `-${instance.gitInfo.branch}` : ''}`;
+
+                      // Check if session already exists
+                      if (instance.tmuxStatus?.exists) {
+                        await showToast({
+                          style: Toast.Style.Success,
+                          title: 'Dev environment already running',
+                          message: `Session: ${sessionName}`,
+                        });
+                        return;
+                      }
+
+                      // Detect package manager
+                      const packageManager = detectPackageManager(instance.path);
+                      const command = `${packageManager} run dev`;
+
+                      await showToast({
+                        style: Toast.Style.Animated,
+                        title: 'Starting dev environment...',
+                        message: `Running ${command}`,
+                      });
+
+                      // Create tmux session with detected command
+                      await createTmuxSession(sessionName, instance.path, command);
+
+                      await showToast({
+                        style: Toast.Style.Success,
+                        title: 'Dev environment started',
+                        message: `Session: ${sessionName}`,
+                      });
+
+                      // Refresh to show new session status
+                      await loadInstances(true);
+                    } catch (error) {
+                      await showToast({
+                        style: Toast.Style.Failure,
+                        title: 'Failed to start dev environment',
+                        message: error instanceof Error ? error.message : 'Unknown error',
+                      });
+                    }
+                  }}
+                  icon={Icon.Play}
+                  shortcut={{ modifiers: ['cmd', 'shift'], key: 'd' }}
+                />
 
                 <Action
                   title="Close VS Code & Tmux"

@@ -64,6 +64,9 @@ interface ClaudeStatus {
   pid: number;
   isWorking: boolean;
   isWaiting?: boolean;
+  claudeFinished?: boolean;  // Set when Claude finishes normally
+  lastEventTime?: number;     // Timestamp of last event received
+  workStartedAt?: number;     // Timestamp when work started
 }
 
 interface TmuxStatus {
@@ -118,6 +121,8 @@ const CACHE_FILE = join(CACHE_DIR, 'instances.json');
 const POLL_INTERVAL = 5000; // 5 seconds (git and Claude are local, fast)
 const MIN_POLL_INTERVAL = 120000; // 2 minutes (when rate limited)
 const RATE_LIMIT_THRESHOLD = 100; // Start slowing down when remaining < 100
+const CLAUDE_WORK_TIMEOUT = 5 * 60 * 1000; // 5 minutes - reset working state if no events
+const CLAUDE_WAIT_TIMEOUT = 30 * 60 * 1000; // 30 minutes - reset waiting state if no events
 
 function log(...args: any[]) {
   const timestamp = new Date().toISOString();
@@ -788,6 +793,11 @@ class WorkstreamDaemon {
     // Get Claude status (local, fast)
     enriched.claudeStatus = await this.getClaudeStatus(instance.path);
 
+    // Check for timeout and reset stale working/waiting states
+    if (enriched.claudeStatus) {
+      enriched.claudeStatus = this.checkClaudeTimeout(enriched.claudeStatus);
+    }
+
     // Get tmux status (local, fast)
     enriched.tmuxStatus = await this.getTmuxStatus(instance.path, enriched.gitInfo?.branch);
 
@@ -953,6 +963,43 @@ class WorkstreamDaemon {
     } catch {
       return undefined;
     }
+  }
+
+  /**
+   * Check if Claude status has timed out and reset if necessary.
+   * This prevents the "Working" state from getting stuck when a task is interrupted.
+   */
+  private checkClaudeTimeout(claudeStatus: ClaudeStatus): ClaudeStatus {
+    const now = Date.now();
+
+    // Check if working state has timed out
+    if (claudeStatus.isWorking && claudeStatus.workStartedAt) {
+      const elapsed = now - claudeStatus.workStartedAt;
+      if (elapsed > CLAUDE_WORK_TIMEOUT) {
+        log(`⏱️  Claude work timeout detected (${Math.round(elapsed / 1000)}s), resetting to idle`);
+        return {
+          ...claudeStatus,
+          isWorking: false,
+          isWaiting: false,
+          // Keep active and pid intact - process still exists
+        };
+      }
+    }
+
+    // Check if waiting state has timed out
+    if (claudeStatus.isWaiting && claudeStatus.lastEventTime) {
+      const elapsed = now - claudeStatus.lastEventTime;
+      if (elapsed > CLAUDE_WAIT_TIMEOUT) {
+        log(`⏱️  Claude wait timeout detected (${Math.round(elapsed / 1000)}s), resetting to idle`);
+        return {
+          ...claudeStatus,
+          isWaiting: false,
+          isWorking: false,
+        };
+      }
+    }
+
+    return claudeStatus;
   }
 
   private async getTmuxStatus(repoPath: string, branch?: string): Promise<TmuxStatus | undefined> {
@@ -1168,8 +1215,11 @@ class WorkstreamDaemon {
       const instance = this.instances.get(repoPath);
       if (instance && instance.claudeStatus) {
         const wasWaiting = instance.claudeStatus.isWaiting;
+        const now = Date.now();
         instance.claudeStatus.isWorking = true;
         instance.claudeStatus.isWaiting = false;
+        instance.claudeStatus.workStartedAt = now;
+        instance.claudeStatus.lastEventTime = now;
         await this.writeCache();
         await this.publishUpdate();
 
@@ -1200,6 +1250,7 @@ class WorkstreamDaemon {
       if (instance && instance.claudeStatus) {
         instance.claudeStatus.isWaiting = true;
         instance.claudeStatus.isWorking = false;
+        instance.claudeStatus.lastEventTime = Date.now();
         await this.writeCache();
         await this.publishUpdate();
 
@@ -1228,6 +1279,9 @@ class WorkstreamDaemon {
         instance.claudeStatus.isWaiting = false;
         instance.claudeStatus.isWorking = false;
         instance.claudeStatus.claudeFinished = true; // Set finished flag
+        // Clear timestamps since work is complete
+        instance.claudeStatus.workStartedAt = undefined;
+        instance.claudeStatus.lastEventTime = undefined;
         await this.writeCache();
         await this.publishUpdate();
 
