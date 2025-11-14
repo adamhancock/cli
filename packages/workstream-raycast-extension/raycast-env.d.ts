@@ -40,6 +40,8 @@ declare namespace Preferences {
   export type CleanupStaleWorktrees = ExtensionPreferences & {}
   /** Preferences accessible in the `start-dev-environment` command */
   export type StartDevEnvironment = ExtensionPreferences & {}
+  /** Preferences accessible in the `view-dev-logs` command */
+  export type ViewDevLogs = ExtensionPreferences & {}
 }
 
 declare namespace Arguments {
@@ -63,5 +65,7 @@ declare namespace Arguments {
   export type CleanupStaleWorktrees = {}
   /** Arguments passed to the `start-dev-environment` command */
   export type StartDevEnvironment = {}
+  /** Arguments passed to the `view-dev-logs` command */
+  export type ViewDevLogs = {}
 }
 

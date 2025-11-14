@@ -105,6 +105,13 @@
       "subtitle": "Workstream",
       "description": "Start a development server in a tmux session with automatic package manager detection",
       "mode": "view"
+    },
+    {
+      "name": "view-dev-logs",
+      "title": "View Dev Environment Logs",
+      "subtitle": "Workstream",
+      "description": "View and search tmux dev environment logs with live tail, filtering, and export options",
+      "mode": "view"
     }
   ],
   "dependencies": {
