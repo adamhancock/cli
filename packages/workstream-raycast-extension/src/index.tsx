@@ -417,7 +417,7 @@ export default function Command() {
   function getStatusIcon(instance: InstanceWithStatus): Icon {
     // Check Claude finished status first - highest priority
     if (instance.claudeStatus?.claudeFinished) {
-      return Icon.CheckeredFlag;
+      return Icon.Check;
     }
 
     // Check Claude waiting status - second priority
@@ -591,7 +591,7 @@ export default function Command() {
           statusText = 'Finished';
           tooltip = 'Claude Code: Work completed ✅';
           color = Color.Green;
-          icon = Icon.CheckeredFlag;
+          icon = Icon.Check;
         } else if (isWaiting) {
           statusText = 'Waiting';
           tooltip = 'Claude Code: Waiting for your input ⏳';
@@ -672,7 +672,7 @@ export default function Command() {
         statusText = 'Finished';
         tooltip = 'Claude Code: Work completed ✅';
         color = Color.Green;
-        icon = Icon.CheckeredFlag;
+        icon = Icon.Check;
       } else if (isWaiting) {
         statusText = 'Waiting';
         tooltip = 'Claude Code: Waiting for your input ⏳';
