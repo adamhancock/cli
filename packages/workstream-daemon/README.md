@@ -198,6 +198,10 @@ The daemon can receive real-time notifications from Claude Code via hooks:
          "matcher": "*",
          "hooks": [{"type": "command", "command": "~/.claude/notify-daemon.sh"}]
        }],
+       "Notification": [{
+         "matcher": "*",
+         "hooks": [{"type": "command", "command": "~/.claude/notify-daemon.sh"}]
+       }],
        "Stop": [{
          "matcher": "*",
          "hooks": [{"type": "command", "command": "~/.claude/notify-daemon.sh"}]
@@ -206,7 +210,11 @@ The daemon can receive real-time notifications from Claude Code via hooks:
    }
    ```
 
-   **Note**: The hook script automatically parses the event type from Claude's JSON context. It detects when AskUserQuestion or ExitPlanMode tools are used and sends `waiting_for_input` instead of `work_started`. No arguments needed!
+   **Note**: The hook script automatically parses the event type from Claude's JSON context. It detects:
+   - AskUserQuestion and ExitPlanMode tools (interactive prompts)
+   - Notification events with type `permission_prompt` (tool approval) or `idle_prompt` (waiting for input)
+
+   These trigger `waiting_for_input` status instead of `work_started`. No arguments needed!
 
 ### What It Does
 
@@ -216,8 +224,8 @@ The daemon tracks Claude's working state using hooks instead of CPU monitoring f
   - Updates status to "Working" (purple in Raycast)
   - Triggered by: User message submission or any tool use
 
-- 🤔 **Waiting for Input**: When Claude shows an interactive prompt
-  - Triggered by: AskUserQuestion tool, ExitPlanMode (plan approval), or any explicit question
+- 🤔 **Waiting for Input**: When Claude shows an interactive prompt or needs approval
+  - Triggered by: AskUserQuestion tool, ExitPlanMode (plan approval), or Notification hook with `permission_prompt` or `idle_prompt` type
   - Updates status to "Waiting" (orange in Raycast)
   - Sends macOS notification: "🤔 Claude needs your attention in [project]"
 

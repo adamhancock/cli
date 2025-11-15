@@ -54,6 +54,10 @@ export interface ClaudeStatus {
   isWaiting?: boolean; // true if Claude is waiting for user input
   claudeFinished?: boolean; // true if Claude completed work and user hasn't switched yet
   lastActivityTime?: Date;
+  finishedAt?: number; // timestamp when Claude finished
+  terminalId?: string; // Terminal ID where Claude is running
+  terminalPid?: number; // Terminal PID where Claude was launched
+  vscodePid?: number; // VSCode PID if running in VSCode terminal
 }
 
 export interface TmuxStatus {

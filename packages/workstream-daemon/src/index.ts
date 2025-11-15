@@ -67,6 +67,10 @@ interface ClaudeStatus {
   claudeFinished?: boolean;  // Set when Claude finishes normally
   lastEventTime?: number;     // Timestamp of last event received
   workStartedAt?: number;     // Timestamp when work started
+  finishedAt?: number;        // Timestamp when Claude finished
+  terminalId?: string;        // Terminal ID where Claude is running
+  terminalPid?: number;       // Terminal PID where Claude was launched
+  vscodePid?: number;         // VSCode PID if running in VSCode terminal
 }
 
 interface TmuxStatus {
@@ -252,15 +256,20 @@ class WorkstreamDaemon {
         } else if (channel === REDIS_CHANNELS.CLAUDE) {
           // Handle Claude-specific events
           const projectName = data.path?.split('/').pop() || 'unknown';
+          // Extract terminal context if available
+          const terminalId = data.terminalId;
+          const terminalPid = data.terminalPid;
+          const vscodePid = data.vscodePid;
+
           if (data.type === 'work_started') {
-            log(`  ▶️  Claude started working in ${projectName}`);
-            await this.handleClaudeStarted(data.path);
+            log(`  ▶️  Claude started working in ${projectName}${terminalId ? ` [${terminalId}]` : ''}`);
+            await this.handleClaudeStarted(data.path, terminalId, terminalPid, vscodePid);
           } else if (data.type === 'waiting_for_input') {
-            log(`  ⏸️  Claude waiting for input in ${projectName}`);
-            await this.handleClaudeWaiting(data.path);
+            log(`  ⏸️  Claude waiting for input in ${projectName}${terminalId ? ` [${terminalId}]` : ''}`);
+            await this.handleClaudeWaiting(data.path, terminalId, terminalPid, vscodePid);
           } else if (data.type === 'work_stopped') {
-            log(`  ⏹️  Claude stopped in ${projectName}`);
-            await this.handleClaudeFinished(data.path);
+            log(`  ⏹️  Claude stopped in ${projectName}${terminalId ? ` [${terminalId}]` : ''}`);
+            await this.handleClaudeFinished(data.path, terminalId, terminalPid, vscodePid);
           } else if (data.type === 'clear_finished') {
             log(`  🏁  Clearing finished flag for ${projectName}`);
             await this.handleClearFinished(data.path);
@@ -870,7 +879,30 @@ class WorkstreamDaemon {
     }
 
     // Get Claude status (local, fast)
-    enriched.claudeStatus = await this.getClaudeStatus(instance.path);
+    const newClaudeStatus = await this.getClaudeStatus(instance.path);
+
+    // If Claude process not found, check if we should preserve finished status
+    if (!newClaudeStatus && instance.claudeStatus) {
+      // Preserve finished status for 10 minutes to show "Claude finished X ago"
+      if (instance.claudeStatus.finishedAt) {
+        const elapsed = Date.now() - instance.claudeStatus.finishedAt;
+        if (elapsed < 10 * 60 * 1000) { // 10 minutes
+          // Keep the finished status with terminal context
+          enriched.claudeStatus = {
+            ...instance.claudeStatus,
+            active: false, // Process no longer running
+          };
+        } else {
+          // Finished status too old, clear it
+          enriched.claudeStatus = undefined;
+        }
+      } else {
+        // No finished status, clear Claude status
+        enriched.claudeStatus = undefined;
+      }
+    } else {
+      enriched.claudeStatus = newClaudeStatus;
+    }
 
     // Check for timeout and reset stale working/waiting states
     if (enriched.claudeStatus) {
@@ -1057,7 +1089,16 @@ class WorkstreamDaemon {
             const isWorking = existing?.claudeStatus?.isWorking ?? false;
             const isWaiting = existing?.claudeStatus?.isWaiting ?? false;
 
-            return { active: true, pid, isWorking, isWaiting };
+            // Preserve terminal context from existing status
+            return {
+              active: true,
+              pid,
+              isWorking,
+              isWaiting,
+              terminalId: existing?.claudeStatus?.terminalId,
+              terminalPid: existing?.claudeStatus?.terminalPid,
+              vscodePid: existing?.claudeStatus?.vscodePid,
+            };
           }
         }
       }
@@ -1084,7 +1125,7 @@ class WorkstreamDaemon {
           ...claudeStatus,
           isWorking: false,
           isWaiting: false,
-          // Keep active and pid intact - process still exists
+          // Keep active, pid, and terminal context intact - process still exists
         };
       }
     }
@@ -1098,6 +1139,7 @@ class WorkstreamDaemon {
           ...claudeStatus,
           isWaiting: false,
           isWorking: false,
+          // Keep terminal context intact
         };
       }
     }
@@ -1313,7 +1355,7 @@ class WorkstreamDaemon {
     }
   }
 
-  private async handleClaudeStarted(repoPath: string) {
+  private async handleClaudeStarted(repoPath: string, terminalId?: string, terminalPid?: number, vscodePid?: number) {
     try {
       const instance = this.instances.get(repoPath);
       if (instance && instance.claudeStatus) {
@@ -1323,6 +1365,18 @@ class WorkstreamDaemon {
         instance.claudeStatus.isWaiting = false;
         instance.claudeStatus.workStartedAt = now;
         instance.claudeStatus.lastEventTime = now;
+
+        // Store terminal context if provided
+        if (terminalId) {
+          instance.claudeStatus.terminalId = terminalId;
+        }
+        if (terminalPid !== undefined) {
+          instance.claudeStatus.terminalPid = terminalPid;
+        }
+        if (vscodePid !== undefined) {
+          instance.claudeStatus.vscodePid = vscodePid;
+        }
+
         await this.writeCache();
         await this.publishUpdate();
 
@@ -1346,7 +1400,7 @@ class WorkstreamDaemon {
     }
   }
 
-  private async handleClaudeWaiting(repoPath: string) {
+  private async handleClaudeWaiting(repoPath: string, terminalId?: string, terminalPid?: number, vscodePid?: number) {
     try {
       // Update instance status to waiting
       const instance = this.instances.get(repoPath);
@@ -1354,6 +1408,18 @@ class WorkstreamDaemon {
         instance.claudeStatus.isWaiting = true;
         instance.claudeStatus.isWorking = false;
         instance.claudeStatus.lastEventTime = Date.now();
+
+        // Store terminal context if provided
+        if (terminalId) {
+          instance.claudeStatus.terminalId = terminalId;
+        }
+        if (terminalPid !== undefined) {
+          instance.claudeStatus.terminalPid = terminalPid;
+        }
+        if (vscodePid !== undefined) {
+          instance.claudeStatus.vscodePid = vscodePid;
+        }
+
         await this.writeCache();
         await this.publishUpdate();
 
@@ -1374,17 +1440,20 @@ class WorkstreamDaemon {
     }
   }
 
-  private async handleClaudeFinished(repoPath: string) {
+  private async handleClaudeFinished(repoPath: string, terminalId?: string, terminalPid?: number, vscodePid?: number) {
     try {
       // Update instance status to not waiting and not working
       const instance = this.instances.get(repoPath);
       if (instance && instance.claudeStatus) {
+        const now = Date.now();
         instance.claudeStatus.isWaiting = false;
         instance.claudeStatus.isWorking = false;
         instance.claudeStatus.claudeFinished = true; // Set finished flag
-        // Clear timestamps since work is complete
+        instance.claudeStatus.finishedAt = now; // Record when Claude finished
+        // Clear work timestamps since work is complete
         instance.claudeStatus.workStartedAt = undefined;
         instance.claudeStatus.lastEventTime = undefined;
+        // Note: We keep terminal context even when finished, so it's still available
         await this.writeCache();
         await this.publishUpdate();
 

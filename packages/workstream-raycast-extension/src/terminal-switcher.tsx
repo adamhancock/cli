@@ -1,4 +1,4 @@
-import { List, ActionPanel, Action, Icon, Color, showToast, Toast, closeMainWindow } from '@raycast/api';
+import { List, ActionPanel, Action, Icon, Color, showToast, Toast, closeMainWindow, Form, useNavigation } from '@raycast/api';
 import { useState, useEffect, useRef } from 'react';
 import Redis from 'ioredis';
 import { loadFromDaemon, loadFromRedis, subscribeToUpdates, type DaemonCache } from './utils/daemon-client';
@@ -19,6 +19,7 @@ interface ZshTerminalState {
 
 interface EnrichedTerminal {
   name: string;
+  alias?: string; // Custom user-defined alias
   pid: number;
   currentCommand: string;
   cwd: string;
@@ -28,6 +29,38 @@ interface EnrichedTerminal {
   terminalId: string;
   isActive: boolean;
   lastActivity: number;
+  hasClaude?: boolean; // True if Claude is running in this terminal
+  claudeWorking?: boolean; // True if Claude is actively working
+  claudeWaiting?: boolean; // True if Claude is waiting for input
+  claudeFinished?: boolean; // True if Claude finished
+  claudeFinishedAt?: number; // Timestamp when Claude finished
+}
+
+async function getTerminalAlias(terminalId: string): Promise<string | null> {
+  const redis = new Redis({ host: 'localhost', port: 6379, maxRetriesPerRequest: 3 });
+
+  try {
+    const alias = await redis.get(`workstream:terminal:alias:${terminalId}`);
+    return alias;
+  } finally {
+    await redis.quit();
+  }
+}
+
+async function setTerminalAlias(terminalId: string, alias: string): Promise<void> {
+  const redis = new Redis({ host: 'localhost', port: 6379, maxRetriesPerRequest: 3 });
+
+  try {
+    if (alias.trim()) {
+      // Set alias with no expiration
+      await redis.set(`workstream:terminal:alias:${terminalId}`, alias.trim());
+    } else {
+      // Delete alias if empty
+      await redis.del(`workstream:terminal:alias:${terminalId}`);
+    }
+  } finally {
+    await redis.quit();
+  }
 }
 
 async function getZshTerminalStates(): Promise<ZshTerminalState[]> {
@@ -39,6 +72,9 @@ async function getZshTerminalStates(): Promise<ZshTerminalState[]> {
     const states: ZshTerminalState[] = [];
 
     for (const key of keys) {
+      // Skip alias keys
+      if (key.includes(':alias:')) continue;
+
       const data = await redis.get(key);
       if (data) {
         try {
@@ -67,6 +103,15 @@ async function getTerminalsForInstance(instance: InstanceWithStatus): Promise<En
   const { terminals, vscodePid } = instance.extensionState;
   const zshStates = await getZshTerminalStates();
 
+  // Get Claude terminal info if available
+  const claudeTerminalId = instance.claudeStatus?.terminalId;
+  const claudeTerminalPid = instance.claudeStatus?.terminalPid;
+  const hasClaude = instance.claudeStatus?.active || false;
+  const claudeWorking = instance.claudeStatus?.isWorking || false;
+  const claudeWaiting = instance.claudeStatus?.isWaiting || false;
+  const claudeFinished = instance.claudeStatus?.claudeFinished || false;
+  const claudeFinishedAt = instance.claudeStatus?.finishedAt;
+
   // Match terminals by PID
   const enriched: EnrichedTerminal[] = [];
 
@@ -85,34 +130,41 @@ async function getTerminalsForInstance(instance: InstanceWithStatus): Promise<En
     else if (nameLower.includes('test')) purpose = 'testing';
     else if (nameLower.includes('build') || nameLower.includes('watch')) purpose = 'build';
 
+    const terminalId = zshState?.terminalId || `shell-${pid}`;
+
+    // Check if this terminal has Claude running
+    // Match by terminal ID (most reliable) or by checking if the zsh shell PID matches
+    const isClaudeTerminal = hasClaude && (
+      terminalId === claudeTerminalId ||
+      pid === claudeTerminalPid ||
+      // Also check if Claude's terminal PID is the zsh shell (child of VSCode terminal)
+      (zshState && zshState.pid === claudeTerminalPid)
+    );
+
+    // Load custom alias for this terminal
+    const alias = await getTerminalAlias(terminalId);
+
     enriched.push({
       name,
+      alias: alias || undefined,
       pid,
       currentCommand: zshState?.currentCommand || '',
       cwd: zshState?.cwd || instance.path,
       purpose,
       workspace: instance.path,
       vscodePid,
-      terminalId: zshState?.terminalId || `shell-${pid}`,
+      terminalId,
       isActive: false, // TODO: track active terminal
       lastActivity: zshState?.timestamp || 0,
+      hasClaude: isClaudeTerminal,
+      claudeWorking: isClaudeTerminal ? claudeWorking : undefined,
+      claudeWaiting: isClaudeTerminal ? claudeWaiting : undefined,
+      claudeFinished: isClaudeTerminal ? claudeFinished : undefined,
+      claudeFinishedAt: isClaudeTerminal ? claudeFinishedAt : undefined,
     });
   }
 
-  // Sort by last activity (most recent first)
-  enriched.sort((a, b) => {
-    // Active terminal always first
-    if (a.isActive !== b.isActive) {
-      return a.isActive ? -1 : 1;
-    }
-    // Then by last activity timestamp (most recent first)
-    if (a.lastActivity !== b.lastActivity) {
-      return b.lastActivity - a.lastActivity;
-    }
-    // Finally by name for stable ordering
-    return a.name.localeCompare(b.name);
-  });
-
+  // Return terminals in VSCode's order (no custom sorting)
   return enriched;
 }
 
@@ -149,6 +201,47 @@ function formatLastActivity(timestamp: number): string {
 
   const days = Math.floor(hours / 24);
   return `${days}d ago`;
+}
+
+function SetTerminalAliasForm({ terminal, onAliasSet }: { terminal: EnrichedTerminal; onAliasSet: () => void }) {
+  const { pop } = useNavigation();
+
+  async function handleSubmit(values: { alias: string }) {
+    try {
+      await setTerminalAlias(terminal.terminalId, values.alias);
+      await showToast({
+        style: Toast.Style.Success,
+        title: values.alias ? 'Alias set' : 'Alias removed',
+        message: values.alias ? `Terminal renamed to "${values.alias}"` : `Removed alias for ${terminal.name}`,
+      });
+      pop();
+      onAliasSet();
+    } catch (error) {
+      await showToast({
+        style: Toast.Style.Failure,
+        title: 'Failed to set alias',
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  return (
+    <Form
+      actions={
+        <ActionPanel>
+          <Action.SubmitForm title="Save Alias" onSubmit={handleSubmit} />
+        </ActionPanel>
+      }
+    >
+      <Form.TextField
+        id="alias"
+        title="Terminal Alias"
+        placeholder="Enter a friendly name for this terminal"
+        defaultValue={terminal.alias || ''}
+      />
+      <Form.Description text={`Set a custom name for "${terminal.alias || terminal.name}". Leave empty to remove the alias.`} />
+    </Form>
+  );
 }
 
 async function switchToTerminal(terminal: EnrichedTerminal) {
@@ -410,41 +503,94 @@ export default function TerminalSwitcher() {
       )}
 
       {displayTerminals.map((terminal) => {
-        const subtitle = terminal.currentCommand || 'No active command';
         const cwdRelative = terminal.cwd.replace(terminal.workspace, '.');
+        // Build subtitle: show command, or directory, or last activity
+        let subtitle = terminal.currentCommand;
+        if (!subtitle && cwdRelative !== '.') {
+          subtitle = cwdRelative;
+        } else if (!subtitle) {
+          subtitle = terminal.lastActivity
+            ? `Last active ${formatLastActivity(terminal.lastActivity)}`
+            : 'No recent activity';
+        }
+
+        // Build accessories array with Claude status if applicable
+        const accessories = [];
+
+        // Claude status (if this terminal has Claude)
+        if (terminal.hasClaude) {
+          if (terminal.claudeWorking) {
+            accessories.push({
+              tag: { value: 'Claude Working', color: Color.Blue },
+              tooltip: 'Claude is actively working in this terminal',
+            });
+          } else if (terminal.claudeWaiting) {
+            accessories.push({
+              tag: { value: 'Claude Waiting', color: Color.Orange },
+              tooltip: 'Claude is waiting for your input',
+            });
+          } else if (terminal.claudeFinished && terminal.claudeFinishedAt) {
+            const elapsed = Math.floor((Date.now() - terminal.claudeFinishedAt) / 1000);
+            const timeAgo = formatLastActivity(Math.floor(terminal.claudeFinishedAt / 1000));
+            accessories.push({
+              tag: { value: `Claude Finished ${timeAgo}`, color: Color.Green },
+              tooltip: `Claude finished ${timeAgo} (${elapsed}s ago)`,
+            });
+          } else {
+            accessories.push({
+              tag: { value: 'Claude', color: Color.Green },
+              tooltip: 'Claude is running in this terminal',
+            });
+          }
+        }
+
+        // Terminal purpose
+        accessories.push({
+          text: purposeEmoji(terminal.purpose),
+          tooltip: `Purpose: ${terminal.purpose}`,
+        });
+
+        // Current working directory
+        if (cwdRelative !== '.') {
+          accessories.push({
+            text: cwdRelative,
+            tooltip: terminal.cwd,
+          });
+        }
+
+        // Last activity
+        accessories.push({
+          text: formatLastActivity(terminal.lastActivity),
+          icon: { source: Icon.Clock, tintColor: Color.SecondaryText },
+          tooltip: terminal.lastActivity
+            ? `Last active: ${new Date(terminal.lastActivity * 1000).toLocaleString()}`
+            : 'No activity recorded',
+        });
 
         return (
           <List.Item
             key={terminal.terminalId}
-            title={terminal.name}
+            title={terminal.alias || terminal.name}
             subtitle={subtitle}
             icon={{
               source: Icon.Terminal,
-              tintColor: terminal.currentCommand ? Color.Green : Color.SecondaryText,
+              tintColor: terminal.hasClaude
+                ? (terminal.claudeWorking ? Color.Blue : terminal.claudeWaiting ? Color.Orange : Color.Green)
+                : (terminal.currentCommand ? Color.Green : Color.SecondaryText),
             }}
-            accessories={[
-              {
-                text: purposeEmoji(terminal.purpose),
-                tooltip: `Purpose: ${terminal.purpose}`,
-              },
-              {
-                text: cwdRelative !== '.' ? cwdRelative : '',
-                tooltip: terminal.cwd,
-              },
-              {
-                text: formatLastActivity(terminal.lastActivity),
-                icon: { source: Icon.Clock, tintColor: Color.SecondaryText },
-                tooltip: terminal.lastActivity
-                  ? `Last active: ${new Date(terminal.lastActivity * 1000).toLocaleString()}`
-                  : 'No activity recorded',
-              },
-            ]}
+            accessories={accessories}
             actions={
               <ActionPanel>
                 <Action
                   title="Switch to Terminal"
                   icon={Icon.ArrowRight}
                   onAction={() => switchToTerminal(terminal)}
+                />
+                <Action.Push
+                  title={terminal.alias ? "Edit Alias" : "Set Alias"}
+                  icon={Icon.Pencil}
+                  shortcut={{ modifiers: ['cmd'], key: 'e' }}
+                  target={<SetTerminalAliasForm terminal={terminal} onAliasSet={loadData} />}
                 />
                 <Action
                   title="Refresh"
