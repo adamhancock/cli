@@ -244,7 +244,7 @@ function SetTerminalAliasForm({ terminal, onAliasSet }: { terminal: EnrichedTerm
   );
 }
 
-async function switchToTerminal(terminal: EnrichedTerminal) {
+async function switchToTerminal(terminal: EnrichedTerminal, fromLevel1: boolean = false) {
   try {
     // 1. Focus VSCode window FIRST
     await focusVSCodeInstance(terminal.workspace);
@@ -266,32 +266,35 @@ async function switchToTerminal(terminal: EnrichedTerminal) {
       );
 
       // 5. Update terminal timestamp in Redis to reflect the switch
-      try {
-        const terminalKey = `workstream:terminal:${terminal.terminalId}`;
-        const existingData = await redis.get(terminalKey);
+      // Skip update if already at level 1 (viewing terminal list) to avoid unnecessary updates
+      if (!fromLevel1) {
+        try {
+          const terminalKey = `workstream:terminal:${terminal.terminalId}`;
+          const existingData = await redis.get(terminalKey);
 
-        if (existingData) {
-          const state = JSON.parse(existingData);
-          state.timestamp = Math.floor(Date.now() / 1000);
-          await redis.setex(terminalKey, 60, JSON.stringify(state));
-        } else {
-          // Terminal state doesn't exist yet (zsh hooks not active or just started)
-          // Create minimal state for timestamp tracking
-          const minimalState = {
-            terminalId: terminal.terminalId,
-            pid: terminal.pid,
-            vscodePid: terminal.vscodePid,
-            workspace: terminal.workspace,
-            cwd: terminal.cwd,
-            currentCommand: terminal.currentCommand,
-            shellType: '/bin/zsh',
-            timestamp: Math.floor(Date.now() / 1000)
-          };
-          await redis.setex(terminalKey, 60, JSON.stringify(minimalState));
+          if (existingData) {
+            const state = JSON.parse(existingData);
+            state.timestamp = Math.floor(Date.now() / 1000);
+            await redis.setex(terminalKey, 60, JSON.stringify(state));
+          } else {
+            // Terminal state doesn't exist yet (zsh hooks not active or just started)
+            // Create minimal state for timestamp tracking
+            const minimalState = {
+              terminalId: terminal.terminalId,
+              pid: terminal.pid,
+              vscodePid: terminal.vscodePid,
+              workspace: terminal.workspace,
+              cwd: terminal.cwd,
+              currentCommand: terminal.currentCommand,
+              shellType: '/bin/zsh',
+              timestamp: Math.floor(Date.now() / 1000)
+            };
+            await redis.setex(terminalKey, 60, JSON.stringify(minimalState));
+          }
+        } catch (updateError) {
+          // Don't fail the whole operation if timestamp update fails
+          console.error('[TerminalSwitcher] Failed to update terminal timestamp:', updateError);
         }
-      } catch (updateError) {
-        // Don't fail the whole operation if timestamp update fails
-        console.error('[TerminalSwitcher] Failed to update terminal timestamp:', updateError);
       }
     } finally {
       await redis.quit();
@@ -319,7 +322,26 @@ export default function TerminalSwitcher() {
   const [isLoading, setIsLoading] = useState(true);
   const [selectedInstance, setSelectedInstance] = useState<string | null>(null);
   const [hasAutoSelected, setHasAutoSelected] = useState(false);
+  const [userNavigatedBack, setUserNavigatedBack] = useState(false);
   const cleanupRef = useRef<(() => void) | null>(null);
+
+  // Use refs to avoid stale closures in subscription callback
+  const hasAutoSelectedRef = useRef(false);
+  const userNavigatedBackRef = useRef(false);
+  const selectedInstanceRef = useRef<string | null>(null);
+
+  // Keep refs in sync with state
+  useEffect(() => {
+    selectedInstanceRef.current = selectedInstance;
+  }, [selectedInstance]);
+
+  useEffect(() => {
+    hasAutoSelectedRef.current = hasAutoSelected;
+  }, [hasAutoSelected]);
+
+  useEffect(() => {
+    userNavigatedBackRef.current = userNavigatedBack;
+  }, [userNavigatedBack]);
 
   // Subscribe to real-time updates
   useEffect(() => {
@@ -367,13 +389,16 @@ export default function TerminalSwitcher() {
       setTerminals(terminalMap);
 
       // Smart navigation: auto-select focused instance if it has terminals
-      // Only auto-select once on initial load, never again
-      if (selectedInstance === null && !hasAutoSelected) {
+      // Only auto-select once on initial load, and never after user manually navigates back
+      // Use refs to avoid stale closures in subscription callback
+      if (selectedInstanceRef.current === null && !hasAutoSelectedRef.current && !userNavigatedBackRef.current) {
         const focusedInstance = sortedInstances.find((i) => i.extensionState?.window?.focused);
         if (focusedInstance && terminalMap.get(focusedInstance.path)?.length) {
           // Skip to terminals for focused instance
           setSelectedInstance(focusedInstance.path);
+          selectedInstanceRef.current = focusedInstance.path;
           setHasAutoSelected(true);
+          hasAutoSelectedRef.current = true;
         }
       }
 
@@ -467,7 +492,10 @@ export default function TerminalSwitcher() {
                   <Action
                     title="View Terminals"
                     icon={Icon.ArrowRight}
-                    onAction={() => setSelectedInstance(instance.path)}
+                    onAction={() => {
+                      setSelectedInstance(instance.path);
+                      selectedInstanceRef.current = instance.path;
+                    }}
                   />
                   <Action
                     title="Refresh"
@@ -536,7 +564,12 @@ export default function TerminalSwitcher() {
                 title="Back to Workspaces"
                 icon={Icon.ArrowLeft}
                 shortcut={{ modifiers: ['cmd'], key: 'backspace' }}
-                onAction={() => setSelectedInstance(null)}
+                onAction={() => {
+                  setSelectedInstance(null);
+                  selectedInstanceRef.current = null;
+                  setUserNavigatedBack(true);
+                  userNavigatedBackRef.current = true;
+                }}
               />
             </ActionPanel>
           }
@@ -625,7 +658,7 @@ export default function TerminalSwitcher() {
                 <Action
                   title="Switch to Terminal"
                   icon={Icon.ArrowRight}
-                  onAction={() => switchToTerminal(terminal)}
+                  onAction={() => switchToTerminal(terminal, true)}
                 />
                 <Action
                   title="Create New Terminal"
@@ -678,7 +711,12 @@ export default function TerminalSwitcher() {
                   title="Back to Workspaces"
                   icon={Icon.ArrowLeft}
                   shortcut={{ modifiers: ['cmd'], key: 'backspace' }}
-                  onAction={() => setSelectedInstance(null)}
+                  onAction={() => {
+                    setSelectedInstance(null);
+                    selectedInstanceRef.current = null;
+                    setUserNavigatedBack(true);
+                    userNavigatedBackRef.current = true;
+                  }}
                 />
               </ActionPanel>
             }
