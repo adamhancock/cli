@@ -42,6 +42,8 @@ declare namespace Preferences {
   export type StartDevEnvironment = ExtensionPreferences & {}
   /** Preferences accessible in the `view-dev-logs` command */
   export type ViewDevLogs = ExtensionPreferences & {}
+  /** Preferences accessible in the `terminal-switcher` command */
+  export type TerminalSwitcher = ExtensionPreferences & {}
 }
 
 declare namespace Arguments {
@@ -67,5 +69,7 @@ declare namespace Arguments {
   export type StartDevEnvironment = {}
   /** Arguments passed to the `view-dev-logs` command */
   export type ViewDevLogs = {}
+  /** Arguments passed to the `terminal-switcher` command */
+  export type TerminalSwitcher = {}
 }
 

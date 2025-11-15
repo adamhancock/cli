@@ -71,6 +71,50 @@ export interface SpotlightStatus {
   lastChecked: number;
 }
 
+export interface VSCodeExtensionState {
+  workspacePath: string;
+  extensionVersion: string;
+  vscodeVersion: string;
+  vscodePid: number;
+  window: {
+    focused: boolean;
+  };
+  terminals: {
+    total: number;
+    active: number;
+    pids: number[];
+    names: string[];
+    purposes: {
+      devServer: number;
+      testing: number;
+      build: number;
+      general: number;
+    };
+  };
+  debug: {
+    active: boolean;
+    sessionCount: number;
+    types: string[];
+  };
+  fileActivity: {
+    lastSave: number;
+    savesLast5Min: number;
+    activeFile?: string;
+    dirtyFileCount: number;
+  };
+  git: {
+    branch?: string;
+    lastCheckout?: {
+      branch: string;
+      timestamp: number;
+    };
+    lastCommit?: {
+      timestamp: number;
+    };
+  };
+  lastUpdated: number;
+}
+
 export interface InstanceWithStatus extends VSCodeInstance {
   gitInfo?: GitInfo;
   prStatus?: PRStatus;
@@ -78,6 +122,10 @@ export interface InstanceWithStatus extends VSCodeInstance {
   tmuxStatus?: TmuxStatus;
   caddyHost?: CaddyHost;
   spotlightStatus?: SpotlightStatus;
+  extensionActive?: boolean;
+  extensionState?: VSCodeExtensionState;
+  extensionVersion?: string;
+  lastUpdated?: number;
   error?: string;
 }
 

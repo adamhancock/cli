@@ -1,0 +1,58 @@
+{
+  "name": "workstream-vscode-extension",
+  "displayName": "Workstream",
+  "description": "Real-time workspace tracking for workstream system",
+  "version": "0.1.0",
+  "publisher": "workstream",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "Workstream",
+      "properties": {
+        "workstream.redis.host": {
+          "type": "string",
+          "default": "localhost",
+          "description": "Redis server host"
+        },
+        "workstream.redis.port": {
+          "type": "number",
+          "default": 6379,
+          "description": "Redis server port"
+        },
+        "workstream.heartbeatInterval": {
+          "type": "number",
+          "default": 10000,
+          "description": "Heartbeat interval in milliseconds",
+          "minimum": 5000,
+          "maximum": 60000
+        },
+        "workstream.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable workstream extension"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --sourcemap",
+    "dev": "npm run build -- --watch",
+    "package": "vsce package --no-dependencies",
+    "vscode:prepublish": "npm run build"
+  },
+  "dependencies": {
+    "ioredis": "^5.3.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^2.22.0",
+    "esbuild": "^0.19.0",
+    "typescript": "^5.3.0"
+  }
+}

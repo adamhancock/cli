@@ -105,6 +105,50 @@ interface ChromeWindow {
   lastUpdated: number;
 }
 
+interface VSCodeExtensionState {
+  workspacePath: string;
+  extensionVersion: string;
+  vscodeVersion: string;
+  vscodePid: number;
+  window: {
+    focused: boolean;
+  };
+  terminals: {
+    total: number;
+    active: number;
+    pids: number[];
+    names: string[];
+    purposes: {
+      devServer: number;
+      testing: number;
+      build: number;
+      general: number;
+    };
+  };
+  debug: {
+    active: boolean;
+    sessionCount: number;
+    types: string[];
+  };
+  fileActivity: {
+    lastSave: number;
+    savesLast5Min: number;
+    activeFile?: string;
+    dirtyFileCount: number;
+  };
+  git: {
+    branch?: string;
+    lastCheckout?: {
+      branch: string;
+      timestamp: number;
+    };
+    lastCommit?: {
+      timestamp: number;
+    };
+  };
+  lastUpdated: number;
+}
+
 interface InstanceWithMetadata extends VSCodeInstance {
   gitInfo?: GitInfo;
   prStatus?: PRStatus;
@@ -112,6 +156,9 @@ interface InstanceWithMetadata extends VSCodeInstance {
   tmuxStatus?: TmuxStatus;
   caddyHost?: CaddyHost;
   spotlightStatus?: SpotlightStatus;
+  extensionActive?: boolean;
+  extensionVersion?: string;
+  extensionState?: VSCodeExtensionState;
   lastUpdated: number;
   prLastUpdated?: number;
 }
@@ -182,6 +229,15 @@ class WorkstreamDaemon {
       }
     });
 
+    // Subscribe to VSCode heartbeat channel for instant state updates
+    this.subscriber.subscribe(REDIS_CHANNELS.VSCODE_HEARTBEAT, (err) => {
+      if (err) {
+        logError('Failed to subscribe to VSCode heartbeat channel:', err);
+      } else {
+        log('Subscribed to VSCode heartbeat channel');
+      }
+    });
+
     this.subscriber.on('message', async (channel, message) => {
       try {
         const data = JSON.parse(message);
@@ -208,6 +264,13 @@ class WorkstreamDaemon {
           } else if (data.type === 'clear_finished') {
             log(`  🏁  Clearing finished flag for ${projectName}`);
             await this.handleClearFinished(data.path);
+          }
+        } else if (channel === REDIS_CHANNELS.VSCODE_HEARTBEAT) {
+          // Handle VSCode heartbeat - immediately update that instance's state
+          if (data.type === 'heartbeat' && data.workspacePath) {
+            const projectName = data.workspacePath.split('/').pop() || 'unknown';
+            log(`  💓 VSCode heartbeat from ${projectName}`);
+            await this.handleVSCodeHeartbeat(data.workspacePath);
           }
         }
       } catch (error) {
@@ -710,9 +773,25 @@ class WorkstreamDaemon {
       lastUpdated: Date.now(),
     };
 
+    // Check for VSCode extension state first (provides instant git branch info)
+    const extensionState = await this.getExtensionState(instance.path);
+    if (extensionState) {
+      enriched.extensionActive = true;
+      enriched.extensionVersion = extensionState.extensionVersion;
+      enriched.extensionState = extensionState;
+    }
+
     // Get git info (local, fast)
+    // If extension provides git info, prefer it for branch name but still fetch full git status
     if (instance.isGitRepo) {
       enriched.gitInfo = await this.getGitInfo(instance.path);
+
+      // If extension provides more recent git info, use its branch
+      if (extensionState?.git.branch) {
+        if (enriched.gitInfo) {
+          enriched.gitInfo.branch = extensionState.git.branch;
+        }
+      }
     }
 
     // Get PR status only if requested and we have rate limit remaining
@@ -813,6 +892,30 @@ class WorkstreamDaemon {
     }
 
     return enriched;
+  }
+
+  private async getExtensionState(workspacePath: string): Promise<VSCodeExtensionState | null> {
+    try {
+      const key = `workstream:vscode:state:${Buffer.from(workspacePath).toString('base64')}`;
+      const stateStr = await this.redis.get(key);
+
+      if (!stateStr) {
+        return null;
+      }
+
+      const state = JSON.parse(stateStr) as VSCodeExtensionState;
+
+      // Check if state is fresh (within last 30 seconds)
+      const age = Date.now() - state.lastUpdated;
+      if (age > 30000) {
+        return null;
+      }
+
+      return state;
+    } catch (error) {
+      // Extension state is optional, don't log errors
+      return null;
+    }
   }
 
   private async getGitInfo(repoPath: string): Promise<GitInfo | undefined> {
@@ -1316,6 +1419,38 @@ class WorkstreamDaemon {
       }
     } catch (error) {
       logError('Error clearing finished flag:', error);
+    }
+  }
+
+  private async handleVSCodeHeartbeat(workspacePath: string) {
+    try {
+      // Get the instance
+      const instance = this.instances.get(workspacePath);
+      if (!instance) {
+        return; // Instance not tracked, ignore
+      }
+
+      // Fetch fresh extension state from Redis
+      const extensionState = await this.getExtensionState(workspacePath);
+
+      if (extensionState) {
+        // Update instance with fresh state
+        instance.extensionActive = true;
+        instance.extensionVersion = extensionState.extensionVersion;
+        instance.extensionState = extensionState;
+        instance.lastUpdated = Date.now();
+
+        // Update git branch if extension provides it
+        if (extensionState.git.branch && instance.gitInfo) {
+          instance.gitInfo.branch = extensionState.git.branch;
+        }
+
+        // Write to cache and publish update immediately
+        await this.writeCache();
+        await this.publishUpdate();
+      }
+    } catch (error) {
+      logError('Error handling VSCode heartbeat:', error);
     }
   }
 

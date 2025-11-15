@@ -7,7 +7,10 @@
     "test": "pnpm -r test",
     "build": "pnpm -r build",
     "lint": "pnpm -r lint",
-    "publish-packages": "pnpm -r publish --access public"
+    "publish-packages": "pnpm -r publish --access public",
+    "build:vscode-extension": "pnpm --filter workstream-vscode-extension build",
+    "dev:vscode-extension": "pnpm --filter workstream-vscode-extension dev",
+    "package:vscode-extension": "pnpm --filter workstream-vscode-extension package"
   },
   "keywords": [],
   "author": "Adam Hancock",

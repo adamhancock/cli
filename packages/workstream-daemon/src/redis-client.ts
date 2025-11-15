@@ -15,6 +15,7 @@ export const REDIS_CHANNELS = {
   CLAUDE: 'workstream:claude',
   CHROME_UPDATES: 'workstream:chrome:updates',
   NOTIFICATIONS: 'workstream:notifications',
+  VSCODE_HEARTBEAT: 'workstream:vscode:heartbeat',
 } as const;
 
 // TTL for instance data (30 seconds - auto-expires if daemon stops)

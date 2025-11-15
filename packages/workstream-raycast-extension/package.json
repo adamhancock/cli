@@ -112,6 +112,13 @@
       "subtitle": "Workstream",
       "description": "View and search tmux dev environment logs with live tail, filtering, and export options",
       "mode": "view"
+    },
+    {
+      "name": "terminal-switcher",
+      "title": "Switch Terminal",
+      "subtitle": "Workstream",
+      "description": "Quick switcher for VSCode integrated terminals with live command tracking via zsh hooks",
+      "mode": "view"
     }
   ],
   "dependencies": {
