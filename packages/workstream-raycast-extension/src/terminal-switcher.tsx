@@ -2,7 +2,7 @@ import { List, ActionPanel, Action, Icon, Color, showToast, Toast, closeMainWind
 import { useState, useEffect, useRef } from 'react';
 import Redis from 'ioredis';
 import { loadFromDaemon, loadFromRedis, subscribeToUpdates, type DaemonCache } from './utils/daemon-client';
-import { focusVSCodeInstance } from './utils/vscode';
+import { focusVSCodeInstance, createNewTerminal } from './utils/vscode';
 import { recordUsage, getUsageHistory } from './utils/cache';
 import type { InstanceWithStatus } from './types';
 
@@ -499,6 +499,47 @@ export default function TerminalSwitcher() {
           title="No Terminals"
           description="No terminals found for this workspace"
           icon={Icon.Terminal}
+          actions={
+            <ActionPanel>
+              <Action
+                title="Create New Terminal"
+                icon={Icon.Plus}
+                shortcut={{ modifiers: ['cmd'], key: 'n' }}
+                onAction={async () => {
+                  if (!selectedInstanceObj) return;
+                  const success = await createNewTerminal(selectedInstanceObj, '', '');
+                  if (success) {
+                    await focusVSCodeInstance(selectedInstanceObj.path);
+                    await showToast({
+                      style: Toast.Style.Success,
+                      title: 'Terminal Created',
+                      message: `New terminal opened in ${selectedInstanceObj.name}`,
+                    });
+                    // Refresh to show the new terminal
+                    setTimeout(() => loadData(), 500);
+                  } else {
+                    await showToast({
+                      style: Toast.Style.Failure,
+                      title: 'Failed to create terminal',
+                      message: 'Redis connection unavailable',
+                    });
+                  }
+                }}
+              />
+              <Action
+                title="Refresh"
+                icon={Icon.ArrowClockwise}
+                shortcut={{ modifiers: ['cmd'], key: 'r' }}
+                onAction={loadData}
+              />
+              <Action
+                title="Back to Workspaces"
+                icon={Icon.ArrowLeft}
+                shortcut={{ modifiers: ['cmd'], key: 'backspace' }}
+                onAction={() => setSelectedInstance(null)}
+              />
+            </ActionPanel>
+          }
         />
       )}
 
@@ -585,6 +626,31 @@ export default function TerminalSwitcher() {
                   title="Switch to Terminal"
                   icon={Icon.ArrowRight}
                   onAction={() => switchToTerminal(terminal)}
+                />
+                <Action
+                  title="Create New Terminal"
+                  icon={Icon.Plus}
+                  shortcut={{ modifiers: ['cmd'], key: 'n' }}
+                  onAction={async () => {
+                    if (!selectedInstanceObj) return;
+                    const success = await createNewTerminal(selectedInstanceObj, '', '');
+                    if (success) {
+                      await focusVSCodeInstance(selectedInstanceObj.path);
+                      await showToast({
+                        style: Toast.Style.Success,
+                        title: 'Terminal Created',
+                        message: `New terminal opened in ${selectedInstanceObj.name}`,
+                      });
+                      // Refresh to show the new terminal
+                      setTimeout(() => loadData(), 500);
+                    } else {
+                      await showToast({
+                        style: Toast.Style.Failure,
+                        title: 'Failed to create terminal',
+                        message: 'Redis connection unavailable',
+                      });
+                    }
+                  }}
                 />
                 <Action.Push
                   title={terminal.alias ? "Edit Alias" : "Set Alias"}

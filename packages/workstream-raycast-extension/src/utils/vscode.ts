@@ -156,3 +156,37 @@ export async function launchClaudeTerminal(instance: VSCodeInstance): Promise<bo
     return false;
   }
 }
+
+/**
+ * Create a new terminal in a VS Code instance with an optional command
+ * Uses Redis pub/sub to communicate with the VS Code extension
+ */
+export async function createNewTerminal(
+  instance: VSCodeInstance,
+  command?: string,
+  terminalName?: string
+): Promise<boolean> {
+  try {
+    if (!(await isRedisAvailable())) {
+      return false;
+    }
+
+    const publisher = getPublisherClient();
+    const workspace = Buffer.from(instance.path).toString('base64');
+    const channel = `workstream:terminal:create:${workspace}`;
+
+    await publisher.publish(
+      channel,
+      JSON.stringify({
+        command: command || '',
+        terminalName: terminalName
+      })
+    );
+
+    console.log(`Published terminal creation request for ${instance.path}`);
+    return true;
+  } catch (error) {
+    console.error('Failed to create new terminal:', error);
+    return false;
+  }
+}

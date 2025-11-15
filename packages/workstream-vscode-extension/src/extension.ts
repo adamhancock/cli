@@ -145,8 +145,11 @@ async function focusTerminalByPid(pid: number): Promise<void> {
 async function createAndRunTerminal(command: string, terminalName: string | undefined, cwd: string): Promise<void> {
   try {
     // Create a new terminal with the specified name and working directory
+    // If terminalName is undefined, default to 'Claude' (for backward compatibility)
+    // If terminalName is an empty string, pass undefined to let VSCode choose the default name
+    // If terminalName is a non-empty string, use that string
     const terminal = vscode.window.createTerminal({
-      name: terminalName || 'Claude',
+      name: terminalName === undefined ? 'Claude' : (terminalName || undefined),
       cwd: cwd
     });
 
