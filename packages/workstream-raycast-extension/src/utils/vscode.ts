@@ -3,6 +3,7 @@ import { promisify } from 'util';
 import { open } from '@raycast/api';
 import path from 'path';
 import type { VSCodeInstance } from '../types';
+import { getPublisherClient, isRedisAvailable } from './redis-client';
 
 const execAsync = promisify(exec);
 const VS_CODE_BUNDLE_ID = 'com.microsoft.VSCode';
@@ -123,5 +124,35 @@ export async function closeVSCodeInstance(folderPath: string): Promise<void> {
     }
   } catch (error) {
     throw new Error(`Failed to close VS Code: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
+}
+
+/**
+ * Launch a new terminal in a VS Code instance and run the clauded command
+ * Uses Redis pub/sub to communicate with the VS Code extension
+ */
+export async function launchClaudeTerminal(instance: VSCodeInstance): Promise<boolean> {
+  try {
+    if (!(await isRedisAvailable())) {
+      return false;
+    }
+
+    const publisher = getPublisherClient();
+    const workspace = Buffer.from(instance.path).toString('base64');
+    const channel = `workstream:terminal:create:${workspace}`;
+
+    await publisher.publish(
+      channel,
+      JSON.stringify({
+        command: 'clauded',
+        terminalName: 'Claude'
+      })
+    );
+
+    console.log(`Published terminal creation request for ${instance.path}`);
+    return true;
+  } catch (error) {
+    console.error('Failed to launch Claude terminal:', error);
+    return false;
   }
 }

@@ -91,12 +91,18 @@ async function setupTerminalFocusListener(context: vscode.ExtensionContext): Pro
     const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     if (!workspacePath) return;
 
+    const workspaceBase64 = Buffer.from(workspacePath).toString('base64');
+
     // Subscribe to terminal focus channel for this workspace
-    const channel = `workstream:terminal:focus:${Buffer.from(workspacePath).toString('base64')}`;
-    await subscriber.subscribe(channel);
+    const focusChannel = `workstream:terminal:focus:${workspaceBase64}`;
+    await subscriber.subscribe(focusChannel);
+
+    // Subscribe to terminal creation channel for this workspace
+    const createChannel = `workstream:terminal:create:${workspaceBase64}`;
+    await subscriber.subscribe(createChannel);
 
     subscriber.on('message', async (receivedChannel, message) => {
-      if (receivedChannel === channel) {
+      if (receivedChannel === focusChannel) {
         try {
           const { terminalPid } = JSON.parse(message) as { terminalPid: number };
           console.log(`[Workstream] Received terminal focus request for PID ${terminalPid}`);
@@ -104,12 +110,20 @@ async function setupTerminalFocusListener(context: vscode.ExtensionContext): Pro
         } catch (error) {
           console.error('[Workstream] Failed to parse terminal focus message:', error);
         }
+      } else if (receivedChannel === createChannel) {
+        try {
+          const { command, terminalName } = JSON.parse(message) as { command: string; terminalName?: string };
+          console.log(`[Workstream] Received terminal creation request: ${command}`);
+          await createAndRunTerminal(command, terminalName, workspacePath);
+        } catch (error) {
+          console.error('[Workstream] Failed to parse terminal creation message:', error);
+        }
       }
     });
 
-    console.log(`[Workstream] Listening for terminal focus requests on ${channel}`);
+    console.log(`[Workstream] Listening for terminal requests on ${focusChannel} and ${createChannel}`);
   } catch (error) {
-    console.error('[Workstream] Failed to setup terminal focus listener:', error);
+    console.error('[Workstream] Failed to setup terminal listeners:', error);
   }
 }
 
@@ -125,6 +139,27 @@ async function focusTerminalByPid(pid: number): Promise<void> {
     console.log(`[Workstream] Focused terminal with PID ${pid}`);
   } else {
     console.warn(`[Workstream] Terminal with PID ${pid} not found`);
+  }
+}
+
+async function createAndRunTerminal(command: string, terminalName: string | undefined, cwd: string): Promise<void> {
+  try {
+    // Create a new terminal with the specified name and working directory
+    const terminal = vscode.window.createTerminal({
+      name: terminalName || 'Claude',
+      cwd: cwd
+    });
+
+    // Send the command to the terminal
+    terminal.sendText(command);
+
+    // Show and focus the terminal
+    terminal.show(false); // false = focus the terminal
+
+    console.log(`[Workstream] Created terminal "${terminalName || 'Claude'}" and executed: ${command}`);
+  } catch (error) {
+    console.error('[Workstream] Failed to create terminal:', error);
+    vscode.window.showErrorMessage(`Failed to create Claude terminal: ${error}`);
   }
 }
 

@@ -3,7 +3,7 @@ import { useState, useEffect, useRef } from 'react';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import Redis from 'ioredis';
-import { getVSCodeInstances, focusVSCodeInstance, closeVSCodeInstance } from './utils/vscode';
+import { getVSCodeInstances, focusVSCodeInstance, closeVSCodeInstance, launchClaudeTerminal } from './utils/vscode';
 import { getGitInfo } from './utils/git';
 import { getPRStatus } from './utils/github';
 import { isClaudeCodeActive } from './utils/claude';
@@ -980,6 +980,48 @@ export default function Command() {
                   onAction={() => loadInstances(true)}
                   icon={Icon.ArrowClockwise}
                   shortcut={{ modifiers: ['cmd'], key: 'r' }}
+                />
+                <Action
+                  title="Launch Claude Terminal"
+                  onAction={async () => {
+                    try {
+                      await showToast({
+                        style: Toast.Style.Animated,
+                        title: 'Launching Claude...',
+                        message: `Opening terminal in ${instance.name}`,
+                      });
+
+                      const success = await launchClaudeTerminal(instance);
+
+                      if (success) {
+                        // Focus the VS Code window
+                        await focusVSCodeInstance(instance.path);
+
+                        await showToast({
+                          style: Toast.Style.Success,
+                          title: 'Claude terminal launched',
+                          message: `Terminal created in ${instance.name}`,
+                        });
+
+                        // Close Raycast window
+                        await closeMainWindow();
+                      } else {
+                        await showToast({
+                          style: Toast.Style.Failure,
+                          title: 'Failed to launch Claude terminal',
+                          message: 'Redis connection unavailable',
+                        });
+                      }
+                    } catch (error) {
+                      await showToast({
+                        style: Toast.Style.Failure,
+                        title: 'Failed to launch Claude terminal',
+                        message: error instanceof Error ? error.message : 'Unknown error',
+                      });
+                    }
+                  }}
+                  icon={Icon.Terminal}
+                  shortcut={{ modifiers: ['cmd'], key: 'e' }}
                 />
                 {instance.prStatus && (
                   <Action.OpenInBrowser title="Open PR" url={instance.prStatus.url} icon={Icon.Globe} />
