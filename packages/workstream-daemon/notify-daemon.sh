@@ -54,6 +54,7 @@ CLAUDE_PID="$PPID"
 
 # Look up terminal context from Redis if available
 TERMINAL_ID=""
+TERMINAL_NAME=""
 TERMINAL_PID=""
 VSCODE_PID=""
 
@@ -64,6 +65,7 @@ if command -v redis-cli &> /dev/null; then
 
     if [ -n "$TERMINAL_CONTEXT" ]; then
         # Extract terminal info from JSON
+        TERMINAL_NAME=$(echo "$TERMINAL_CONTEXT" | grep -o '"terminalName":"[^"]*"' | cut -d'"' -f4)
         TERMINAL_ID=$(echo "$TERMINAL_CONTEXT" | grep -o '"terminalId":"[^"]*"' | cut -d'"' -f4)
         TERMINAL_PID=$(echo "$TERMINAL_CONTEXT" | grep -o '"terminalPid":[0-9]*' | grep -o '[0-9]*')
         VSCODE_PID=$(echo "$TERMINAL_CONTEXT" | grep -o '"vscodePid":[0-9]*' | grep -o '[0-9]*')
@@ -75,10 +77,11 @@ DEBUG_LOG="$HOME/.claude/workstream-hook-debug.log"
 mkdir -p "$HOME/.claude"
 
 # Log basic info
+TERMINAL_INFO="${TERMINAL_NAME:-$TERMINAL_ID}"
 if [ -n "$NOTIFICATION_TYPE" ]; then
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $HOOK_EVENT -> $EVENT_TYPE (notification: $NOTIFICATION_TYPE) in $PROJECT_DIR [terminal: $TERMINAL_ID]" >> "$DEBUG_LOG"
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $HOOK_EVENT -> $EVENT_TYPE (notification: $NOTIFICATION_TYPE) in $PROJECT_DIR [terminal: $TERMINAL_INFO]" >> "$DEBUG_LOG"
 else
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $HOOK_EVENT -> $EVENT_TYPE ($TOOL_NAME) in $PROJECT_DIR [terminal: $TERMINAL_ID]" >> "$DEBUG_LOG"
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $HOOK_EVENT -> $EVENT_TYPE ($TOOL_NAME) in $PROJECT_DIR [terminal: $TERMINAL_INFO]" >> "$DEBUG_LOG"
 fi
 
 # Log full context for investigation
@@ -91,7 +94,12 @@ if command -v redis-cli &> /dev/null; then
     # Build message with terminal context (if available)
     if [ -n "$TERMINAL_ID" ]; then
         # Include terminal context in message
-        MESSAGE="{\"type\":\"$EVENT_TYPE\",\"path\":\"$PROJECT_DIR\",\"terminalId\":\"$TERMINAL_ID\",\"terminalPid\":$TERMINAL_PID"
+        MESSAGE="{\"type\":\"$EVENT_TYPE\",\"path\":\"$PROJECT_DIR\",\"claudePid\":$CLAUDE_PID,\"terminalId\":\"$TERMINAL_ID\",\"terminalPid\":$TERMINAL_PID"
+
+        # Add terminalName if present
+        if [ -n "$TERMINAL_NAME" ]; then
+            MESSAGE="${MESSAGE},\"terminalName\":\"$TERMINAL_NAME\""
+        fi
 
         # Add vscodePid if present
         if [ -n "$VSCODE_PID" ]; then
@@ -101,7 +109,7 @@ if command -v redis-cli &> /dev/null; then
         fi
     else
         # No terminal context available, send basic message
-        MESSAGE="{\"type\":\"$EVENT_TYPE\",\"path\":\"$PROJECT_DIR\"}"
+        MESSAGE="{\"type\":\"$EVENT_TYPE\",\"path\":\"$PROJECT_DIR\",\"claudePid\":$CLAUDE_PID}"
     fi
 
     # Publish to Redis channel

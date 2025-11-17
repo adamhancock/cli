@@ -32,6 +32,7 @@ interface EnrichedTerminal {
   hasClaude?: boolean; // True if Claude is running in this terminal
   claudeWorking?: boolean; // True if Claude is actively working
   claudeWaiting?: boolean; // True if Claude is waiting for input
+  claudeIdle?: boolean; // True if Claude is idle (not working, not waiting)
   claudeFinished?: boolean; // True if Claude finished
   claudeFinishedAt?: number; // Timestamp when Claude finished
 }
@@ -103,14 +104,31 @@ async function getTerminalsForInstance(instance: InstanceWithStatus): Promise<En
   const { terminals, vscodePid } = instance.extensionState;
   const zshStates = await getZshTerminalStates();
 
-  // Get Claude terminal info if available
-  const claudeTerminalId = instance.claudeStatus?.terminalId;
-  const claudeTerminalPid = instance.claudeStatus?.terminalPid;
-  const hasClaude = instance.claudeStatus?.active || false;
-  const claudeWorking = instance.claudeStatus?.isWorking || false;
-  const claudeWaiting = instance.claudeStatus?.isWaiting || false;
-  const claudeFinished = instance.claudeStatus?.claudeFinished || false;
-  const claudeFinishedAt = instance.claudeStatus?.finishedAt;
+  // Get Claude sessions info if available
+  const claudeSessions = instance.claudeStatus?.sessions || {};
+
+  // Helper to find Claude session for a terminal
+  const findClaudeSession = (terminalPid: number, zshPid?: number, terminalId?: string) => {
+    // Check all sessions to see if any match this terminal
+    for (const [sessionPid, session] of Object.entries(claudeSessions)) {
+      const pid = parseInt(sessionPid, 10);
+
+      // Match by:
+      // 1. Terminal ID (most reliable)
+      // 2. Process PID matches Claude PID
+      // 3. Zsh shell PID matches Claude PID
+      // 4. Terminal PID matches session's terminal PID
+      if (
+        (terminalId && session.terminalId && terminalId === session.terminalId) ||
+        terminalPid === pid ||
+        (zshPid && zshPid === pid) ||
+        (session.terminalPid && terminalPid === session.terminalPid)
+      ) {
+        return session;
+      }
+    }
+    return null;
+  };
 
   // Match terminals by PID
   const enriched: EnrichedTerminal[] = [];
@@ -132,14 +150,8 @@ async function getTerminalsForInstance(instance: InstanceWithStatus): Promise<En
 
     const terminalId = zshState?.terminalId || `shell-${pid}`;
 
-    // Check if this terminal has Claude running
-    // Match by terminal ID (most reliable) or by checking if the zsh shell PID matches
-    const isClaudeTerminal = hasClaude && (
-      terminalId === claudeTerminalId ||
-      pid === claudeTerminalPid ||
-      // Also check if Claude's terminal PID is the zsh shell (child of VSCode terminal)
-      (zshState && zshState.pid === claudeTerminalPid)
-    );
+    // Find Claude session for this terminal
+    const claudeSession = findClaudeSession(pid, zshState?.pid, terminalId);
 
     // Load custom alias for this terminal
     const alias = await getTerminalAlias(terminalId);
@@ -156,11 +168,12 @@ async function getTerminalsForInstance(instance: InstanceWithStatus): Promise<En
       terminalId,
       isActive: false, // TODO: track active terminal
       lastActivity: zshState?.timestamp || 0,
-      hasClaude: isClaudeTerminal,
-      claudeWorking: isClaudeTerminal ? claudeWorking : undefined,
-      claudeWaiting: isClaudeTerminal ? claudeWaiting : undefined,
-      claudeFinished: isClaudeTerminal ? claudeFinished : undefined,
-      claudeFinishedAt: isClaudeTerminal ? claudeFinishedAt : undefined,
+      hasClaude: !!claudeSession,
+      claudeWorking: claudeSession?.status === 'working',
+      claudeWaiting: claudeSession?.status === 'waiting',
+      claudeIdle: claudeSession?.status === 'idle',
+      claudeFinished: claudeSession?.status === 'finished',
+      claudeFinishedAt: claudeSession?.finishedAt,
     });
   }
 
@@ -602,6 +615,11 @@ export default function TerminalSwitcher() {
             accessories.push({
               tag: { value: 'Claude Waiting', color: Color.Orange },
               tooltip: 'Claude is waiting for your input',
+            });
+          } else if (terminal.claudeIdle) {
+            accessories.push({
+              tag: { value: 'Claude Idle', color: Color.SecondaryText },
+              tooltip: 'Claude process exists but is not actively working',
             });
           } else if (terminal.claudeFinished && terminal.claudeFinishedAt) {
             const elapsed = Math.floor((Date.now() - terminal.claudeFinishedAt) / 1000);

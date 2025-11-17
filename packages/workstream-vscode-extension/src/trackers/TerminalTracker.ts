@@ -2,12 +2,22 @@ import * as vscode from 'vscode';
 import { RedisPublisher } from '../RedisPublisher';
 import { StateManager } from '../StateManager';
 import { TerminalInfo, TerminalPurpose } from '../types';
+import { findClaudeProcess } from '../utils/processDetection';
+
+interface ClaudeTerminalInfo {
+  claudePid: number;
+  terminalName: string;  // VSCode terminal name (e.g., "bash", "zsh", "Terminal 1")
+  terminalPid: number;
+  vscodePid: number;
+  refreshInterval?: NodeJS.Timeout;
+}
 
 export class TerminalTracker {
   private disposables: vscode.Disposable[] = [];
   private terminals = new Map<number, TerminalInfo>();
   private terminalToId = new WeakMap<vscode.Terminal, number>();
   private nextId = 1;
+  private claudeTerminals = new Map<number, ClaudeTerminalInfo>();
 
   constructor(
     private readonly publisher: RedisPublisher,
@@ -48,6 +58,28 @@ export class TerminalTracker {
         if (id !== undefined && this.terminals.has(id)) {
           const termInfo = this.terminals.get(id)!;
           termInfo.hasBeenInteractedWith = terminal.state.isInteractedWith;
+        }
+      })
+    );
+
+    // Track shell integration for Claude detection
+    this.disposables.push(
+      vscode.window.onDidChangeTerminalShellIntegration(async (event) => {
+        const terminal = event.terminal;
+        const shellIntegration = event.shellIntegration;
+
+        if (shellIntegration) {
+          // Listen for command execution
+          const executeCommandDisposable = shellIntegration.executeCommand.event(async (execution) => {
+            const commandLine = execution.commandLine.value;
+
+            // Check if this is a Claude command
+            if (/^(clauded|claude-code|claude)\s/.test(commandLine)) {
+              await this.onClaudeCommandDetected(terminal);
+            }
+          });
+
+          this.disposables.push(executeCommandDisposable);
         }
       })
     );
@@ -253,7 +285,140 @@ export class TerminalTracker {
     return 'general';
   }
 
+  /**
+   * Called when Claude command is detected in a terminal
+   */
+  private async onClaudeCommandDetected(terminal: vscode.Terminal): Promise<void> {
+    console.log('[Workstream] Claude command detected in terminal:', terminal.name);
+
+    // Get terminal PID
+    const terminalPid = await terminal.processId;
+    if (!terminalPid) {
+      console.warn('[Workstream] Could not get terminal PID');
+      return;
+    }
+
+    // Wait a bit for Claude process to start
+    await new Promise(resolve => setTimeout(resolve, 1000));
+
+    // Find Claude process under this shell
+    const claudePid = await findClaudeProcess(terminalPid);
+    if (!claudePid) {
+      console.warn('[Workstream] Could not find Claude process under terminal PID', terminalPid);
+      return;
+    }
+
+    console.log('[Workstream] Found Claude process:', claudePid);
+
+    // Get VSCode PID
+    const vscodePid = process.pid;
+
+    // Get workspace path for terminal ID
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+    if (!workspaceFolder) {
+      return;
+    }
+
+    // Get terminal ID from our internal tracking
+    const id = this.terminalToId.get(terminal);
+    const termInfo = id !== undefined ? this.terminals.get(id) : undefined;
+
+    // Use VSCode terminal name for the terminal ID
+    const terminalName = terminal.name;
+
+    // Register Claude terminal
+    await this.registerClaudeTerminal(claudePid, terminalName, terminalPid, vscodePid, workspaceFolder.uri.fsPath);
+  }
+
+  /**
+   * Register a Claude terminal to Redis
+   */
+  private async registerClaudeTerminal(
+    claudePid: number,
+    terminalName: string,
+    terminalPid: number,
+    vscodePid: number,
+    workspace: string
+  ): Promise<void> {
+    console.log(`[Workstream] Registering Claude terminal: Claude PID=${claudePid}, Terminal="${terminalName}"`);
+
+    const info: ClaudeTerminalInfo = {
+      claudePid,
+      terminalName,
+      terminalPid,
+      vscodePid,
+    };
+
+    // Store the Claude terminal context in Redis
+    const redisKey = `claude:terminal:${claudePid}`;
+    // Include both terminalName (for display) and terminalId (for matching with zsh plugin)
+    const terminalId = `vscode-${vscodePid}-${terminalPid}`;
+    const context = JSON.stringify({
+      terminalName,
+      terminalId,
+      terminalPid,
+      vscodePid,
+      workspace,
+    });
+
+    // Set with 60s TTL and refresh every 30s
+    await this.publisher.setKey(redisKey, context, 60);
+
+    // Set up auto-refresh
+    const refreshInterval = setInterval(async () => {
+      // Check if Claude process is still running
+      // If not, clean up
+      try {
+        process.kill(claudePid, 0); // Signal 0 just checks if process exists
+        // Still running, refresh TTL
+        await this.publisher.setKey(redisKey, context, 60);
+      } catch (error) {
+        // Process no longer exists, clean up
+        console.log(`[Workstream] Claude process ${claudePid} no longer exists, cleaning up`);
+        await this.cleanupClaudeTerminal(claudePid);
+      }
+    }, 30000); // Every 30 seconds
+
+    info.refreshInterval = refreshInterval;
+    this.claudeTerminals.set(claudePid, info);
+
+    console.log(`[Workstream] Claude terminal registered successfully`);
+  }
+
+  /**
+   * Clean up Claude terminal registration
+   */
+  private async cleanupClaudeTerminal(claudePid: number): Promise<void> {
+    const info = this.claudeTerminals.get(claudePid);
+    if (!info) {
+      return;
+    }
+
+    console.log(`[Workstream] Cleaning up Claude terminal: PID=${claudePid}`);
+
+    // Stop refresh interval
+    if (info.refreshInterval) {
+      clearInterval(info.refreshInterval);
+    }
+
+    // Delete Redis key
+    const redisKey = `claude:terminal:${claudePid}`;
+    await this.publisher.deleteKey(redisKey);
+
+    // Remove from tracking
+    this.claudeTerminals.delete(claudePid);
+  }
+
   dispose(): void {
+    // Clean up all Claude terminals
+    for (const [claudePid, info] of this.claudeTerminals.entries()) {
+      if (info.refreshInterval) {
+        clearInterval(info.refreshInterval);
+      }
+    }
+    this.claudeTerminals.clear();
+
+    // Dispose all listeners
     this.disposables.forEach((d) => d.dispose());
     this.disposables = [];
   }

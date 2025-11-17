@@ -59,18 +59,34 @@ interface PRStatus {
   };
 }
 
+interface ClaudeSessionInfo {
+  pid: number;
+  status: 'working' | 'waiting' | 'idle' | 'finished';
+  terminalName?: string;  // VSCode terminal name (e.g., "bash", "zsh", "Terminal 1")
+  terminalId?: string;
+  terminalPid?: number;
+  vscodePid?: number;
+  lastActivity: number;
+  workStartedAt?: number;
+  finishedAt?: number;
+}
+
 interface ClaudeStatus {
+  sessions: Record<number, ClaudeSessionInfo>;  // Keyed by Claude PID
+  primarySession?: number;  // PID of most recently active session
+
+  // Legacy fields for backwards compatibility
   active: boolean;
   pid: number;
   isWorking: boolean;
   isWaiting?: boolean;
-  claudeFinished?: boolean;  // Set when Claude finishes normally
-  lastEventTime?: number;     // Timestamp of last event received
-  workStartedAt?: number;     // Timestamp when work started
-  finishedAt?: number;        // Timestamp when Claude finished
-  terminalId?: string;        // Terminal ID where Claude is running
-  terminalPid?: number;       // Terminal PID where Claude was launched
-  vscodePid?: number;         // VSCode PID if running in VSCode terminal
+  claudeFinished?: boolean;
+  lastEventTime?: number;
+  workStartedAt?: number;
+  finishedAt?: number;
+  terminalId?: string;
+  terminalPid?: number;
+  vscodePid?: number;
 }
 
 interface TmuxStatus {
@@ -256,20 +272,25 @@ class WorkstreamDaemon {
         } else if (channel === REDIS_CHANNELS.CLAUDE) {
           // Handle Claude-specific events
           const projectName = data.path?.split('/').pop() || 'unknown';
-          // Extract terminal context if available
+          // Extract terminal context and Claude PID if available
+          const claudePid = data.claudePid;
+          const terminalName = data.terminalName;
           const terminalId = data.terminalId;
           const terminalPid = data.terminalPid;
           const vscodePid = data.vscodePid;
 
+          // Use terminal name for display if available, otherwise use terminal ID
+          const terminalInfo = terminalName || terminalId;
+
           if (data.type === 'work_started') {
-            log(`  ▶️  Claude started working in ${projectName}${terminalId ? ` [${terminalId}]` : ''}`);
-            await this.handleClaudeStarted(data.path, terminalId, terminalPid, vscodePid);
+            log(`  ▶️  Claude started working in ${projectName}${terminalInfo ? ` [${terminalInfo}]` : ''}${claudePid ? ` (PID: ${claudePid})` : ''}`);
+            await this.handleClaudeStarted(data.path, claudePid, terminalName, terminalId, terminalPid, vscodePid);
           } else if (data.type === 'waiting_for_input') {
-            log(`  ⏸️  Claude waiting for input in ${projectName}${terminalId ? ` [${terminalId}]` : ''}`);
-            await this.handleClaudeWaiting(data.path, terminalId, terminalPid, vscodePid);
+            log(`  ⏸️  Claude waiting for input in ${projectName}${terminalInfo ? ` [${terminalInfo}]` : ''}${claudePid ? ` (PID: ${claudePid})` : ''}`);
+            await this.handleClaudeWaiting(data.path, claudePid, terminalName, terminalId, terminalPid, vscodePid);
           } else if (data.type === 'work_stopped') {
-            log(`  ⏹️  Claude stopped in ${projectName}${terminalId ? ` [${terminalId}]` : ''}`);
-            await this.handleClaudeFinished(data.path, terminalId, terminalPid, vscodePid);
+            log(`  ⏹️  Claude stopped in ${projectName}${terminalInfo ? ` [${terminalInfo}]` : ''}${claudePid ? ` (PID: ${claudePid})` : ''}`);
+            await this.handleClaudeFinished(data.path, claudePid, terminalName, terminalId, terminalPid, vscodePid);
           } else if (data.type === 'clear_finished') {
             log(`  🏁  Clearing finished flag for ${projectName}`);
             await this.handleClearFinished(data.path);
@@ -881,15 +902,18 @@ class WorkstreamDaemon {
     // Get Claude status (local, fast)
     const newClaudeStatus = await this.getClaudeStatus(instance.path);
 
+    // Get existing instance to check for preserved state
+    const existingInstance = this.instances.get(instance.path);
+
     // If Claude process not found, check if we should preserve finished status
-    if (!newClaudeStatus && instance.claudeStatus) {
+    if (!newClaudeStatus && existingInstance?.claudeStatus) {
       // Preserve finished status for 10 minutes to show "Claude finished X ago"
-      if (instance.claudeStatus.finishedAt) {
-        const elapsed = Date.now() - instance.claudeStatus.finishedAt;
+      if (existingInstance.claudeStatus.finishedAt) {
+        const elapsed = Date.now() - existingInstance.claudeStatus.finishedAt;
         if (elapsed < 10 * 60 * 1000) { // 10 minutes
           // Keep the finished status with terminal context
           enriched.claudeStatus = {
-            ...instance.claudeStatus,
+            ...existingInstance.claudeStatus,
             active: false, // Process no longer running
           };
         } else {
@@ -1071,9 +1095,16 @@ class WorkstreamDaemon {
   private async getClaudeStatus(repoPath: string): Promise<ClaudeStatus | undefined> {
     try {
       const psResult = await $`/bin/ps aux | grep -E "^\\S+\\s+\\d+.*claude\\s*$" | awk '{print $2}'`;
-
       const pids = psResult.stdout.trim().split('\n').filter(Boolean);
 
+      // Get existing status if available to preserve hook-based state
+      const existing = this.instances.get(repoPath);
+      const sessions: Record<number, ClaudeSessionInfo> = { ...(existing?.claudeStatus?.sessions || {}) };
+
+      // Track which PIDs we find running
+      const runningPids = new Set<number>();
+
+      // Find all Claude processes for this repo
       for (const pidStr of pids) {
         const pid = parseInt(pidStr, 10);
         const lsofResult = await $`/usr/sbin/lsof -p ${pidStr} 2>/dev/null || true`;
@@ -1084,23 +1115,79 @@ class WorkstreamDaemon {
           const cwd = parts[parts.length - 1];
 
           if (cwd === repoPath) {
-            // Get existing status if available to preserve hook-based state
-            const existing = this.instances.get(repoPath);
-            const isWorking = existing?.claudeStatus?.isWorking ?? false;
-            const isWaiting = existing?.claudeStatus?.isWaiting ?? false;
+            runningPids.add(pid);
 
-            // Preserve terminal context from existing status
-            return {
-              active: true,
-              pid,
-              isWorking,
-              isWaiting,
-              terminalId: existing?.claudeStatus?.terminalId,
-              terminalPid: existing?.claudeStatus?.terminalPid,
-              vscodePid: existing?.claudeStatus?.vscodePid,
-            };
+            // Get existing session info for this PID
+            const existingSession = sessions[pid];
+
+            // If we have hook-based state for this session, preserve it
+            // Otherwise, mark it as idle (process exists but no recent hook activity)
+            if (existingSession) {
+              // Keep existing session info
+              sessions[pid] = {
+                ...existingSession,
+                lastActivity: existingSession.lastActivity || Date.now(),
+              };
+            } else {
+              // New session discovered via process scan
+              sessions[pid] = {
+                pid,
+                status: 'idle',
+                lastActivity: Date.now(),
+              };
+            }
           }
         }
+      }
+
+      // Mark sessions as finished if their process is no longer running
+      for (const [pidStr, session] of Object.entries(sessions)) {
+        const pid = parseInt(pidStr, 10);
+        if (!runningPids.has(pid) && session.status !== 'finished') {
+          sessions[pid] = {
+            ...session,
+            status: 'finished',
+            finishedAt: Date.now(),
+          };
+        }
+      }
+
+      // If we have any sessions, return status
+      if (Object.keys(sessions).length > 0) {
+        // Determine primary session (most recently active)
+        let primaryPid = existing?.claudeStatus?.primarySession;
+        let mostRecentActivity = 0;
+
+        for (const [pidStr, session] of Object.entries(sessions)) {
+          if (session.status !== 'finished' && session.lastActivity > mostRecentActivity) {
+            primaryPid = parseInt(pidStr, 10);
+            mostRecentActivity = session.lastActivity;
+          }
+        }
+
+        // If no active session, use the first session
+        if (!primaryPid || !sessions[primaryPid]) {
+          primaryPid = parseInt(Object.keys(sessions)[0], 10);
+        }
+
+        const primarySession = sessions[primaryPid];
+
+        // Build legacy fields from primary session
+        return {
+          sessions,
+          primarySession: primaryPid,
+          active: primarySession.status !== 'finished',
+          pid: primaryPid,
+          isWorking: primarySession.status === 'working',
+          isWaiting: primarySession.status === 'waiting',
+          claudeFinished: primarySession.status === 'finished',
+          lastEventTime: primarySession.lastActivity,
+          workStartedAt: primarySession.workStartedAt,
+          finishedAt: primarySession.finishedAt,
+          terminalId: primarySession.terminalId,
+          terminalPid: primarySession.terminalPid,
+          vscodePid: primarySession.vscodePid,
+        };
       }
 
       return undefined;
@@ -1112,36 +1199,92 @@ class WorkstreamDaemon {
   /**
    * Check if Claude status has timed out and reset if necessary.
    * This prevents the "Working" state from getting stuck when a task is interrupted.
+   * Also cleans up old finished sessions.
    */
   private checkClaudeTimeout(claudeStatus: ClaudeStatus): ClaudeStatus {
     const now = Date.now();
+    const sessions = { ...claudeStatus.sessions };
+    const FINISHED_CLEANUP_TIMEOUT = 10 * 60 * 1000; // 10 minutes - remove finished sessions
+    let hasChanges = false;
 
-    // Check if working state has timed out
-    if (claudeStatus.isWorking && claudeStatus.workStartedAt) {
-      const elapsed = now - claudeStatus.workStartedAt;
-      if (elapsed > CLAUDE_WORK_TIMEOUT) {
-        log(`⏱️  Claude work timeout detected (${Math.round(elapsed / 1000)}s), resetting to idle`);
-        return {
-          ...claudeStatus,
-          isWorking: false,
-          isWaiting: false,
-          // Keep active, pid, and terminal context intact - process still exists
-        };
+    // Check each session for timeouts and cleanup
+    for (const [pidStr, session] of Object.entries(sessions)) {
+      const pid = parseInt(pidStr, 10);
+
+      // Remove finished sessions older than 10 minutes
+      if (session.status === 'finished' && session.finishedAt) {
+        const elapsed = now - session.finishedAt;
+        if (elapsed > FINISHED_CLEANUP_TIMEOUT) {
+          delete sessions[pid];
+          hasChanges = true;
+          continue;
+        }
+      }
+
+      // Check if working state has timed out
+      if (session.status === 'working' && session.workStartedAt) {
+        const elapsed = now - session.workStartedAt;
+        if (elapsed > CLAUDE_WORK_TIMEOUT) {
+          log(`⏱️  Claude work timeout detected for PID ${pid} (${Math.round(elapsed / 1000)}s), resetting to idle`);
+          sessions[pid] = {
+            ...session,
+            status: 'idle',
+          };
+          hasChanges = true;
+        }
+      }
+
+      // Check if waiting state has timed out
+      if (session.status === 'waiting' && session.lastActivity) {
+        const elapsed = now - session.lastActivity;
+        if (elapsed > CLAUDE_WAIT_TIMEOUT) {
+          log(`⏱️  Claude wait timeout detected for PID ${pid} (${Math.round(elapsed / 1000)}s), resetting to idle`);
+          sessions[pid] = {
+            ...session,
+            status: 'idle',
+          };
+          hasChanges = true;
+        }
       }
     }
 
-    // Check if waiting state has timed out
-    if (claudeStatus.isWaiting && claudeStatus.lastEventTime) {
-      const elapsed = now - claudeStatus.lastEventTime;
-      if (elapsed > CLAUDE_WAIT_TIMEOUT) {
-        log(`⏱️  Claude wait timeout detected (${Math.round(elapsed / 1000)}s), resetting to idle`);
+    // If we made changes, rebuild the status
+    if (hasChanges) {
+      // Determine new primary session if needed
+      let primaryPid = claudeStatus.primarySession;
+      if (!primaryPid || !sessions[primaryPid]) {
+        // Find most recently active non-finished session
+        let mostRecentActivity = 0;
+        for (const [pidStr, session] of Object.entries(sessions)) {
+          if (session.status !== 'finished' && session.lastActivity > mostRecentActivity) {
+            primaryPid = parseInt(pidStr, 10);
+            mostRecentActivity = session.lastActivity;
+          }
+        }
+      }
+
+      // If we have a primary session, update legacy fields
+      if (primaryPid && sessions[primaryPid]) {
+        const primarySession = sessions[primaryPid];
         return {
           ...claudeStatus,
-          isWaiting: false,
-          isWorking: false,
-          // Keep terminal context intact
+          sessions,
+          primarySession: primaryPid,
+          active: primarySession.status !== 'finished',
+          isWorking: primarySession.status === 'working',
+          isWaiting: primarySession.status === 'waiting',
+          claudeFinished: primarySession.status === 'finished',
+          lastEventTime: primarySession.lastActivity,
+          workStartedAt: primarySession.workStartedAt,
+          finishedAt: primarySession.finishedAt,
         };
       }
+
+      // No sessions left
+      return {
+        ...claudeStatus,
+        sessions,
+      };
     }
 
     return claudeStatus;
@@ -1355,119 +1498,298 @@ class WorkstreamDaemon {
     }
   }
 
-  private async handleClaudeStarted(repoPath: string, terminalId?: string, terminalPid?: number, vscodePid?: number) {
+  /**
+   * Fetch terminal context from Redis for a given Claude PID.
+   * Terminal context is stored by the TerminalTracker when Claude is detected in a terminal.
+   */
+  private async getTerminalContextForClaude(claudePid: number): Promise<{
+    terminalId?: string;
+    terminalPid?: number;
+    terminalName?: string;
+    vscodePid?: number;
+    workspace?: string;
+  } | null> {
+    try {
+      const key = `claude:terminal:${claudePid}`;
+      const data = await this.redis.get(key);
+      if (data) {
+        return JSON.parse(data);
+      }
+      return null;
+    } catch (error) {
+      logError(`Failed to fetch terminal context for Claude PID ${claudePid}:`, error);
+      return null;
+    }
+  }
+
+  private async handleClaudeStarted(repoPath: string, claudePid?: number, terminalName?: string, terminalId?: string, terminalPid?: number, vscodePid?: number) {
     try {
       const instance = this.instances.get(repoPath);
       if (instance && instance.claudeStatus) {
-        const wasWaiting = instance.claudeStatus.isWaiting;
         const now = Date.now();
-        instance.claudeStatus.isWorking = true;
-        instance.claudeStatus.isWaiting = false;
-        instance.claudeStatus.workStartedAt = now;
-        instance.claudeStatus.lastEventTime = now;
 
-        // Store terminal context if provided
-        if (terminalId) {
-          instance.claudeStatus.terminalId = terminalId;
+        // If claudePid is provided, update the specific session
+        if (claudePid) {
+          // Fetch terminal context from Redis if not provided in the event
+          let terminalContext = null;
+          if (!terminalId && !terminalPid && !vscodePid) {
+            log(`🔍 Fetching terminal context for Claude PID ${claudePid}...`);
+            terminalContext = await this.getTerminalContextForClaude(claudePid);
+            if (terminalContext) {
+              log(`✅ Found terminal context: ${JSON.stringify(terminalContext)}`);
+            } else {
+              log(`❌ No terminal context found for Claude PID ${claudePid}`);
+            }
+          }
+
+          // Initialize sessions map if needed
+          if (!instance.claudeStatus.sessions) {
+            instance.claudeStatus.sessions = {};
+          }
+
+          // Get existing session or create new one
+          const existingSession = instance.claudeStatus.sessions[claudePid];
+          const wasWaiting = existingSession?.status === 'waiting';
+
+          // Update or create session, merging terminal context from Redis if available
+          instance.claudeStatus.sessions[claudePid] = {
+            pid: claudePid,
+            status: 'working',
+            terminalName: terminalName || terminalContext?.terminalName || existingSession?.terminalName,
+            terminalId: terminalId || terminalContext?.terminalId || existingSession?.terminalId,
+            terminalPid: terminalPid ?? terminalContext?.terminalPid ?? existingSession?.terminalPid,
+            vscodePid: vscodePid ?? terminalContext?.vscodePid ?? existingSession?.vscodePid,
+            lastActivity: now,
+            workStartedAt: existingSession?.workStartedAt || now,
+          };
+
+          // Set as primary session
+          instance.claudeStatus.primarySession = claudePid;
+
+          // Update legacy fields for backwards compatibility
+          instance.claudeStatus.pid = claudePid;
+          instance.claudeStatus.active = true;
+          instance.claudeStatus.isWorking = true;
+          instance.claudeStatus.isWaiting = false;
+          instance.claudeStatus.workStartedAt = instance.claudeStatus.sessions[claudePid].workStartedAt;
+          instance.claudeStatus.lastEventTime = now;
+          if (terminalId) instance.claudeStatus.terminalId = terminalId;
+          if (terminalPid !== undefined) instance.claudeStatus.terminalPid = terminalPid;
+          if (vscodePid !== undefined) instance.claudeStatus.vscodePid = vscodePid;
+
+          await this.writeCache();
+          await this.publishUpdate();
+
+          const projectName = repoPath.split('/').pop() || 'project';
+          log(`Claude started working in ${projectName}`);
+        } else {
+          // Fallback to legacy behavior if no PID provided
+          const wasWaiting = instance.claudeStatus.isWaiting;
+          instance.claudeStatus.isWorking = true;
+          instance.claudeStatus.isWaiting = false;
+          instance.claudeStatus.workStartedAt = now;
+          instance.claudeStatus.lastEventTime = now;
+
+          if (terminalId) instance.claudeStatus.terminalId = terminalId;
+          if (terminalPid !== undefined) instance.claudeStatus.terminalPid = terminalPid;
+          if (vscodePid !== undefined) instance.claudeStatus.vscodePid = vscodePid;
+
+          await this.writeCache();
+          await this.publishUpdate();
+
+          const projectName = repoPath.split('/').pop() || 'project';
         }
-        if (terminalPid !== undefined) {
-          instance.claudeStatus.terminalPid = terminalPid;
-        }
-        if (vscodePid !== undefined) {
-          instance.claudeStatus.vscodePid = vscodePid;
-        }
-
-        await this.writeCache();
-        await this.publishUpdate();
-
-        const projectName = repoPath.split('/').pop() || 'project';
-
-        // Only notify when resuming from waiting state (to reduce noise)
-        if (wasWaiting) {
-          await this.sendNotification(
-            'Claude Code',
-            `▶️ Claude resumed working in ${projectName}`,
-            'claude_started',
-            'success',
-            repoPath
-          );
-        }
-
-        log(`Claude started working in ${projectName}`);
       }
     } catch (error) {
       logError('Error handling Claude started:', error);
     }
   }
 
-  private async handleClaudeWaiting(repoPath: string, terminalId?: string, terminalPid?: number, vscodePid?: number) {
+  private async handleClaudeWaiting(repoPath: string, claudePid?: number, terminalName?: string, terminalId?: string, terminalPid?: number, vscodePid?: number) {
     try {
-      // Update instance status to waiting
       const instance = this.instances.get(repoPath);
       if (instance && instance.claudeStatus) {
-        instance.claudeStatus.isWaiting = true;
-        instance.claudeStatus.isWorking = false;
-        instance.claudeStatus.lastEventTime = Date.now();
+        const now = Date.now();
 
-        // Store terminal context if provided
-        if (terminalId) {
-          instance.claudeStatus.terminalId = terminalId;
+        // If claudePid is provided, update the specific session
+        if (claudePid) {
+          // Fetch terminal context from Redis if not provided in the event
+          let terminalContext = null;
+          if (!terminalId && !terminalPid && !vscodePid) {
+            log(`🔍 Fetching terminal context for Claude PID ${claudePid}...`);
+            terminalContext = await this.getTerminalContextForClaude(claudePid);
+            if (terminalContext) {
+              log(`✅ Found terminal context: ${JSON.stringify(terminalContext)}`);
+            } else {
+              log(`❌ No terminal context found for Claude PID ${claudePid}`);
+            }
+          }
+
+          // Initialize sessions map if needed
+          if (!instance.claudeStatus.sessions) {
+            instance.claudeStatus.sessions = {};
+          }
+
+          // Get existing session or create new one
+          const existingSession = instance.claudeStatus.sessions[claudePid];
+
+          // Update or create session, merging terminal context from Redis if available
+          instance.claudeStatus.sessions[claudePid] = {
+            pid: claudePid,
+            status: 'waiting',
+            terminalName: terminalName || terminalContext?.terminalName || existingSession?.terminalName,
+            terminalId: terminalId || terminalContext?.terminalId || existingSession?.terminalId,
+            terminalPid: terminalPid ?? terminalContext?.terminalPid ?? existingSession?.terminalPid,
+            vscodePid: vscodePid ?? terminalContext?.vscodePid ?? existingSession?.vscodePid,
+            lastActivity: now,
+            workStartedAt: existingSession?.workStartedAt,
+          };
+
+          // Set as primary session
+          instance.claudeStatus.primarySession = claudePid;
+
+          // Update legacy fields for backwards compatibility
+          instance.claudeStatus.pid = claudePid;
+          instance.claudeStatus.active = true;
+          instance.claudeStatus.isWaiting = true;
+          instance.claudeStatus.isWorking = false;
+          instance.claudeStatus.lastEventTime = now;
+          if (terminalId) instance.claudeStatus.terminalId = terminalId;
+          if (terminalPid !== undefined) instance.claudeStatus.terminalPid = terminalPid;
+          if (vscodePid !== undefined) instance.claudeStatus.vscodePid = vscodePid;
+
+          await this.writeCache();
+          await this.publishUpdate();
+
+          // Send notification
+          const projectName = repoPath.split('/').pop() || 'project';
+          await this.sendNotification(
+            'Claude Code',
+            `🤔 Claude needs your attention in ${projectName}`,
+            'claude_waiting',
+            'failure',
+            repoPath
+          );
+
+          log(`Claude waiting for input in ${projectName}`);
+        } else {
+          // Fallback to legacy behavior if no PID provided
+          instance.claudeStatus.isWaiting = true;
+          instance.claudeStatus.isWorking = false;
+          instance.claudeStatus.lastEventTime = now;
+
+          if (terminalId) instance.claudeStatus.terminalId = terminalId;
+          if (terminalPid !== undefined) instance.claudeStatus.terminalPid = terminalPid;
+          if (vscodePid !== undefined) instance.claudeStatus.vscodePid = vscodePid;
+
+          await this.writeCache();
+          await this.publishUpdate();
+
+          const projectName = repoPath.split('/').pop() || 'project';
+          await this.sendNotification(
+            'Claude Code',
+            `🤔 Claude needs your attention in ${projectName}`,
+            'claude_waiting',
+            'failure',
+            repoPath
+          );
         }
-        if (terminalPid !== undefined) {
-          instance.claudeStatus.terminalPid = terminalPid;
-        }
-        if (vscodePid !== undefined) {
-          instance.claudeStatus.vscodePid = vscodePid;
-        }
-
-        await this.writeCache();
-        await this.publishUpdate();
-
-        // Send notification
-        const projectName = repoPath.split('/').pop() || 'project';
-        await this.sendNotification(
-          'Claude Code',
-          `🤔 Claude needs your attention in ${projectName}`,
-          'claude_waiting',
-          'failure',
-          repoPath
-        );
-
-        log(`Claude waiting for input in ${projectName}`);
       }
     } catch (error) {
       logError('Error handling Claude waiting:', error);
     }
   }
 
-  private async handleClaudeFinished(repoPath: string, terminalId?: string, terminalPid?: number, vscodePid?: number) {
+  private async handleClaudeFinished(repoPath: string, claudePid?: number, terminalName?: string, terminalId?: string, terminalPid?: number, vscodePid?: number) {
     try {
-      // Update instance status to not waiting and not working
       const instance = this.instances.get(repoPath);
       if (instance && instance.claudeStatus) {
         const now = Date.now();
-        instance.claudeStatus.isWaiting = false;
-        instance.claudeStatus.isWorking = false;
-        instance.claudeStatus.claudeFinished = true; // Set finished flag
-        instance.claudeStatus.finishedAt = now; // Record when Claude finished
-        // Clear work timestamps since work is complete
-        instance.claudeStatus.workStartedAt = undefined;
-        instance.claudeStatus.lastEventTime = undefined;
-        // Note: We keep terminal context even when finished, so it's still available
-        await this.writeCache();
-        await this.publishUpdate();
 
-        // Send notification
-        const projectName = repoPath.split('/').pop() || 'project';
-        await this.sendNotification(
-          'Claude Code',
-          `✅ Claude finished working in ${projectName}`,
-          'claude_finished',
-          'success',
-          repoPath
-        );
+        // If claudePid is provided, update the specific session
+        if (claudePid) {
+          // Fetch terminal context from Redis if not provided in the event
+          let terminalContext = null;
+          if (!terminalId && !terminalPid && !vscodePid) {
+            log(`🔍 Fetching terminal context for Claude PID ${claudePid}...`);
+            terminalContext = await this.getTerminalContextForClaude(claudePid);
+            if (terminalContext) {
+              log(`✅ Found terminal context: ${JSON.stringify(terminalContext)}`);
+            } else {
+              log(`❌ No terminal context found for Claude PID ${claudePid}`);
+            }
+          }
 
-        log(`Claude finished in ${projectName}`);
+          // Initialize sessions map if needed
+          if (!instance.claudeStatus.sessions) {
+            instance.claudeStatus.sessions = {};
+          }
+
+          // Get existing session or create new one
+          const existingSession = instance.claudeStatus.sessions[claudePid];
+
+          // Mark session as finished, merging terminal context from Redis if available
+          instance.claudeStatus.sessions[claudePid] = {
+            pid: claudePid,
+            status: 'finished',
+            terminalName: terminalName || terminalContext?.terminalName || existingSession?.terminalName,
+            terminalId: terminalId || terminalContext?.terminalId || existingSession?.terminalId,
+            terminalPid: terminalPid ?? terminalContext?.terminalPid ?? existingSession?.terminalPid,
+            vscodePid: vscodePid ?? terminalContext?.vscodePid ?? existingSession?.vscodePid,
+            lastActivity: now,
+            workStartedAt: existingSession?.workStartedAt,
+            finishedAt: now,
+          };
+
+          // Update legacy fields for backwards compatibility (based on primary session)
+          const primaryPid = instance.claudeStatus.primarySession || claudePid;
+          const primarySession = instance.claudeStatus.sessions[primaryPid];
+          if (primarySession) {
+            instance.claudeStatus.pid = primaryPid;
+            instance.claudeStatus.active = primarySession.status !== 'finished';
+            instance.claudeStatus.isWorking = primarySession.status === 'working';
+            instance.claudeStatus.isWaiting = primarySession.status === 'waiting';
+            instance.claudeStatus.claudeFinished = primarySession.status === 'finished';
+            instance.claudeStatus.finishedAt = primarySession.finishedAt;
+            instance.claudeStatus.workStartedAt = primarySession.workStartedAt;
+            instance.claudeStatus.lastEventTime = primarySession.lastActivity;
+          }
+
+          await this.writeCache();
+          await this.publishUpdate();
+
+          // Send notification
+          const projectName = repoPath.split('/').pop() || 'project';
+          await this.sendNotification(
+            'Claude Code',
+            `✅ Claude finished working in ${projectName}`,
+            'claude_finished',
+            'success',
+            repoPath
+          );
+
+          log(`Claude finished in ${projectName}`);
+        } else {
+          // Fallback to legacy behavior if no PID provided
+          instance.claudeStatus.isWaiting = false;
+          instance.claudeStatus.isWorking = false;
+          instance.claudeStatus.claudeFinished = true;
+          instance.claudeStatus.finishedAt = now;
+          instance.claudeStatus.workStartedAt = undefined;
+          instance.claudeStatus.lastEventTime = undefined;
+
+          await this.writeCache();
+          await this.publishUpdate();
+
+          const projectName = repoPath.split('/').pop() || 'project';
+          await this.sendNotification(
+            'Claude Code',
+            `✅ Claude finished working in ${projectName}`,
+            'claude_finished',
+            'success',
+            repoPath
+          );
+        }
       }
     } catch (error) {
       logError('Error handling Claude finished:', error);

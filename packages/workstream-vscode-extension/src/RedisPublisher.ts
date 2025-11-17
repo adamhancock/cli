@@ -143,6 +143,40 @@ export class RedisPublisher {
     return this.isConnected;
   }
 
+  /**
+   * Set a key with an optional TTL (in seconds)
+   */
+  async setKey(key: string, value: string, ttlSeconds?: number): Promise<void> {
+    if (!this.isConnected || !this.redis) {
+      return;
+    }
+
+    try {
+      if (ttlSeconds) {
+        await this.redis.setex(key, ttlSeconds, value);
+      } else {
+        await this.redis.set(key, value);
+      }
+    } catch (error) {
+      console.error(`[Workstream] Failed to set key ${key}:`, error);
+    }
+  }
+
+  /**
+   * Delete a key from Redis
+   */
+  async deleteKey(key: string): Promise<void> {
+    if (!this.isConnected || !this.redis) {
+      return;
+    }
+
+    try {
+      await this.redis.del(key);
+    } catch (error) {
+      console.error(`[Workstream] Failed to delete key ${key}:`, error);
+    }
+  }
+
   async dispose(): Promise<void> {
     this.statusBarItem.dispose();
     if (this.redis) {
