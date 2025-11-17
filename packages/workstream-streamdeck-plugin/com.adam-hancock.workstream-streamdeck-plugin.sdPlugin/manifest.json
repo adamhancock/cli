@@ -1,0 +1,62 @@
+{
+	"Name": "workstream-streamdeck-plugin",
+	"Version": "0.1.0.0",
+	"Author": "Adam Hancock",
+	"Actions": [
+		{
+			"Name": "Counter",
+			"UUID": "com.adam-hancock.workstream-streamdeck-plugin.increment",
+			"Icon": "imgs/actions/counter/icon",
+			"Tooltip": "Displays a count, which increments by one on press.",
+			"PropertyInspectorPath": "ui/increment-counter.html",
+			"Controllers": [
+				"Keypad"
+			],
+			"States": [
+				{
+					"Image": "imgs/actions/counter/key",
+					"TitleAlignment": "middle"
+				}
+			]
+		},
+		{
+			"Name": "VSCode Instance",
+			"UUID": "com.adam-hancock.workstream-streamdeck-plugin.vscode-instance",
+			"Icon": "imgs/actions/counter/icon",
+			"Tooltip": "Focus a VSCode workspace instance",
+			"Controllers": [
+				"Keypad"
+			],
+			"States": [
+				{
+					"Image": "imgs/actions/counter/key",
+					"TitleAlignment": "middle"
+				}
+			]
+		}
+	],
+	"Category": "workstream-streamdeck-plugin",
+	"CategoryIcon": "imgs/plugin/category-icon",
+	"CodePath": "bin/plugin.js",
+	"Description": "Optimise developer workflows",
+	"Icon": "imgs/plugin/marketplace",
+	"SDKVersion": 2,
+	"Software": {
+		"MinimumVersion": "6.5"
+	},
+	"OS": [
+		{
+			"Platform": "mac",
+			"MinimumVersion": "12"
+		},
+		{
+			"Platform": "windows",
+			"MinimumVersion": "10"
+		}
+	],
+	"Nodejs": {
+		"Version": "20",
+		"Debug": "enabled"
+	},
+	"UUID": "com.adam-hancock.workstream-streamdeck-plugin"
+}
