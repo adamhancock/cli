@@ -29,6 +29,7 @@ export interface FormattedEvent {
   subtitle: string;
   color: string;
   data: any; // Parsed JSON
+  created_at?: number;
 }
 
 /**

@@ -4,7 +4,7 @@ import Redis from 'ioredis';
 import { loadFromDaemon, loadFromRedis, subscribeToUpdates, type DaemonCache } from './utils/daemon-client';
 import { focusVSCodeInstance, createNewTerminal } from './utils/vscode';
 import { recordUsage, getUsageHistory } from './utils/cache';
-import type { InstanceWithStatus } from './types';
+import type { InstanceWithStatus, ClaudeSession } from './types';
 
 interface ZshTerminalState {
   terminalId: string;
@@ -108,9 +108,9 @@ async function getTerminalsForInstance(instance: InstanceWithStatus): Promise<En
   const claudeSessions = instance.claudeStatus?.sessions || {};
 
   // Helper to find Claude session for a terminal
-  const findClaudeSession = (terminalPid: number, zshPid?: number, terminalId?: string) => {
+  const findClaudeSession = (terminalPid: number, zshPid?: number, terminalId?: string): ClaudeSession | null => {
     // Check all sessions to see if any match this terminal
-    for (const [sessionPid, session] of Object.entries(claudeSessions)) {
+    for (const [sessionPid, session] of Object.entries(claudeSessions) as [string, ClaudeSession][]) {
       const pid = parseInt(sessionPid, 10);
 
       // Match by:

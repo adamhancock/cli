@@ -46,6 +46,13 @@ export interface PRStatus {
   };
 }
 
+export interface ClaudeSession {
+  status: 'working' | 'waiting' | 'idle' | 'finished';
+  terminalId?: string;
+  terminalPid?: number;
+  finishedAt?: number;
+}
+
 export interface ClaudeStatus {
   active: boolean;
   pid: number;
@@ -58,6 +65,7 @@ export interface ClaudeStatus {
   terminalId?: string; // Terminal ID where Claude is running
   terminalPid?: number; // Terminal PID where Claude was launched
   vscodePid?: number; // VSCode PID if running in VSCode terminal
+  sessions?: Record<string, ClaudeSession>; // Map of PID to session info
 }
 
 export interface TmuxStatus {
