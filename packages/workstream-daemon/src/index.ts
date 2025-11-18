@@ -14,6 +14,7 @@ import {
   INSTANCE_TTL
 } from './redis-client.js';
 import { spotlightMonitor } from './spotlight-monitor.js';
+import { getEventStore, closeEventStore } from './event-store.js';
 
 // Disable verbose output from zx
 $.verbose = false;
@@ -258,10 +259,76 @@ class WorkstreamDaemon {
       }
     });
 
+    // Subscribe to VSCode workspace events
+    this.subscriber.subscribe(REDIS_CHANNELS.VSCODE_WORKSPACE, (err) => {
+      if (err) {
+        logError('Failed to subscribe to VSCode workspace channel:', err);
+      } else {
+        log('Subscribed to VSCode workspace channel');
+      }
+    });
+
+    // Subscribe to VSCode file events
+    this.subscriber.subscribe(REDIS_CHANNELS.VSCODE_FILE, (err) => {
+      if (err) {
+        logError('Failed to subscribe to VSCode file channel:', err);
+      } else {
+        log('Subscribed to VSCode file channel');
+      }
+    });
+
+    // Subscribe to VSCode git events
+    this.subscriber.subscribe(REDIS_CHANNELS.VSCODE_GIT, (err) => {
+      if (err) {
+        logError('Failed to subscribe to VSCode git channel:', err);
+      } else {
+        log('Subscribed to VSCode git channel');
+      }
+    });
+
+    // Subscribe to VSCode terminal events
+    this.subscriber.subscribe(REDIS_CHANNELS.VSCODE_TERMINAL, (err) => {
+      if (err) {
+        logError('Failed to subscribe to VSCode terminal channel:', err);
+      } else {
+        log('Subscribed to VSCode terminal channel');
+      }
+    });
+
+    // Subscribe to notifications channel
+    this.subscriber.subscribe(REDIS_CHANNELS.NOTIFICATIONS, (err) => {
+      if (err) {
+        logError('Failed to subscribe to notifications channel:', err);
+      } else {
+        log('Subscribed to notifications channel');
+      }
+    });
+
+    // Subscribe to updates channel
+    this.subscriber.subscribe(REDIS_CHANNELS.UPDATES, (err) => {
+      if (err) {
+        logError('Failed to subscribe to updates channel:', err);
+      } else {
+        log('Subscribed to updates channel');
+      }
+    });
+
+    // Subscribe to Chrome updates channel
+    this.subscriber.subscribe(REDIS_CHANNELS.CHROME_UPDATES, (err) => {
+      if (err) {
+        logError('Failed to subscribe to Chrome updates channel:', err);
+      } else {
+        log('Subscribed to Chrome updates channel');
+      }
+    });
+
     this.subscriber.on('message', async (channel, message) => {
       try {
         const data = JSON.parse(message);
         log(`📨 Received message on ${channel}: ${data.type}`);
+
+        // Store all events in the database
+        await this.storeEvent(channel, message, data);
 
         if (channel === REDIS_CHANNELS.REFRESH) {
           // Handle general refresh requests
@@ -307,6 +374,51 @@ class WorkstreamDaemon {
         logError('Error handling message:', error);
       }
     });
+  }
+
+  /**
+   * Store an event in the database and publish to events channel
+   */
+  private async storeEvent(channel: string, message: string, data: any) {
+    try {
+      const eventStore = getEventStore();
+      const timestamp = data.timestamp || Date.now();
+      const eventType = data.type || 'unknown';
+      const workspacePath = data.path || data.workspacePath || null;
+
+      // Store event in database
+      eventStore.storeEvent({
+        timestamp,
+        channel,
+        event_type: eventType,
+        workspace_path: workspacePath,
+        data: message,
+      });
+
+      // Publish to events channel for real-time updates
+      await this.publisher.publish(
+        REDIS_CHANNELS.EVENTS_NEW,
+        JSON.stringify({
+          timestamp,
+          channel,
+          event_type: eventType,
+          workspace_path: workspacePath,
+          data: data,
+        })
+      );
+
+      // Update Redis snapshot with recent events (last 100)
+      const recentEvents = eventStore.getRecentEvents(100);
+      await this.redis.set(
+        REDIS_KEYS.EVENTS_RECENT,
+        JSON.stringify(recentEvents),
+        'EX',
+        60 // 60 second TTL
+      );
+    } catch (error) {
+      // Don't log errors for event storage to avoid spam
+      // Events are nice-to-have, not critical
+    }
   }
 
   private async publishUpdate() {
@@ -446,6 +558,9 @@ class WorkstreamDaemon {
     await this.subscriber.unsubscribe();
     await this.subscriber.quit();
     await closeRedisConnections();
+
+    // Close event store database connection
+    closeEventStore();
 
     log('Daemon stopped');
   }

@@ -119,6 +119,13 @@
       "subtitle": "Workstream",
       "description": "Quick switcher for VSCode integrated terminals with live command tracking via zsh hooks",
       "mode": "view"
+    },
+    {
+      "name": "event-viewer",
+      "title": "View Workstream Events",
+      "subtitle": "Workstream",
+      "description": "View all workstream events in real-time with timeline view and filtering by workspace",
+      "mode": "view"
     }
   ],
   "dependencies": {

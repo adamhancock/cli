@@ -7,6 +7,7 @@ export const REDIS_KEYS = {
   TIMESTAMP: 'workstream:timestamp',
   CHROME_WINDOWS: 'workstream:chrome:windows',
   DAEMON_LOCK: 'workstream:daemon:lock',
+  EVENTS_RECENT: 'workstream:events:recent',
 } as const;
 
 export const REDIS_CHANNELS = {
@@ -16,6 +17,11 @@ export const REDIS_CHANNELS = {
   CHROME_UPDATES: 'workstream:chrome:updates',
   NOTIFICATIONS: 'workstream:notifications',
   VSCODE_HEARTBEAT: 'workstream:vscode:heartbeat',
+  VSCODE_WORKSPACE: 'workstream:vscode:workspace',
+  VSCODE_FILE: 'workstream:vscode:file',
+  VSCODE_GIT: 'workstream:vscode:git',
+  VSCODE_TERMINAL: 'workstream:vscode:terminal',
+  EVENTS_NEW: 'workstream:events:new',
 } as const;
 
 // TTL for instance data (30 seconds - auto-expires if daemon stops)

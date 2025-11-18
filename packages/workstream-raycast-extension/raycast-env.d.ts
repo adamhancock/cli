@@ -44,6 +44,8 @@ declare namespace Preferences {
   export type ViewDevLogs = ExtensionPreferences & {}
   /** Preferences accessible in the `terminal-switcher` command */
   export type TerminalSwitcher = ExtensionPreferences & {}
+  /** Preferences accessible in the `event-viewer` command */
+  export type EventViewer = ExtensionPreferences & {}
 }
 
 declare namespace Arguments {
@@ -71,5 +73,7 @@ declare namespace Arguments {
   export type ViewDevLogs = {}
   /** Arguments passed to the `terminal-switcher` command */
   export type TerminalSwitcher = {}
+  /** Arguments passed to the `event-viewer` command */
+  export type EventViewer = {}
 }
 
