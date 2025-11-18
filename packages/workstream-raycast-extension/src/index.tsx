@@ -1043,6 +1043,13 @@ export default function Command() {
                   />
                 )}
 
+                <Action.OpenInBrowser
+                  title="Open Queue Dashboard"
+                  url={`http://localhost:9999?instance=${encodeURIComponent(instance.name)}`}
+                  icon={Icon.List}
+                  shortcut={{ modifiers: ['cmd', 'shift'], key: 'q' }}
+                />
+
                 {instance.tmuxStatus?.exists && (
                   <>
                     <Action

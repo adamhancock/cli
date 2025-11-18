@@ -15,6 +15,7 @@ import {
 } from './redis-client.js';
 import { spotlightMonitor } from './spotlight-monitor.js';
 import { getEventStore, closeEventStore } from './event-store.js';
+import { BullBoardServer } from './bull-board-server.js';
 
 // Disable verbose output from zx
 $.verbose = false;
@@ -220,6 +221,7 @@ class WorkstreamDaemon {
   private ghRateLimit?: GitHubRateLimit;
   private lastRateLimitCheck: number = 0;
   private previousPRStates: Map<string, { conclusion: 'success' | 'failure' | 'pending'; mergeable?: string }> = new Map();
+  private bullBoard: BullBoardServer;
 
   constructor() {
     this.redis = getRedisClient();
@@ -229,6 +231,10 @@ class WorkstreamDaemon {
       port: 6379,
     });
     this.setupSubscriber();
+
+    // Initialize Bull Board server
+    const bullBoardPort = parseInt(process.env.BULL_BOARD_PORT || '9999');
+    this.bullBoard = new BullBoardServer(bullBoardPort);
   }
 
   private setupSubscriber() {
@@ -521,6 +527,10 @@ class WorkstreamDaemon {
     // Start polling with dynamic interval
     this.scheduleNextPoll();
 
+    // Start Bull Board HTTP server
+    log('📊 Starting Bull Board...');
+    await this.bullBoard.start();
+
     log('');
     log('✅ Daemon running');
     log(`   Polling interval: ${this.currentPollInterval}ms`);
@@ -547,6 +557,9 @@ class WorkstreamDaemon {
     if (this.pollTimer) {
       clearTimeout(this.pollTimer);
     }
+
+    // Stop Bull Board server
+    await this.bullBoard.stop();
 
     // Disconnect all spotlight monitoring streams
     spotlightMonitor.disconnectAll();

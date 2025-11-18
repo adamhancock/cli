@@ -1,6 +1,6 @@
 {
   "name": "@adamhancock/workstream-daemon",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "description": "Background daemon that maintains real-time VS Code instance and Chrome tab metadata for instant access",
   "type": "module",
   "bin": {
@@ -21,9 +21,15 @@
   "author": "adamhancock",
   "license": "MIT",
   "dependencies": {
+    "@bull-board/api": "^6.14.2",
+    "@bull-board/express": "^6.14.2",
+    "@bull-board/ui": "^6.14.2",
     "@types/better-sqlite3": "^7.6.13",
+    "@types/express": "^5.0.0",
     "better-sqlite3": "^12.4.1",
+    "bullmq": "^5.37.0",
     "eventsource": "^2.0.2",
+    "express": "^4.21.2",
     "ioredis": "^5.4.1",
     "tsx": "^4.19.2",
     "zx": "^8.2.4"
