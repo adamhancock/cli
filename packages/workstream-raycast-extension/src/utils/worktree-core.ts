@@ -338,6 +338,44 @@ export async function createWorktree(options: CreateWorktreeOptions): Promise<Cr
     const absoluteWorktreePath = resolve(repoPath, worktreePath);
     onOutput?.(`Worktree path: ${absoluteWorktreePath}`, 'info');
 
+    // First, check if this path is already in git's worktree registry
+    // This catches cases where the directory was deleted manually but git still tracks it
+    try {
+      const worktreeListResult = await execInDir('git worktree list --porcelain', repoPath);
+      const worktreeEntries = worktreeListResult.stdout.split('\n\n').filter(Boolean);
+
+      for (const entry of worktreeEntries) {
+        const lines = entry.split('\n');
+        const worktreeLine = lines.find(l => l.startsWith('worktree '));
+        if (worktreeLine) {
+          const registeredPath = worktreeLine.replace('worktree ', '').trim();
+          if (registeredPath === absoluteWorktreePath) {
+            if (options.force) {
+              onOutput?.(`Found existing worktree registration at ${absoluteWorktreePath}, removing...`, 'warning');
+              try {
+                await execInDir(`git worktree remove "${absoluteWorktreePath}" --force`, repoPath);
+                onOutput?.('Worktree registration removed', 'info');
+              } catch (err) {
+                // If remove fails, try prune to clean up the registry
+                onOutput?.('Git worktree remove failed, pruning stale entries...', 'warning');
+                await execInDir('git worktree prune', repoPath);
+              }
+            } else {
+              throw new Error(`Worktree already registered at ${absoluteWorktreePath}. Use force option to recreate.`);
+            }
+            break;
+          }
+        }
+      }
+    } catch (err) {
+      // If we can't read worktree list, continue - might be an old git version
+      if (err instanceof Error && !err.message.includes('already registered')) {
+        onOutput?.(`Warning: Could not check worktree registry: ${err.message}`, 'warning');
+      } else {
+        throw err;
+      }
+    }
+
     // Check if worktree directory already exists
     if (existsSync(absoluteWorktreePath)) {
       if (options.force) {
