@@ -351,7 +351,22 @@ export async function createWorktree(options: CreateWorktreeOptions): Promise<Cr
           // Fallback: if git worktree remove fails (e.g., directory not in Git's registry),
           // manually remove the directory and prune stale worktree entries
           onOutput?.('Git worktree remove failed, falling back to manual cleanup', 'warning');
-          await execAsync(`rm -rf "${absoluteWorktreePath}"`);
+
+          // Use rm -rf with proper shell context to ensure complete removal
+          try {
+            await execInDir(`rm -rf "${absoluteWorktreePath}"`, repoPath);
+          } catch (rmErr) {
+            // If that fails, try with sudo-like force (though this shouldn't be needed)
+            onOutput?.('Standard rm failed, trying direct filesystem removal', 'warning');
+            const fs = await import('fs/promises');
+            await fs.rm(absoluteWorktreePath, { recursive: true, force: true, maxRetries: 3 });
+          }
+
+          // Verify directory is actually gone
+          if (existsSync(absoluteWorktreePath)) {
+            throw new Error(`Failed to remove directory: ${absoluteWorktreePath} still exists after cleanup attempts`);
+          }
+
           await execInDir('git worktree prune', repoPath);
           onOutput?.('Directory removed and worktree registry pruned', 'info');
         }

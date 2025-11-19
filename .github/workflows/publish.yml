@@ -14,6 +14,7 @@ on:
       - 'packages/**/package.json'
       - '!packages/workstream-raycast-extension/**'
       - '!packages/workstream-streamdeck-plugin/**'
+      - '!apps/workstream-dashboard-app/**'
 
 jobs:
   publish:
@@ -59,7 +60,7 @@ jobs:
         if: github.event.inputs.package
         run: |
           # Packages to exclude from publishing
-          EXCLUDED_PACKAGES="workstream-raycast-extension workstream-vscode-extension workstream-streamdeck-plugin"
+          EXCLUDED_PACKAGES="workstream-raycast-extension workstream-vscode-extension workstream-streamdeck-plugin workstream-dashboard-app"
 
           if echo "$EXCLUDED_PACKAGES" | grep -q "${{ github.event.inputs.package }}"; then
             echo "Skipping excluded package: ${{ github.event.inputs.package }}"
@@ -84,7 +85,7 @@ jobs:
         if: github.event_name == 'push' && !github.event.inputs.package
         run: |
           # Packages to exclude from publishing
-          EXCLUDED_PACKAGES="workstream-raycast-extension workstream-vscode-extension workstream-streamdeck-plugin"
+          EXCLUDED_PACKAGES="workstream-raycast-extension workstream-vscode-extension workstream-streamdeck-plugin workstream-dashboard-app"
 
           # Get changed package directories
           CHANGED_PACKAGES=$(git diff --name-only HEAD~1 HEAD | grep '^packages/.*/package.json$' | cut -d'/' -f1,2 | sort -u)
@@ -134,7 +135,7 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && !github.event.inputs.package
         run: |
           # Packages to exclude from publishing
-          EXCLUDED_PACKAGES="workstream-raycast-extension workstream-vscode-extension workstream-streamdeck-plugin"
+          EXCLUDED_PACKAGES="workstream-raycast-extension workstream-vscode-extension workstream-streamdeck-plugin workstream-dashboard-app"
 
           # Publish all packages with version changes
           for pkg_dir in packages/*; do

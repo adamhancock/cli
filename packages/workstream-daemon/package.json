@@ -1,6 +1,6 @@
 {
   "name": "@adamhancock/workstream-daemon",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "Background daemon that maintains real-time VS Code instance and Chrome tab metadata for instant access",
   "type": "module",
   "bin": {
@@ -31,11 +31,13 @@
     "eventsource": "^2.0.2",
     "express": "^4.21.2",
     "ioredis": "^5.4.1",
+    "socket.io": "^4.8.1",
     "tsx": "^4.19.2",
     "zx": "^8.2.4"
   },
   "devDependencies": {
     "@types/node": "^22.13.10",
+    "socket.io-client": "^4.8.1",
     "typescript": "^5.4.5"
   }
 }

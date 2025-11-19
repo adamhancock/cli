@@ -16,6 +16,8 @@ import {
 import { spotlightMonitor } from './spotlight-monitor.js';
 import { getEventStore, closeEventStore } from './event-store.js';
 import { BullBoardServer } from './bull-board-server.js';
+import { WebSocketServer } from './websocket-server.js';
+import { getAuthToken } from './auth.js';
 
 // Disable verbose output from zx
 $.verbose = false;
@@ -222,6 +224,7 @@ class WorkstreamDaemon {
   private lastRateLimitCheck: number = 0;
   private previousPRStates: Map<string, { conclusion: 'success' | 'failure' | 'pending'; mergeable?: string }> = new Map();
   private bullBoard: BullBoardServer;
+  private websocketServer?: WebSocketServer;
 
   constructor() {
     this.redis = getRedisClient();
@@ -531,10 +534,22 @@ class WorkstreamDaemon {
     log('📊 Starting Bull Board...');
     await this.bullBoard.start();
 
+    // Initialize and start WebSocket server
+    log('🔌 Starting WebSocket server...');
+    const token = await getAuthToken();
+    const websocketPort = parseInt(process.env.WEBSOCKET_PORT || '9995');
+    this.websocketServer = new WebSocketServer({
+      port: websocketPort,
+      redis: this.redis,
+      token
+    });
+    await this.websocketServer.start();
+
     log('');
     log('✅ Daemon running');
     log(`   Polling interval: ${this.currentPollInterval}ms`);
     log(`   Cache file: ${CACHE_FILE}`);
+    log(`   Auth Token: ${token}`);
     log(`   Redis channels:`);
     log(`     - Updates: ${REDIS_CHANNELS.UPDATES}`);
     log(`     - Refresh: ${REDIS_CHANNELS.REFRESH}`);
@@ -556,6 +571,11 @@ class WorkstreamDaemon {
   async stop() {
     if (this.pollTimer) {
       clearTimeout(this.pollTimer);
+    }
+
+    // Stop WebSocket server
+    if (this.websocketServer) {
+      await this.websocketServer.stop();
     }
 
     // Stop Bull Board server
