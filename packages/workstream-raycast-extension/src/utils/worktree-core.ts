@@ -342,8 +342,19 @@ export async function createWorktree(options: CreateWorktreeOptions): Promise<Cr
     if (existsSync(absoluteWorktreePath)) {
       if (options.force) {
         onOutput?.(`Removing existing directory: ${absoluteWorktreePath}`, 'warning');
-        await execAsync(`rm -rf "${absoluteWorktreePath}"`);
-        onOutput?.('Directory removed', 'info');
+
+        // Use git worktree remove to properly clean up Git's internal registry
+        try {
+          await execInDir(`git worktree remove "${absoluteWorktreePath}" --force`, repoPath);
+          onOutput?.('Worktree removed', 'info');
+        } catch (err) {
+          // Fallback: if git worktree remove fails (e.g., directory not in Git's registry),
+          // manually remove the directory and prune stale worktree entries
+          onOutput?.('Git worktree remove failed, falling back to manual cleanup', 'warning');
+          await execAsync(`rm -rf "${absoluteWorktreePath}"`);
+          await execInDir('git worktree prune', repoPath);
+          onOutput?.('Directory removed and worktree registry pruned', 'info');
+        }
       } else {
         throw new Error(`Directory ${absoluteWorktreePath} already exists`);
       }
