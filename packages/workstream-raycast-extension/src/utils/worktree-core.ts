@@ -1,6 +1,7 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { existsSync, readFileSync } from 'fs';
+import { promises as fs } from 'fs';
 import { join, dirname, resolve } from 'path';
 import { homedir } from 'os';
 import type {
@@ -9,6 +10,52 @@ import type {
 } from '../types/worktree-config';
 
 const execAsync = promisify(exec);
+
+/**
+ * Execute a shell command in a specific directory with targeted retry logic
+ * Only retries on specific transient filesystem race conditions
+ */
+async function execInDirWithRetry(
+  command: string,
+  cwd: string,
+  maxRetries: number = 1,
+  retryDelay: number = 300,
+  onOutput?: OutputCallback
+): Promise<{ stdout: string; stderr: string }> {
+  let lastError: Error | undefined;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      if (attempt > 0) {
+        // Wait before retrying
+        onOutput?.(`Retrying command (attempt ${attempt + 1}/${maxRetries + 1})...`, 'warning');
+        await new Promise((resolve) => setTimeout(resolve, retryDelay));
+      }
+      return await execInDir(command, cwd);
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+
+      // Only retry on specific transient race condition errors that might still occur
+      // despite our proactive cleanup (e.g., filesystem delays, NFS issues)
+      const isTransientError =
+        lastError.message.includes('cannot create directory') ||
+        lastError.message.includes('No such file or directory') ||
+        lastError.message.includes('already exists');
+
+      const shouldRetry = isTransientError && attempt < maxRetries;
+
+      if (shouldRetry) {
+        onOutput?.(`Transient filesystem error detected, will retry: ${lastError.message}`, 'warning');
+        continue;
+      }
+
+      // Don't retry on other errors (permissions, invalid refs, git config issues, etc.)
+      throw lastError;
+    }
+  }
+
+  throw lastError || new Error('Command failed after all retry attempts');
+}
 
 /**
  * Execute a shell command in a specific directory
@@ -338,79 +385,19 @@ export async function createWorktree(options: CreateWorktreeOptions): Promise<Cr
     const absoluteWorktreePath = resolve(repoPath, worktreePath);
     onOutput?.(`Worktree path: ${absoluteWorktreePath}`, 'info');
 
-    // First, check if this path is already in git's worktree registry
-    // This catches cases where the directory was deleted manually but git still tracks it
+    // Prune any stale worktree entries from git's registry
+    // This prevents issues with lingering references from previously failed operations
     try {
-      const worktreeListResult = await execInDir('git worktree list --porcelain', repoPath);
-      const worktreeEntries = worktreeListResult.stdout.split('\n\n').filter(Boolean);
-
-      for (const entry of worktreeEntries) {
-        const lines = entry.split('\n');
-        const worktreeLine = lines.find(l => l.startsWith('worktree '));
-        if (worktreeLine) {
-          const registeredPath = worktreeLine.replace('worktree ', '').trim();
-          if (registeredPath === absoluteWorktreePath) {
-            if (options.force) {
-              onOutput?.(`Found existing worktree registration at ${absoluteWorktreePath}, removing...`, 'warning');
-              try {
-                await execInDir(`git worktree remove "${absoluteWorktreePath}" --force`, repoPath);
-                onOutput?.('Worktree registration removed', 'info');
-              } catch (err) {
-                // If remove fails, try prune to clean up the registry
-                onOutput?.('Git worktree remove failed, pruning stale entries...', 'warning');
-                await execInDir('git worktree prune', repoPath);
-              }
-            } else {
-              throw new Error(`Worktree already registered at ${absoluteWorktreePath}. Use force option to recreate.`);
-            }
-            break;
-          }
-        }
-      }
+      onOutput?.('Pruning stale worktree entries...', 'info');
+      await execInDir('git worktree prune', repoPath);
     } catch (err) {
-      // If we can't read worktree list, continue - might be an old git version
-      if (err instanceof Error && !err.message.includes('already registered')) {
-        onOutput?.(`Warning: Could not check worktree registry: ${err.message}`, 'warning');
-      } else {
-        throw err;
-      }
+      // Prune failure is not critical, continue
+      onOutput?.('Warning: Could not prune worktrees', 'warning');
     }
 
-    // Check if worktree directory already exists
-    if (existsSync(absoluteWorktreePath)) {
-      if (options.force) {
-        onOutput?.(`Removing existing directory: ${absoluteWorktreePath}`, 'warning');
-
-        // Use git worktree remove to properly clean up Git's internal registry
-        try {
-          await execInDir(`git worktree remove "${absoluteWorktreePath}" --force`, repoPath);
-          onOutput?.('Worktree removed', 'info');
-        } catch (err) {
-          // Fallback: if git worktree remove fails (e.g., directory not in Git's registry),
-          // manually remove the directory and prune stale worktree entries
-          onOutput?.('Git worktree remove failed, falling back to manual cleanup', 'warning');
-
-          // Use rm -rf with proper shell context to ensure complete removal
-          try {
-            await execInDir(`rm -rf "${absoluteWorktreePath}"`, repoPath);
-          } catch (rmErr) {
-            // If that fails, try with sudo-like force (though this shouldn't be needed)
-            onOutput?.('Standard rm failed, trying direct filesystem removal', 'warning');
-            const fs = await import('fs/promises');
-            await fs.rm(absoluteWorktreePath, { recursive: true, force: true, maxRetries: 3 });
-          }
-
-          // Verify directory is actually gone
-          if (existsSync(absoluteWorktreePath)) {
-            throw new Error(`Failed to remove directory: ${absoluteWorktreePath} still exists after cleanup attempts`);
-          }
-
-          await execInDir('git worktree prune', repoPath);
-          onOutput?.('Directory removed and worktree registry pruned', 'info');
-        }
-      } else {
-        throw new Error(`Directory ${absoluteWorktreePath} already exists`);
-      }
+    // Check if worktree already exists and handle based on force option
+    if (existsSync(absoluteWorktreePath) && !options.force) {
+      throw new Error(`Directory ${absoluteWorktreePath} already exists. Use force option to recreate.`);
     }
 
     // Ensure parent directory exists
@@ -452,23 +439,53 @@ export async function createWorktree(options: CreateWorktreeOptions): Promise<Cr
       }
     }
 
+    // Proactively remove the target directory immediately before git worktree add
+    // This is the most reliable way to prevent EEXIST errors and .claude directory issues
+    // The 'force: true' option prevents an error if the path doesn't exist
+    onOutput?.('Ensuring clean worktree path...', 'info');
+    try {
+      await fs.rm(absoluteWorktreePath, { recursive: true, force: true, maxRetries: 3 });
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      onOutput?.(`Warning: Could not clean worktree path: ${errorMsg}`, 'warning');
+      // Continue anyway - fs.rm with force:true should not throw
+    }
+
+    // Also ensure git's registry is clean
+    try {
+      await execInDir(`git worktree remove "${absoluteWorktreePath}" --force`, repoPath);
+    } catch (err) {
+      // Expected to fail if worktree doesn't exist in registry - this is fine
+    }
+
+    // Final prune to ensure registry is clean
+    try {
+      await execInDir('git worktree prune', repoPath);
+    } catch (err) {
+      // Not critical
+    }
+
     // Create the worktree with the appropriate branch
     const localExists = await branchExists(repoPath, selectedBranch, 'local', remote);
     const remoteExists = await branchExists(repoPath, selectedBranch, 'remote', remote);
 
-    if (localExists) {
-      onOutput?.(`Creating worktree with existing local branch: ${selectedBranch}`, 'info');
-      await execInDir(`git worktree add ${absoluteWorktreePath} ${selectedBranch}`, repoPath);
-    } else if (remoteExists) {
-      onOutput?.(`Creating worktree from remote branch: ${selectedBranch}`, 'info');
-      await execInDir(`git worktree add ${absoluteWorktreePath} -b ${selectedBranch} ${remote}/${selectedBranch}`, repoPath);
-    } else {
-      onOutput?.(`Creating worktree with new branch: ${selectedBranch} from ${baseBranch}`, 'info');
-      await execInDir(`git worktree add ${absoluteWorktreePath} -b ${selectedBranch} ${remote}/${baseBranch}`, repoPath);
+    try {
+      if (localExists) {
+        onOutput?.(`Creating worktree with existing local branch: ${selectedBranch}`, 'info');
+        await execInDirWithRetry(`git worktree add "${absoluteWorktreePath}" ${selectedBranch}`, repoPath, 1, 300, onOutput);
+      } else if (remoteExists) {
+        onOutput?.(`Creating worktree from remote branch: ${selectedBranch}`, 'info');
+        await execInDirWithRetry(`git worktree add "${absoluteWorktreePath}" -b ${selectedBranch} ${remote}/${selectedBranch}`, repoPath, 1, 300, onOutput);
+      } else {
+        onOutput?.(`Creating worktree with new branch: ${selectedBranch} from ${baseBranch}`, 'info');
+        await execInDirWithRetry(`git worktree add "${absoluteWorktreePath}" -b ${selectedBranch} ${remote}/${baseBranch}`, repoPath, 1, 300, onOutput);
+      }
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      throw new Error(`Failed to create worktree at ${absoluteWorktreePath}: ${errorMsg}`);
     }
 
-    // Wait for git to settle
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // Worktree created successfully - no artificial delay needed with deterministic cleanup
 
     // Set up branch tracking
     try {
