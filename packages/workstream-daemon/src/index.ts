@@ -65,7 +65,7 @@ interface PRStatus {
 
 interface ClaudeSessionInfo {
   pid: number;
-  status: 'working' | 'waiting' | 'idle' | 'finished';
+  status: 'working' | 'waiting' | 'idle' | 'finished' | 'checking' | 'compacting';
   terminalName?: string;  // VSCode terminal name (e.g., "bash", "zsh", "Terminal 1")
   terminalId?: string;
   terminalPid?: number;
@@ -84,6 +84,8 @@ interface ClaudeStatus {
   pid: number;
   isWorking: boolean;
   isWaiting?: boolean;
+  isChecking?: boolean;
+  isCompacting?: boolean;
   claudeFinished?: boolean;
   lastEventTime?: number;
   workStartedAt?: number;
@@ -364,6 +366,9 @@ class WorkstreamDaemon {
           } else if (data.type === 'waiting_for_input') {
             log(`  ⏸️  Claude waiting for input in ${projectName}${terminalInfo ? ` [${terminalInfo}]` : ''}${claudePid ? ` (PID: ${claudePid})` : ''}`);
             await this.handleClaudeWaiting(data.path, claudePid, terminalName, terminalId, terminalPid, vscodePid);
+          } else if (data.type === 'compacting_started') {
+            log(`  🔄 Claude compacting context in ${projectName}${terminalInfo ? ` [${terminalInfo}]` : ''}${claudePid ? ` (PID: ${claudePid})` : ''}`);
+            await this.handleClaudeCompacting(data.path, claudePid, terminalName, terminalId, terminalPid, vscodePid);
           } else if (data.type === 'work_stopped') {
             log(`  ⏹️  Claude stopped in ${projectName}${terminalInfo ? ` [${terminalInfo}]` : ''}${claudePid ? ` (PID: ${claudePid})` : ''}`);
             await this.handleClaudeFinished(data.path, claudePid, terminalName, terminalId, terminalPid, vscodePid);
@@ -1081,6 +1086,40 @@ class WorkstreamDaemon {
       enriched.claudeStatus = this.checkClaudeTimeout(enriched.claudeStatus);
     }
 
+    // Apply intelligent status based on PR checks
+    if (enriched.claudeStatus && enriched.prStatus?.checks?.conclusion === 'pending') {
+      // If PR checks are pending, update status based on Claude's current state
+      const updatedSessions: Record<number, ClaudeSessionInfo> = {};
+
+      for (const [pid, session] of Object.entries(enriched.claudeStatus.sessions)) {
+        if (session.status === 'idle' || session.status === 'finished') {
+          // Change idle/finished to checking when PR checks are pending
+          updatedSessions[parseInt(pid, 10)] = {
+            ...session,
+            status: 'checking',
+          };
+        } else {
+          // Keep working/waiting status unchanged
+          updatedSessions[parseInt(pid, 10)] = session;
+        }
+      }
+
+      // Update the primary session status for legacy fields
+      const primaryPid = enriched.claudeStatus.primarySession;
+      const primarySession = primaryPid ? updatedSessions[primaryPid] : undefined;
+
+      if (primarySession) {
+        enriched.claudeStatus = {
+          ...enriched.claudeStatus,
+          sessions: updatedSessions,
+          isWorking: primarySession.status === 'working',
+          isWaiting: primarySession.status === 'waiting',
+          isChecking: primarySession.status === 'checking',
+          claudeFinished: primarySession.status === 'finished',
+        };
+      }
+    }
+
     // Get tmux status (local, fast)
     enriched.tmuxStatus = await this.getTmuxStatus(instance.path, enriched.gitInfo?.branch);
 
@@ -1328,6 +1367,7 @@ class WorkstreamDaemon {
           pid: primaryPid,
           isWorking: primarySession.status === 'working',
           isWaiting: primarySession.status === 'waiting',
+          isChecking: primarySession.status === 'checking',
           claudeFinished: primarySession.status === 'finished',
           lastEventTime: primarySession.lastActivity,
           workStartedAt: primarySession.workStartedAt,
@@ -1719,6 +1759,7 @@ class WorkstreamDaemon {
           instance.claudeStatus.active = true;
           instance.claudeStatus.isWorking = true;
           instance.claudeStatus.isWaiting = false;
+          instance.claudeStatus.isCompacting = false;
           instance.claudeStatus.workStartedAt = instance.claudeStatus.sessions[claudePid].workStartedAt;
           instance.claudeStatus.lastEventTime = now;
           if (terminalId) instance.claudeStatus.terminalId = terminalId;
@@ -1735,6 +1776,7 @@ class WorkstreamDaemon {
           const wasWaiting = instance.claudeStatus.isWaiting;
           instance.claudeStatus.isWorking = true;
           instance.claudeStatus.isWaiting = false;
+          instance.claudeStatus.isCompacting = false;
           instance.claudeStatus.workStartedAt = now;
           instance.claudeStatus.lastEventTime = now;
 
@@ -1750,6 +1792,87 @@ class WorkstreamDaemon {
       }
     } catch (error) {
       logError('Error handling Claude started:', error);
+    }
+  }
+
+  private async handleClaudeCompacting(repoPath: string, claudePid?: number, terminalName?: string, terminalId?: string, terminalPid?: number, vscodePid?: number) {
+    try {
+      const instance = this.instances.get(repoPath);
+      if (instance && instance.claudeStatus) {
+        const now = Date.now();
+
+        // If claudePid is provided, update the specific session
+        if (claudePid) {
+          // Fetch terminal context from Redis if not provided in the event
+          let terminalContext = null;
+          if (!terminalId && !terminalPid && !vscodePid) {
+            log(`🔍 Fetching terminal context for Claude PID ${claudePid}...`);
+            terminalContext = await this.getTerminalContextForClaude(claudePid);
+            if (terminalContext) {
+              log(`✅ Found terminal context: ${JSON.stringify(terminalContext)}`);
+            } else {
+              log(`❌ No terminal context found for Claude PID ${claudePid}`);
+            }
+          }
+
+          // Initialize sessions map if needed
+          if (!instance.claudeStatus.sessions) {
+            instance.claudeStatus.sessions = {};
+          }
+
+          // Get existing session or create new one
+          const existingSession = instance.claudeStatus.sessions[claudePid];
+
+          // Update or create session, merging terminal context from Redis if available
+          instance.claudeStatus.sessions[claudePid] = {
+            pid: claudePid,
+            status: 'compacting',
+            terminalName: terminalName || terminalContext?.terminalName || existingSession?.terminalName,
+            terminalId: terminalId || terminalContext?.terminalId || existingSession?.terminalId,
+            terminalPid: terminalPid ?? terminalContext?.terminalPid ?? existingSession?.terminalPid,
+            vscodePid: vscodePid ?? terminalContext?.vscodePid ?? existingSession?.vscodePid,
+            lastActivity: now,
+            workStartedAt: existingSession?.workStartedAt || now,
+          };
+
+          // Set as primary session
+          instance.claudeStatus.primarySession = claudePid;
+
+          // Update legacy fields for backwards compatibility
+          instance.claudeStatus.pid = claudePid;
+          instance.claudeStatus.active = true;
+          instance.claudeStatus.isWorking = false;
+          instance.claudeStatus.isWaiting = false;
+          instance.claudeStatus.isCompacting = true;
+          instance.claudeStatus.lastEventTime = now;
+          if (terminalId) instance.claudeStatus.terminalId = terminalId;
+          if (terminalPid !== undefined) instance.claudeStatus.terminalPid = terminalPid;
+          if (vscodePid !== undefined) instance.claudeStatus.vscodePid = vscodePid;
+
+          await this.writeCache();
+          await this.publishUpdate();
+
+          const projectName = repoPath.split('/').pop() || 'project';
+          log(`Claude compacting context in ${projectName}`);
+        } else {
+          // Fallback to legacy behavior if no PID provided
+          instance.claudeStatus.isWorking = false;
+          instance.claudeStatus.isWaiting = false;
+          instance.claudeStatus.isCompacting = true;
+          instance.claudeStatus.lastEventTime = now;
+
+          if (terminalId) instance.claudeStatus.terminalId = terminalId;
+          if (terminalPid !== undefined) instance.claudeStatus.terminalPid = terminalPid;
+          if (vscodePid !== undefined) instance.claudeStatus.vscodePid = vscodePid;
+
+          await this.writeCache();
+          await this.publishUpdate();
+
+          const projectName = repoPath.split('/').pop() || 'project';
+        }
+      }
+    } catch (error) {
+      logError('Error handling Claude compacting:', error);
     }
   }
 
@@ -1801,6 +1924,7 @@ class WorkstreamDaemon {
           instance.claudeStatus.active = true;
           instance.claudeStatus.isWaiting = true;
           instance.claudeStatus.isWorking = false;
+          instance.claudeStatus.isCompacting = false;
           instance.claudeStatus.lastEventTime = now;
           if (terminalId) instance.claudeStatus.terminalId = terminalId;
           if (terminalPid !== undefined) instance.claudeStatus.terminalPid = terminalPid;
@@ -1824,6 +1948,7 @@ class WorkstreamDaemon {
           // Fallback to legacy behavior if no PID provided
           instance.claudeStatus.isWaiting = true;
           instance.claudeStatus.isWorking = false;
+          instance.claudeStatus.isCompacting = false;
           instance.claudeStatus.lastEventTime = now;
 
           if (terminalId) instance.claudeStatus.terminalId = terminalId;
@@ -1897,6 +2022,7 @@ class WorkstreamDaemon {
             instance.claudeStatus.active = primarySession.status !== 'finished';
             instance.claudeStatus.isWorking = primarySession.status === 'working';
             instance.claudeStatus.isWaiting = primarySession.status === 'waiting';
+            instance.claudeStatus.isCompacting = primarySession.status === 'compacting';
             instance.claudeStatus.claudeFinished = primarySession.status === 'finished';
             instance.claudeStatus.finishedAt = primarySession.finishedAt;
             instance.claudeStatus.workStartedAt = primarySession.workStartedAt;
@@ -1921,6 +2047,7 @@ class WorkstreamDaemon {
           // Fallback to legacy behavior if no PID provided
           instance.claudeStatus.isWaiting = false;
           instance.claudeStatus.isWorking = false;
+          instance.claudeStatus.isCompacting = false;
           instance.claudeStatus.claudeFinished = true;
           instance.claudeStatus.finishedAt = now;
           instance.claudeStatus.workStartedAt = undefined;

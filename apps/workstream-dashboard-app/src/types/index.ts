@@ -39,7 +39,7 @@ export interface PRStatus {
 
 export interface ClaudeSessionInfo {
   pid: number;
-  status: 'working' | 'waiting' | 'idle' | 'finished';
+  status: 'working' | 'waiting' | 'idle' | 'finished' | 'checking' | 'compacting';
   terminalName?: string;
   terminalId?: string;
   terminalPid?: number;
@@ -58,6 +58,8 @@ export interface ClaudeStatus {
   pid: number;
   isWorking: boolean;
   isWaiting?: boolean;
+  isChecking?: boolean;
+  isCompacting?: boolean;
   claudeFinished?: boolean;
   lastEventTime?: number;
   workStartedAt?: number;
@@ -107,7 +109,7 @@ export interface Instance {
 
 export interface ClaudeEventData {
   path: string;
-  type: 'work_started' | 'waiting_for_input' | 'work_stopped';
+  type: 'work_started' | 'waiting_for_input' | 'work_stopped' | 'compacting_started';
   pid?: number;
   terminalName?: string;
   terminalId?: string;

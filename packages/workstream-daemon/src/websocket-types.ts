@@ -21,7 +21,7 @@ export interface ServerToClientEvents {
 
 export interface ClaudeEventData {
   path: string;
-  type: 'work_started' | 'waiting_for_input' | 'work_stopped';
+  type: 'work_started' | 'waiting_for_input' | 'work_stopped' | 'compacting_started';
   pid?: number;
   terminalName?: string;
   terminalId?: string;

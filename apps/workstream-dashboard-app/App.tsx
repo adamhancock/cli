@@ -4,6 +4,7 @@ import { InstanceTable } from './src/components/InstanceTable';
 import { NotificationList } from './src/components/NotificationList';
 import { ToastContainer } from './src/components/Toast';
 import { SettingsModal } from './src/components/SettingsModal';
+import { ConnectionStatus } from './src/components/ConnectionStatus';
 import { useWorkstream } from './src/hooks/useWorkstream';
 import { NotificationProvider, useNotifications } from './src/context/NotificationContext';
 import type { NotificationType } from './src/context/NotificationContext';
@@ -104,7 +105,15 @@ function AppContent() {
     ]);
   }, [addNotification]);
 
-  const { instances, isConnected, error, refresh } = useWorkstream({
+  const {
+    instances,
+    isConnected,
+    isReconnecting,
+    reconnectAttempt,
+    error,
+    refresh,
+    manualReconnect,
+  } = useWorkstream({
     serverUrl,
     token: serverToken,
     onNotification: handleNotification,
@@ -139,13 +148,16 @@ function AppContent() {
         </View>
       </View>
 
-      {/* Error message */}
-      {error && (
-        <View style={styles.errorBanner}>
-          <Text style={styles.errorText}>{error}</Text>
-          <Text style={styles.errorSubtext}>Make sure workstream daemon is running at {serverUrl}</Text>
-        </View>
-      )}
+      {/* Connection status banner */}
+      <View style={styles.connectionStatusContainer}>
+        <ConnectionStatus
+          isConnected={isConnected}
+          isReconnecting={isReconnecting}
+          reconnectAttempt={reconnectAttempt}
+          error={error}
+          onRetry={manualReconnect}
+        />
+      </View>
 
       {/* Main content area */}
       <View style={styles.contentArea}>
@@ -246,22 +258,9 @@ const styles = StyleSheet.create({
     backgroundColor: '#334155',
     borderRadius: 12,
   },
-  errorBanner: {
-    backgroundColor: '#7f1d1d',
-    borderBottomWidth: 1,
-    borderBottomColor: '#991b1b',
+  connectionStatusContainer: {
     paddingHorizontal: 24,
-    paddingVertical: 12,
-  },
-  errorText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#fecaca',
-    marginBottom: 4,
-  },
-  errorSubtext: {
-    fontSize: 12,
-    color: '#fca5a5',
+    paddingTop: 12,
   },
   settingsButton: {
     marginLeft: 16,

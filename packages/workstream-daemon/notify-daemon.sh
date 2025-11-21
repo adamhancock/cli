@@ -37,6 +37,9 @@ case "$HOOK_EVENT" in
       EVENT_TYPE="${1:-work_started}"
     fi
     ;;
+  PreCompact)
+    EVENT_TYPE="compacting_started"
+    ;;
   Stop)
     EVENT_TYPE="work_stopped"
     ;;

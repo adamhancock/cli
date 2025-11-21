@@ -167,13 +167,21 @@ function getPRStatus(instance: Instance) {
 function getClaudeStatus(instance: Instance) {
   if (!instance.claudeStatus?.active) return null;
 
-  const { isWorking, isWaiting, claudeFinished } = instance.claudeStatus;
+  const { isWorking, isWaiting, isChecking, isCompacting, claudeFinished } = instance.claudeStatus;
 
   if (claudeFinished) {
     return {
       type: 'claude' as const,
       status: 'success' as BadgeStatus,
       label: 'Finished',
+    };
+  }
+
+  if (isCompacting) {
+    return {
+      type: 'claude' as const,
+      status: 'info' as BadgeStatus,
+      label: 'Compacting',
     };
   }
 
@@ -190,6 +198,14 @@ function getClaudeStatus(instance: Instance) {
       type: 'claude' as const,
       status: 'warning' as BadgeStatus,
       label: 'Waiting',
+    };
+  }
+
+  if (isChecking) {
+    return {
+      type: 'claude' as const,
+      status: 'warning' as BadgeStatus,
+      label: 'Checking',
     };
   }
 

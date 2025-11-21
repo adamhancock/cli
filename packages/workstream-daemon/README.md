@@ -198,6 +198,10 @@ The daemon can receive real-time notifications from Claude Code via hooks:
          "matcher": "*",
          "hooks": [{"type": "command", "command": "~/.claude/notify-daemon.sh"}]
        }],
+       "PreCompact": [{
+         "matcher": "*",
+         "hooks": [{"type": "command", "command": "~/.claude/notify-daemon.sh"}]
+       }],
        "Notification": [{
          "matcher": "*",
          "hooks": [{"type": "command", "command": "~/.claude/notify-daemon.sh"}]
@@ -213,8 +217,9 @@ The daemon can receive real-time notifications from Claude Code via hooks:
    **Note**: The hook script automatically parses the event type from Claude's JSON context. It detects:
    - AskUserQuestion and ExitPlanMode tools (interactive prompts)
    - Notification events with type `permission_prompt` (tool approval) or `idle_prompt` (waiting for input)
+   - PreCompact events (context compaction)
 
-   These trigger `waiting_for_input` status instead of `work_started`. No arguments needed!
+   These trigger appropriate status changes (`waiting_for_input`, `compacting_started`, etc.). No arguments needed!
 
 ### What It Does
 
@@ -245,11 +250,14 @@ echo '{"session_id":"test"}' | CLAUDE_PROJECT_DIR="$(pwd)" ~/.claude/notify-daem
 # Test waiting for input
 echo '{"session_id":"test"}' | CLAUDE_PROJECT_DIR="$(pwd)" ~/.claude/notify-daemon.sh waiting_for_input
 
+# Test compacting context
+echo '{"session_id":"test"}' | CLAUDE_PROJECT_DIR="$(pwd)" ~/.claude/notify-daemon.sh compacting_started
+
 # Test work stopped
 echo '{"session_id":"test"}' | CLAUDE_PROJECT_DIR="$(pwd)" ~/.claude/notify-daemon.sh work_stopped
 ```
 
-You should see status updates in Raycast and notifications for waiting/finished events.
+You should see status updates in Raycast and notifications for waiting/finished events. The compacting status will show as "Compacting" in the dashboard.
 
 ## How Clients Use It
 

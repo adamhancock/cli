@@ -30,12 +30,16 @@ declare namespace Preferences {
   export type OpenDevEnvironment = ExtensionPreferences & {}
   /** Preferences accessible in the `chrome-tabs` command */
   export type ChromeTabs = ExtensionPreferences & {}
+  /** Preferences accessible in the `set-chrome-profile` command */
+  export type SetChromeProfile = ExtensionPreferences & {}
   /** Preferences accessible in the `open-active-dev-instance` command */
   export type OpenActiveDevInstance = ExtensionPreferences & {}
   /** Preferences accessible in the `open-spotlight-environment` command */
   export type OpenSpotlightEnvironment = ExtensionPreferences & {}
   /** Preferences accessible in the `open-pr-in-chrome` command */
   export type OpenPrInChrome = ExtensionPreferences & {}
+  /** Preferences accessible in the `setup-caddy-route` command */
+  export type SetupCaddyRoute = ExtensionPreferences & {}
   /** Preferences accessible in the `cleanup-stale-worktrees` command */
   export type CleanupStaleWorktrees = ExtensionPreferences & {}
   /** Preferences accessible in the `start-dev-environment` command */
@@ -59,12 +63,16 @@ declare namespace Arguments {
   export type OpenDevEnvironment = {}
   /** Arguments passed to the `chrome-tabs` command */
   export type ChromeTabs = {}
+  /** Arguments passed to the `set-chrome-profile` command */
+  export type SetChromeProfile = {}
   /** Arguments passed to the `open-active-dev-instance` command */
   export type OpenActiveDevInstance = {}
   /** Arguments passed to the `open-spotlight-environment` command */
   export type OpenSpotlightEnvironment = {}
   /** Arguments passed to the `open-pr-in-chrome` command */
   export type OpenPrInChrome = {}
+  /** Arguments passed to the `setup-caddy-route` command */
+  export type SetupCaddyRoute = {}
   /** Arguments passed to the `cleanup-stale-worktrees` command */
   export type CleanupStaleWorktrees = {}
   /** Arguments passed to the `start-dev-environment` command */
