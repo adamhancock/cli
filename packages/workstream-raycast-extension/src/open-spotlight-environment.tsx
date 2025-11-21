@@ -12,7 +12,7 @@ import {
 import { useState, useEffect } from 'react';
 import { loadFromDaemon, loadFromRedis } from './utils/daemon-client';
 import { getUsageHistory, recordUsage } from './utils/cache';
-import { findChromeTab, switchToChromeTab, openNewChromeTab, normalizeUrl, getChromeWindows, type ChromeWindow } from './utils/chrome';
+import { findChromeTab, switchToChromeTab, openNewChromeTab, normalizeUrl, getChromeWindows, resolveTargetChromeProfile, type ChromeWindow } from './utils/chrome';
 import type { InstanceWithStatus } from './types';
 
 interface Preferences {
@@ -43,11 +43,23 @@ export default function OpenSpotlightEnvironmentCommand() {
   const [instances, setInstances] = useState<InstanceWithStatus[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [chromeWindows, setChromeWindows] = useState<ChromeWindow[]>([]);
+  const [chromeProfile, setChromeProfile] = useState<string | undefined>();
 
   useEffect(() => {
     loadEnvironments();
     loadChromeWindows();
+    resolveProfile();
   }, []);
+
+  async function resolveProfile() {
+    try {
+      const profile = await resolveTargetChromeProfile();
+      setChromeProfile(profile);
+    } catch (error) {
+      console.error('Failed to resolve Chrome profile:', error);
+      // Continue without profile - will use default behavior
+    }
+  }
 
   async function loadChromeWindows() {
     try {
@@ -177,14 +189,14 @@ export default function OpenSpotlightEnvironmentCommand() {
 
       // Open or switch to tab
       if (existingTab) {
-        await switchToChromeTab(existingTab.windowId, existingTab.tabIndex);
+        await switchToChromeTab(existingTab.windowId, existingTab.tabIndex, chromeProfile);
         await showToast({
           style: Toast.Style.Success,
           title: 'Switched to existing tab',
           message: spotlightUrl,
         });
       } else {
-        await openNewChromeTab(spotlightUrl);
+        await openNewChromeTab(spotlightUrl, chromeProfile);
         await showToast({
           style: Toast.Style.Success,
           title: 'Opened in new tab',

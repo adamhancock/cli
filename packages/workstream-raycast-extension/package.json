@@ -72,6 +72,13 @@
       "mode": "view"
     },
     {
+      "name": "set-chrome-profile",
+      "title": "Set Chrome Profile",
+      "subtitle": "Workstream",
+      "description": "Select which Chrome profile to use when opening dev environments and PRs",
+      "mode": "view"
+    },
+    {
       "name": "open-active-dev-instance",
       "title": "Open Active Dev Instance",
       "subtitle": "Workstream",
@@ -90,6 +97,13 @@
       "title": "Open PR in Chrome",
       "subtitle": "Workstream",
       "description": "Open pull requests in Chrome with smart tab detection - switches to existing tab or opens new one",
+      "mode": "view"
+    },
+    {
+      "name": "setup-caddy-route",
+      "title": "Setup Caddy Route",
+      "subtitle": "Workstream",
+      "description": "Configure Caddy routes for instances with running dev servers but missing configuration",
       "mode": "view"
     },
     {

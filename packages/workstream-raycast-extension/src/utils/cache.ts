@@ -1,4 +1,4 @@
-import { Cache } from '@raycast/api';
+import { Cache, LocalStorage } from '@raycast/api';
 import type { InstanceWithStatus } from '../types';
 
 const cache = new Cache();
@@ -84,4 +84,28 @@ export function getUsageHistory(): UsageHistory {
   } catch {
     return {};
   }
+}
+
+// Chrome Profile Storage
+const CHROME_PROFILE_KEY = 'selected-chrome-profile';
+
+/**
+ * Set the selected Chrome profile (persists across sessions)
+ */
+export async function setSelectedChromeProfile(profilePath: string): Promise<void> {
+  await LocalStorage.setItem(CHROME_PROFILE_KEY, profilePath);
+}
+
+/**
+ * Get the selected Chrome profile
+ */
+export async function getSelectedChromeProfile(): Promise<string | undefined> {
+  return await LocalStorage.getItem<string>(CHROME_PROFILE_KEY);
+}
+
+/**
+ * Clear the selected Chrome profile
+ */
+export async function clearSelectedChromeProfile(): Promise<void> {
+  await LocalStorage.removeItem(CHROME_PROFILE_KEY);
 }

@@ -22,6 +22,7 @@ import {
   findChromeTab,
   switchToChromeTab,
   openNewChromeTab,
+  resolveTargetChromeProfile,
   type ChromeWindow,
 } from './utils/chrome';
 import type { InstanceWithStatus } from './types';
@@ -54,11 +55,23 @@ export default function OpenDevEnvironmentCommand() {
   const [instances, setInstances] = useState<InstanceWithStatus[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [chromeWindows, setChromeWindows] = useState<ChromeWindow[]>([]);
+  const [chromeProfile, setChromeProfile] = useState<string | undefined>();
 
   useEffect(() => {
     loadEnvironments();
     loadChromeWindows();
+    resolveProfile();
   }, []);
+
+  async function resolveProfile() {
+    try {
+      const profile = await resolveTargetChromeProfile();
+      setChromeProfile(profile);
+    } catch (error) {
+      console.error('Failed to resolve Chrome profile:', error);
+      // Continue without profile - will use default behavior
+    }
+  }
 
   async function loadChromeWindows() {
     try {
@@ -164,7 +177,7 @@ export default function OpenDevEnvironmentCommand() {
 
       if (existingTab) {
         // Switch to existing tab
-        await switchToChromeTab(existingTab.windowId, existingTab.tabIndex);
+        await switchToChromeTab(existingTab.windowId, existingTab.tabIndex, chromeProfile);
         await showToast({
           style: Toast.Style.Success,
           title: 'Switched to existing tab',
@@ -172,7 +185,7 @@ export default function OpenDevEnvironmentCommand() {
         });
       } else {
         // Open new tab
-        await openNewChromeTab(url);
+        await openNewChromeTab(url, chromeProfile);
         await showToast({
           style: Toast.Style.Success,
           title: 'Opened in new tab',

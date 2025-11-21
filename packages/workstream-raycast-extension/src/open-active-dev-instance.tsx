@@ -2,7 +2,7 @@ import { showToast, Toast, closeMainWindow } from '@raycast/api';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { loadFromDaemon, loadFromRedis } from './utils/daemon-client';
-import { findChromeTab, switchToChromeTab, openNewChromeTab } from './utils/chrome';
+import { findChromeTab, switchToChromeTab, openNewChromeTab, resolveTargetChromeProfile } from './utils/chrome';
 
 const execAsync = promisify(exec);
 
@@ -106,6 +106,9 @@ async function getInstanceDevUrl(instancePath: string): Promise<string | null> {
 
 export default async function Command() {
   try {
+    // Resolve Chrome profile to use
+    const chromeProfile = await resolveTargetChromeProfile();
+
     // Step 1: Get active VS Code instance
     await showToast({
       style: Toast.Style.Animated,
@@ -188,14 +191,14 @@ export default async function Command() {
 
     // Step 4: Open or switch to tab
     if (existingTab) {
-      await switchToChromeTab(existingTab.windowId, existingTab.tabIndex);
+      await switchToChromeTab(existingTab.windowId, existingTab.tabIndex, chromeProfile);
       await showToast({
         style: Toast.Style.Success,
         title: 'Switched to existing tab',
         message: devUrl,
       });
     } else {
-      await openNewChromeTab(devUrl);
+      await openNewChromeTab(devUrl, chromeProfile);
       await showToast({
         style: Toast.Style.Success,
         title: 'Opened in new tab',
