@@ -11,9 +11,9 @@ import {
   Icon,
   getPreferenceValues,
 } from '@raycast/api';
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { createWorktreeStreaming, openWorktreeInVSCode } from './utils/worktree';
-import { triggerDaemonRefresh } from './utils/daemon-client';
+import { triggerDaemonRefresh, publishWorktreeJob, subscribeToWorktreeUpdates, getWorktreeJobStatus, type WorktreeUpdate } from './utils/daemon-client';
 import { getUnmergedBranches, branchExists as checkBranchExists, getLocalBranches, getRemoteBranches } from './utils/git';
 import { homedir } from 'os';
 import { join } from 'path';
@@ -45,64 +45,201 @@ function WorktreeOutput({
   const [worktreePath, setWorktreePath] = useState<string | undefined>();
   const [success, setSuccess] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | undefined>();
+  
+  // Use ref to prevent duplicate job submissions across re-renders
+  const jobSubmittedRef = useRef(false);
+  // Track if completion has been handled to prevent duplicate handling
+  const completionHandledRef = useRef(false);
 
   useEffect(() => {
     let mounted = true;
+    let unsubscribe: (() => void) | null = null;
 
     async function runWorktree() {
-      const result = await createWorktreeStreaming(
-        worktreeName,
-        { repoPath, baseBranch, force },
-        (chunk) => {
-          if (mounted) {
-            setOutput((prev) => prev + chunk);
-          }
-        }
-      );
+      // Prevent duplicate job submissions (React Strict Mode, fast refresh, etc.)
+      if (jobSubmittedRef.current) {
+        console.log('Job already submitted, skipping duplicate submission');
+        return;
+      }
+      jobSubmittedRef.current = true;
 
-      if (mounted) {
-        setIsRunning(false);
-        setSuccess(result.success);
-        setWorktreePath(result.worktreePath);
-        setErrorMessage(result.error);
+      // Try to use daemon-based worktree creation
+      const jobId = await publishWorktreeJob(worktreeName, repoPath, baseBranch, force);
 
-        if (result.success) {
-          await showToast({
-            style: Toast.Style.Success,
-            title: 'Worktree created successfully',
-          });
-
-          // Automatically open VS Code
-          if (result.worktreePath) {
-            try {
-              await openWorktreeInVSCode(result.worktreePath);
-
-              // Trigger daemon to refresh and pick up the new VS Code instance
-              await triggerDaemonRefresh();
-
-              // Wait a bit for VS Code to open, then close Raycast
-              setTimeout(async () => {
-                await closeMainWindow();
-                await popToRoot();
-              }, 1000);
-            } catch (error) {
-              console.error('Failed to open VS Code:', error);
-              // Don't show toast error here, just log it
+      if (!jobId) {
+        // Fallback to direct worktree creation if daemon is unavailable
+        console.log('Daemon unavailable, falling back to direct worktree creation');
+        const result = await createWorktreeStreaming(
+          worktreeName,
+          { repoPath, baseBranch, force },
+          (chunk) => {
+            if (mounted) {
+              setOutput((prev) => prev + chunk);
             }
           }
-        } else {
-          await showToast({
+        );
+
+        if (mounted) {
+          setIsRunning(false);
+          setSuccess(result.success);
+          setWorktreePath(result.worktreePath);
+          setErrorMessage(result.error);
+
+          if (result.success) {
+            await showToast({
+              style: Toast.Style.Success,
+              title: 'Worktree created successfully',
+            });
+
+            // Automatically open VS Code
+            if (result.worktreePath) {
+              try {
+                await openWorktreeInVSCode(result.worktreePath);
+
+                // Trigger daemon to refresh and pick up the new VS Code instance
+                await triggerDaemonRefresh();
+
+                // Wait a bit for VS Code to open, then close Raycast
+                setTimeout(async () => {
+                  await closeMainWindow();
+                  await popToRoot();
+                }, 1000);
+              } catch (error) {
+                console.error('Failed to open VS Code:', error);
+                // Don't show toast error here, just log it
+              }
+            }
+          } else {
+            await showToast({
+              style: Toast.Style.Failure,
+              title: 'Failed to create worktree',
+            });
+          }
+        }
+        return;
+      }
+
+      // Handler for processing updates
+      const handleUpdate = (update: WorktreeUpdate) => {
+        if (!mounted) return;
+        
+        // Prevent duplicate completion handling
+        if (completionHandledRef.current && update.status !== 'running') {
+          console.log('Completion already handled, skipping duplicate update');
+          return;
+        }
+
+        console.log('Received update:', update);
+
+        // Append new output
+        if (update.output) {
+          setOutput((prev) => prev + update.output);
+        }
+
+        // Handle completion states
+        if (update.status === 'completed') {
+          completionHandledRef.current = true;
+          setIsRunning(false);
+          setSuccess(true);
+          setWorktreePath(update.worktreePath);
+
+          showToast({
+            style: Toast.Style.Success,
+            title: 'Worktree created successfully',
+          }).catch(console.error);
+
+          // Trigger daemon refresh
+          triggerDaemonRefresh().catch(console.error);
+
+          // Close Raycast after a short delay (VS Code already opened by daemon)
+          setTimeout(async () => {
+            await closeMainWindow();
+            await popToRoot();
+          }, 1000);
+        } else if (update.status === 'failed') {
+          completionHandledRef.current = true;
+          setIsRunning(false);
+          setSuccess(false);
+          setErrorMessage(update.error);
+
+          showToast({
             style: Toast.Style.Failure,
             title: 'Failed to create worktree',
-          });
+            message: update.error,
+          }).catch(console.error);
+        } else if (update.status === 'skipped') {
+          // Job was skipped because another job is already creating this worktree
+          completionHandledRef.current = true;
+          setIsRunning(false);
+          setSuccess(false);
+          setErrorMessage(update.output || 'Worktree creation already in progress');
+
+          showToast({
+            style: Toast.Style.Failure,
+            title: 'Worktree creation skipped',
+            message: 'Another job is already creating this worktree',
+          }).catch(console.error);
         }
-      }
+      };
+
+      // Subscribe to updates for this job
+      console.log(`Subscribing to worktree job: ${jobId}`);
+      unsubscribe = subscribeToWorktreeUpdates(jobId, handleUpdate, () => {
+        // Error callback - fallback to direct creation
+        if (mounted && isRunning) {
+          console.log('Redis subscription failed, falling back to direct creation');
+          jobSubmittedRef.current = false; // Allow retry
+          runWorktree();
+        }
+      });
+
+      // Also poll for status as a fallback (in case pub/sub misses the update)
+      let pollCount = 0;
+      const pollInterval = setInterval(async () => {
+        pollCount++;
+        if (!mounted || completionHandledRef.current) {
+          console.log(`Stopping poll: mounted=${mounted}, completionHandled=${completionHandledRef.current}`);
+          clearInterval(pollInterval);
+          return;
+        }
+        
+        try {
+          console.log(`Polling job status (attempt ${pollCount}): ${jobId}`);
+          const status = await getWorktreeJobStatus(jobId);
+          console.log(`Poll result:`, status ? { status: status.status, hasOutput: !!status.output } : 'null');
+          
+          if (status && status.status && status.status !== 'running') {
+            console.log('Poll detected job completion:', status.status);
+            handleUpdate({
+              jobId,
+              status: status.status as 'completed' | 'failed' | 'skipped',
+              output: status.output,
+              error: status.error,
+              worktreePath: status.worktreePath,
+              timestamp: status.timestamp || Date.now(),
+            });
+            clearInterval(pollInterval);
+          }
+        } catch (e) {
+          console.error('Poll error:', e);
+        }
+      }, 1000);
+
+      // Store interval for cleanup
+      const originalUnsubscribe = unsubscribe;
+      unsubscribe = () => {
+        clearInterval(pollInterval);
+        originalUnsubscribe();
+      };
     }
 
     runWorktree();
 
     return () => {
       mounted = false;
+      if (unsubscribe) {
+        unsubscribe();
+      }
     };
   }, [worktreeName, repoPath, baseBranch, force]);
 

@@ -6,6 +6,7 @@ export const REDIS_KEYS = {
   INSTANCE: (path: string) => `workstream:instance:${Buffer.from(path).toString('base64')}`,
   TIMESTAMP: 'workstream:timestamp',
   EVENTS_RECENT: 'workstream:events:recent',
+  WORKTREE_JOB: (jobId: string) => `workstream:worktree:job:${jobId}`,
 } as const;
 
 export const REDIS_CHANNELS = {
@@ -14,6 +15,8 @@ export const REDIS_CHANNELS = {
   CLAUDE: 'workstream:claude',
   NOTIFICATIONS: 'workstream:notifications',
   EVENTS_NEW: 'workstream:events:new',
+  WORKTREE_JOBS: 'workstream:worktree:jobs',
+  WORKTREE_UPDATES: 'workstream:worktree:updates',
 } as const;
 
 let redisClient: Redis | null = null;

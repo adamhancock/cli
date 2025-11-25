@@ -7,7 +7,7 @@ import path from 'path';
 import { loadConfig, validateConfig, createExampleConfig } from './config.js';
 import { CaddyClient } from './utils/caddy.js';
 import { generatePorts } from './utils/ports.js';
-import { updateEnvFiles, updateMcpConfig } from './utils/env.js';
+import { updateEnvFiles, updateMcpConfig, updateOpencodeConfig } from './utils/env.js';
 import { createDatabase, runMigrations, dumpDatabase, restoreDatabase, listDumps, findPsqlPath } from './utils/database.js';
 import { getBranch, sanitizeBranch, isGitRepo } from './utils/git.js';
 
@@ -68,12 +68,13 @@ program
       if (!isMainBranch) {
         await updateEnvFiles(config, workdir, ports, subdomain, databaseInfo);
 
-        // Update MCP config if enabled
+        // Update MCP config if enabled (for both Claude Code and OpenCode)
         if (config.integrations.mcp && config.features.spotlight && ports.spotlight) {
           const databaseUrl = databaseInfo.created
             ? `postgresql://${config.database.user}:${config.database.password}@${config.database.host}:${config.database.port}/${databaseInfo.dbName}`
             : null;
           await updateMcpConfig(config, workdir, ports.spotlight, databaseUrl);
+          await updateOpencodeConfig(config, workdir, ports.spotlight, databaseUrl);
         }
 
         // Run migrations if database was created

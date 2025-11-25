@@ -242,3 +242,191 @@ export function subscribeToUpdates(
     }
   };
 }
+
+/**
+ * Worktree job data structure
+ */
+export interface WorktreeJobData {
+  jobId: string;
+  worktreeName: string;
+  repoPath: string;
+  baseBranch?: string;
+  force?: boolean;
+  timestamp: number;
+  status?: 'pending' | 'running' | 'completed' | 'failed';
+  output?: string;
+  error?: string;
+  worktreePath?: string;
+  startedAt?: number;
+  completedAt?: number;
+}
+
+/**
+ * Worktree update message structure
+ */
+export interface WorktreeUpdate {
+  jobId: string;
+  status: 'running' | 'completed' | 'failed' | 'skipped';
+  output?: string;
+  error?: string;
+  worktreePath?: string;
+  timestamp: number;
+}
+
+/**
+ * Publish a worktree creation job to the daemon via Redis pub/sub
+ * Returns the generated jobId if successful, null otherwise
+ */
+export async function publishWorktreeJob(
+  worktreeName: string,
+  repoPath: string,
+  baseBranch?: string,
+  force?: boolean
+): Promise<string | null> {
+  try {
+    if (!(await isRedisAvailable())) {
+      console.log('Redis not available, cannot publish worktree job');
+      return null;
+    }
+
+    // Generate unique job ID
+    const jobId = `worktree-${Date.now()}-${Math.random().toString(36).substring(7)}`;
+
+    const publisher = getPublisherClient();
+    const jobData: WorktreeJobData = {
+      jobId,
+      worktreeName,
+      repoPath,
+      baseBranch,
+      force,
+      timestamp: Date.now(),
+    };
+
+    await publisher.publish(
+      REDIS_CHANNELS.WORKTREE_JOBS,
+      JSON.stringify(jobData)
+    );
+
+    console.log(`Published worktree job: ${jobId}`);
+    return jobId;
+  } catch (error) {
+    console.error('Failed to publish worktree job:', error);
+    return null;
+  }
+}
+
+/**
+ * Get the status of a worktree job from Redis
+ * Returns null if job not found or Redis unavailable
+ */
+export async function getWorktreeJobStatus(jobId: string): Promise<WorktreeJobData | null> {
+  try {
+    if (!(await isRedisAvailable())) {
+      return null;
+    }
+
+    const redis = getRedisClient();
+    const jobKey = REDIS_KEYS.WORKTREE_JOB(jobId);
+    const jobDataStr = await redis.get(jobKey);
+
+    if (!jobDataStr) {
+      return null;
+    }
+
+    return JSON.parse(jobDataStr);
+  } catch (error) {
+    console.error('Failed to get worktree job status:', error);
+    return null;
+  }
+}
+
+/**
+ * Subscribe to worktree updates for a specific job via Redis pub/sub
+ * Returns a cleanup function to close the connection
+ */
+export function subscribeToWorktreeUpdates(
+  jobId: string,
+  onUpdate: (update: WorktreeUpdate) => void,
+  onError?: () => void
+): () => void {
+  let subscriber: Redis | null = null;
+  let isClosing = false;
+
+  const connect = async () => {
+    if (isClosing) return;
+
+    try {
+      // Check if Redis is available
+      if (!(await isRedisAvailable())) {
+        console.log('Redis not available, cannot subscribe to worktree updates');
+        onError?.();
+        return;
+      }
+
+      subscriber = new Redis({
+        host: 'localhost',
+        port: 6379,
+        lazyConnect: false,
+        retryStrategy: (times) => {
+          if (isClosing || times > 5) {
+            return null;
+          }
+          return Math.min(times * 1000, 5000);
+        },
+      });
+
+      subscriber.on('error', (error) => {
+        console.error('Redis worktree subscriber error:', error.message);
+        if (!isClosing) {
+          onError?.();
+        }
+      });
+
+      subscriber.on('message', async (channel, message) => {
+        try {
+          if (channel === REDIS_CHANNELS.WORKTREE_UPDATES) {
+            const update: WorktreeUpdate = JSON.parse(message);
+            // Only call onUpdate if this update is for our job
+            if (update.jobId === jobId) {
+              onUpdate(update);
+            }
+          }
+        } catch (error) {
+          console.error('Failed to parse worktree update:', error);
+        }
+      });
+
+      await subscriber.subscribe(REDIS_CHANNELS.WORKTREE_UPDATES);
+      console.log(`Subscribed to worktree updates for job: ${jobId}`);
+
+      // Load initial job status
+      const jobStatus = await getWorktreeJobStatus(jobId);
+      if (jobStatus && jobStatus.status) {
+        onUpdate({
+          jobId,
+          status: jobStatus.status as 'running' | 'completed' | 'failed' | 'skipped',
+          output: jobStatus.output,
+          error: jobStatus.error,
+          worktreePath: jobStatus.worktreePath,
+          timestamp: jobStatus.timestamp,
+        });
+      }
+    } catch (error) {
+      console.error('Failed to subscribe to worktree updates:', error);
+      onError?.();
+    }
+  };
+
+  // Start initial connection
+  connect();
+
+  // Return cleanup function
+  return () => {
+    isClosing = true;
+    if (subscriber) {
+      subscriber.unsubscribe().catch(() => {});
+      subscriber.quit().catch(() => {});
+      subscriber = null;
+    }
+  };
+}

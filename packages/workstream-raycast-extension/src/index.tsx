@@ -430,7 +430,27 @@ export default function Command() {
       return Icon.Bolt;
     }
 
-    // Check for merge conflicts - fourth priority (blocking issue)
+    // Check OpenCode finished status
+    if (instance.opencodeStatus?.opencodeFinished) {
+      return Icon.Check;
+    }
+
+    // Check OpenCode waiting status (only when explicitly waiting for input)
+    if (instance.opencodeStatus?.active && instance.opencodeStatus.isWaiting) {
+      return Icon.MagnifyingGlass;
+    }
+
+    // Check OpenCode working status
+    if (instance.opencodeStatus?.active && instance.opencodeStatus.isWorking) {
+      return Icon.Bolt;
+    }
+
+    // Check OpenCode idle status (active but not working or waiting)
+    if (instance.opencodeStatus?.active && instance.opencodeStatus.isIdle) {
+      return Icon.Bolt; // Same icon as idle Claude
+    }
+
+    // Check for merge conflicts - blocking issue
     if (instance.prStatus?.mergeable === 'CONFLICTING') {
       return Icon.ExclamationMark;
     }
@@ -467,7 +487,32 @@ export default function Command() {
       return Color.Purple;
     }
 
-    // Check for merge conflicts - third priority (red for blocking issue)
+    // Check Claude waiting status (orange)
+    if (instance.claudeStatus?.active && instance.claudeStatus.isWaiting) {
+      return Color.Orange;
+    }
+
+    // Check OpenCode finished status (green)
+    if (instance.opencodeStatus?.opencodeFinished) {
+      return Color.Green;
+    }
+
+    // Check OpenCode working status (blue)
+    if (instance.opencodeStatus?.active && instance.opencodeStatus.isWorking) {
+      return Color.Blue;
+    }
+
+    // Check OpenCode waiting status (orange) - only when explicitly waiting for input
+    if (instance.opencodeStatus?.active && instance.opencodeStatus.isWaiting) {
+      return Color.Orange;
+    }
+
+    // Check OpenCode idle status (secondary/grey)
+    if (instance.opencodeStatus?.active && instance.opencodeStatus.isIdle) {
+      return Color.SecondaryText;
+    }
+
+    // Check for merge conflicts - red for blocking issue
     if (instance.prStatus?.mergeable === 'CONFLICTING') {
       return Color.Red;
     }
@@ -509,7 +554,27 @@ export default function Command() {
       return 'Claude Code: Actively working';
     }
 
-    // Check for merge conflicts - fourth priority (blocking issue)
+    // Check OpenCode finished status
+    if (instance.opencodeStatus?.opencodeFinished) {
+      return 'OpenCode: Work completed';
+    }
+
+    // Check OpenCode waiting status (only when explicitly waiting for input)
+    if (instance.opencodeStatus?.active && instance.opencodeStatus.isWaiting) {
+      return 'OpenCode: Waiting for input';
+    }
+
+    // Check OpenCode working status
+    if (instance.opencodeStatus?.active && instance.opencodeStatus.isWorking) {
+      return 'OpenCode: Actively working';
+    }
+
+    // Check OpenCode idle status
+    if (instance.opencodeStatus?.active && instance.opencodeStatus.isIdle) {
+      return 'OpenCode: Idle (no recent activity)';
+    }
+
+    // Check for merge conflicts - blocking issue
     if (instance.prStatus?.mergeable === 'CONFLICTING') {
       return `PR #${instance.prStatus.number}: Has merge conflicts`;
     }
@@ -752,6 +817,102 @@ export default function Command() {
         icon: { source: icon, tintColor: color },
         tooltip,
       });
+    }
+
+    // OpenCode status - show individual sessions if multiple
+    if (instance.opencodeStatus?.active || instance.opencodeStatus?.opencodeFinished) {
+      const sessions = instance.opencodeStatus.sessions;
+      const sessionCount = sessions ? Object.keys(sessions).length : 0;
+      
+      // If multiple sessions, show each one
+      if (sessions && sessionCount > 1) {
+        for (const [pidStr, session] of Object.entries(sessions)) {
+          let statusText: string;
+          let tooltip: string;
+          let color: Color;
+          let iconType: Icon;
+          
+          if (session.status === 'working') {
+            statusText = `OC:${pidStr.slice(-4)}`;
+            tooltip = `OpenCode PID ${pidStr}: Working`;
+            color = Color.Blue;
+            iconType = Icon.Bolt;
+          } else if (session.status === 'waiting') {
+            statusText = `OC:${pidStr.slice(-4)}`;
+            tooltip = `OpenCode PID ${pidStr}: Waiting for input`;
+            color = Color.Orange;
+            iconType = Icon.MagnifyingGlass;
+          } else if (session.status === 'idle') {
+            statusText = `OC:${pidStr.slice(-4)}`;
+            tooltip = `OpenCode PID ${pidStr}: Idle`;
+            color = Color.SecondaryText;
+            iconType = Icon.Bolt;
+          } else {
+            statusText = `OC:${pidStr.slice(-4)}`;
+            tooltip = `OpenCode PID ${pidStr}: ${session.status}`;
+            color = Color.SecondaryText;
+            iconType = Icon.Bolt;
+          }
+          
+          accessories.push({
+            text: statusText,
+            icon: { source: iconType, tintColor: color },
+            tooltip,
+          });
+        }
+      } else {
+        // Single session or legacy format - show aggregate status
+        const isFinished = instance.opencodeStatus.opencodeFinished;
+        const isWaiting = instance.opencodeStatus.isWaiting;
+        const isWorking = instance.opencodeStatus.isWorking;
+        const isIdle = instance.opencodeStatus.isIdle;
+
+        let statusText: string;
+        let tooltip: string;
+        let color: Color;
+        let iconType: Icon;
+
+        if (isFinished) {
+          statusText = 'OC Finished';
+          tooltip = 'OpenCode: Work completed';
+          color = Color.Green;
+          iconType = Icon.Check;
+        } else if (isWaiting) {
+          statusText = 'OC Waiting';
+          tooltip = 'OpenCode: Waiting for your input';
+          color = Color.Orange;
+          iconType = Icon.MagnifyingGlass;
+        } else if (isWorking) {
+          statusText = 'OC Working';
+          tooltip = 'OpenCode: Actively working';
+          color = Color.Blue;
+          iconType = Icon.Bolt;
+        } else if (isIdle) {
+          statusText = 'OC Idle';
+          tooltip = 'OpenCode: Idle (no recent activity)';
+          color = Color.SecondaryText;
+          iconType = Icon.Bolt;
+        } else {
+          statusText = 'OC Active';
+          tooltip = 'OpenCode: Active';
+          color = Color.SecondaryText;
+          iconType = Icon.Bolt;
+        }
+
+        // Add metrics to tooltip if available
+        if (instance.opencodeStatus.metrics) {
+          const { filesEdited, commandsRun } = instance.opencodeStatus.metrics;
+          if (filesEdited > 0 || commandsRun > 0) {
+            tooltip += ` | ${filesEdited} files, ${commandsRun} commands`;
+          }
+        }
+
+        accessories.push({
+          text: statusText,
+          icon: { source: iconType, tintColor: color },
+          tooltip,
+        });
+      }
     }
 
     // Show tmux session status
@@ -1391,6 +1552,99 @@ function getDetailMarkdown(instance: InstanceWithStatus): string {
       sections.push(`- **Last Activity:** ${timeStr}`);
     }
     sections.push('');
+  }
+
+  if (instance.opencodeStatus?.active || instance.opencodeStatus?.opencodeFinished) {
+    const sessions = instance.opencodeStatus.sessions;
+    const sessionCount = sessions ? Object.keys(sessions).length : 0;
+    
+    // Show individual sessions if multiple
+    if (sessions && sessionCount > 1) {
+      sections.push(`## OpenCode (${sessionCount} instances)\n`);
+      
+      for (const [pidStr, session] of Object.entries(sessions)) {
+        let emoji: string;
+        if (session.status === 'working') {
+          emoji = '🔥';
+        } else if (session.status === 'waiting') {
+          emoji = '⏳';
+        } else if (session.status === 'idle') {
+          emoji = '💤';
+        } else {
+          emoji = '❌';
+        }
+        
+        const ageSeconds = session.lastActivity ? Math.floor((Date.now() - session.lastActivity) / 1000) : 0;
+        const ageMinutes = Math.floor(ageSeconds / 60);
+        const timeStr = ageMinutes > 0 ? `${ageMinutes}m ago` : 'now';
+        
+        sections.push(`### PID ${pidStr} ${emoji}`);
+        sections.push(`- **Status:** ${session.status}`);
+        sections.push(`- **Last Activity:** ${timeStr}`);
+        
+        if (session.metrics) {
+          const { filesEdited, commandsRun } = session.metrics;
+          if (filesEdited > 0 || commandsRun > 0) {
+            sections.push(`- **Activity:** ${filesEdited} files, ${commandsRun} commands`);
+          }
+        }
+        sections.push('');
+      }
+    } else {
+      // Single session or legacy format
+      const isFinished = instance.opencodeStatus.opencodeFinished;
+      const isWorking = instance.opencodeStatus.isWorking;
+      const isWaiting = instance.opencodeStatus.isWaiting;
+      const isIdle = instance.opencodeStatus.isIdle;
+      
+      let emoji: string;
+      let status: string;
+      
+      if (isFinished) {
+        emoji = '✅';
+        status = 'Finished';
+      } else if (isWorking) {
+        emoji = '🔥';
+        status = 'Working';
+      } else if (isWaiting) {
+        emoji = '⏳';
+        status = 'Waiting for input';
+      } else if (isIdle) {
+        emoji = '💤';
+        status = 'Idle';
+      } else {
+        emoji = '🤖';
+        status = 'Active';
+      }
+      
+      sections.push(`## OpenCode ${emoji}\n`);
+      sections.push(`- **Status:** ${status}`);
+      if (instance.opencodeStatus.sessionId) {
+        sections.push(`- **Session:** ${instance.opencodeStatus.sessionId.slice(0, 8)}...`);
+      }
+
+      if (instance.opencodeStatus.metrics) {
+        const { filesEdited, commandsRun, toolsUsed } = instance.opencodeStatus.metrics;
+        sections.push(`- **Files Edited:** ${filesEdited}`);
+        sections.push(`- **Commands Run:** ${commandsRun}`);
+        
+        const toolsList = Object.entries(toolsUsed)
+          .filter(([_, count]) => count > 0)
+          .map(([tool, count]) => `${tool}: ${count}`)
+          .join(', ');
+        if (toolsList) {
+          sections.push(`- **Tools Used:** ${toolsList}`);
+        }
+      }
+
+      if (instance.opencodeStatus.lastEventTime) {
+        const ageSeconds = Math.floor((Date.now() - instance.opencodeStatus.lastEventTime) / 1000);
+        const ageMinutes = Math.floor(ageSeconds / 60);
+        const timeStr = ageMinutes > 0 ? `${ageMinutes} minute${ageMinutes > 1 ? 's' : ''} ago` : 'just now';
+        sections.push(`- **Last Activity:** ${timeStr}`);
+      }
+      sections.push('');
+    }
   }
 
   if (instance.tmuxStatus) {

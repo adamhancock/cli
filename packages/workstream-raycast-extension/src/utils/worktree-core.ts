@@ -11,6 +11,29 @@ import type {
 
 const execAsync = promisify(exec);
 
+// Compute home directory paths once at module initialization to avoid runtime issues
+// This prevents "homedir is not defined" errors in certain execution contexts
+const HOME_DIR = homedir();
+const USER_PATHS = [
+  '/opt/homebrew/bin',          // Apple Silicon Homebrew
+  '/usr/local/bin',              // Intel Homebrew
+  '/usr/bin',
+  '/bin',
+  '/usr/sbin',
+  '/sbin',
+  join(HOME_DIR, '.local/bin'), // User local binaries
+  join(HOME_DIR, '.npm-global/bin'), // npm global
+  join(HOME_DIR, '.yarn/bin'),  // yarn global
+  join(HOME_DIR, '.config/yarn/global/node_modules/.bin'), // yarn v2+
+  join(HOME_DIR, '.pnpm'),      // pnpm home
+  join(HOME_DIR, 'Library/pnpm'), // pnpm on macOS
+  join(HOME_DIR, '.nvm/versions/node/v22.17.0/bin'), // NVM paths
+  join(HOME_DIR, '.nvm/versions/node/v20.0.0/bin'),
+  join(HOME_DIR, '.nvm/versions/node/v18.0.0/bin'),
+  join(HOME_DIR, '.nvm/current/bin'), // Generic NVM current
+];
+const NVM_DIR = join(HOME_DIR, '.nvm');
+
 /**
  * Execute a shell command in a specific directory with targeted retry logic
  * Only retries on specific transient filesystem race conditions
@@ -62,26 +85,7 @@ async function execInDirWithRetry(
  */
 async function execInDir(command: string, cwd: string): Promise<{ stdout: string; stderr: string }> {
   // Build a comprehensive PATH that includes common package manager locations
-  const paths = [
-    '/opt/homebrew/bin',          // Apple Silicon Homebrew
-    '/usr/local/bin',              // Intel Homebrew
-    '/usr/bin',
-    '/bin',
-    '/usr/sbin',
-    '/sbin',
-    join(homedir(), '.local/bin'), // User local binaries
-    join(homedir(), '.npm-global/bin'), // npm global
-    join(homedir(), '.yarn/bin'),  // yarn global
-    join(homedir(), '.config/yarn/global/node_modules/.bin'), // yarn v2+
-    join(homedir(), '.pnpm'),      // pnpm home
-    join(homedir(), 'Library/pnpm'), // pnpm on macOS
-    // NVM paths - check for current node version
-    join(homedir(), '.nvm/versions/node/v22.17.0/bin'),
-    join(homedir(), '.nvm/versions/node/v20.0.0/bin'),
-    join(homedir(), '.nvm/versions/node/v18.0.0/bin'),
-    // Generic NVM current
-    join(homedir(), '.nvm/current/bin'),
-  ];
+  const paths = [...USER_PATHS];
 
   // Add existing PATH
   if (process.env.PATH) {
@@ -94,7 +98,7 @@ async function execInDir(command: string, cwd: string): Promise<{ stdout: string
     env: {
       ...process.env,
       PATH: paths.join(':'),
-      NVM_DIR: join(homedir(), '.nvm'), // Also set NVM_DIR
+      NVM_DIR: NVM_DIR,
     },
   });
 }
@@ -163,8 +167,8 @@ export async function loadConfig(repoPath: string): Promise<WorktreeRcConfig> {
   const configPaths = [
     join(repoPath, '.worktreerc.json'),
     join(repoPath, '.worktreerc'),
-    join(homedir(), '.worktreerc.json'),
-    join(homedir(), '.worktreerc'),
+    join(HOME_DIR, '.worktreerc.json'),
+    join(HOME_DIR, '.worktreerc'),
   ];
 
   for (const configPath of configPaths) {

@@ -3,7 +3,17 @@ import Redis from 'ioredis';
 import { REDIS_CHANNELS } from './redis-client';
 
 interface NotificationMessage {
-  type: 'claude_started' | 'claude_waiting' | 'claude_finished' | 'pr_check_failed' | 'pr_check_success' | 'pr_merge_blocked' | 'notification';
+  type: 
+    | 'claude_started' 
+    | 'claude_waiting' 
+    | 'claude_finished' 
+    | 'pr_check_failed' 
+    | 'pr_check_success' 
+    | 'pr_merge_blocked' 
+    | 'notification'
+    | 'opencode_session_started'
+    | 'opencode_waiting'
+    | 'opencode_error';
   title: string;
   message: string;
   style: 'success' | 'failure' | 'info';

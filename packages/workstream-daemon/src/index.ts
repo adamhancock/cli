@@ -18,6 +18,7 @@ import { getEventStore, closeEventStore } from './event-store.js';
 import { BullBoardServer } from './bull-board-server.js';
 import { WebSocketServer } from './websocket-server.js';
 import { getAuthToken } from './auth.js';
+import { createWorktree } from './worktree-utils.js';
 
 // Disable verbose output from zx
 $.verbose = false;
@@ -93,6 +94,40 @@ interface ClaudeStatus {
   terminalId?: string;
   terminalPid?: number;
   vscodePid?: number;
+}
+
+interface OpenCodeSessionInfo {
+  pid: number;
+  sessionId: string | null;
+  status: 'working' | 'waiting' | 'idle' | 'error';
+  lastActivity: number;
+  workStartedAt?: number;
+  metrics?: {
+    toolsUsed: Record<string, number>;
+    filesEdited: number;
+    commandsRun: number;
+  };
+}
+
+interface OpenCodeStatus {
+  sessions?: Record<number, OpenCodeSessionInfo>;  // Keyed by PID (optional for backwards compat)
+  primarySession?: number;  // PID of most recently active session
+  
+  // Aggregate/legacy fields for backwards compatibility
+  active: boolean;
+  sessionId?: string;
+  isWorking: boolean;
+  isWaiting?: boolean;
+  isIdle?: boolean;
+  opencodeFinished?: boolean;
+  lastEventTime?: number;
+  workStartedAt?: number;
+  finishedAt?: number;
+  metrics?: {
+    toolsUsed: Record<string, number>;
+    filesEdited: number;
+    commandsRun: number;
+  };
 }
 
 interface TmuxStatus {
@@ -179,6 +214,7 @@ interface InstanceWithMetadata extends VSCodeInstance {
   gitInfo?: GitInfo;
   prStatus?: PRStatus;
   claudeStatus?: ClaudeStatus;
+  opencodeStatus?: OpenCodeStatus;
   tmuxStatus?: TmuxStatus;
   caddyHost?: CaddyHost;
   spotlightStatus?: SpotlightStatus;
@@ -196,6 +232,8 @@ const MIN_POLL_INTERVAL = 120000; // 2 minutes (when rate limited)
 const RATE_LIMIT_THRESHOLD = 100; // Start slowing down when remaining < 100
 const CLAUDE_WORK_TIMEOUT = 5 * 60 * 1000; // 5 minutes - reset working state if no events
 const CLAUDE_WAIT_TIMEOUT = 30 * 60 * 1000; // 30 minutes - reset waiting state if no events
+const OPENCODE_WORK_TIMEOUT = 5 * 60 * 1000; // 5 minutes - reset OpenCode working state if no events
+const OPENCODE_WAIT_TIMEOUT = 30 * 60 * 1000; // 30 minutes - reset OpenCode waiting state if no events
 
 function log(...args: any[]) {
   const timestamp = new Date().toISOString();
@@ -333,10 +371,30 @@ class WorkstreamDaemon {
       }
     });
 
+    // Subscribe to worktree jobs channel
+    this.subscriber.subscribe(REDIS_CHANNELS.WORKTREE_JOBS, (err) => {
+      if (err) {
+        logError('Failed to subscribe to worktree jobs channel:', err);
+      } else {
+        log('Subscribed to worktree jobs channel');
+      }
+    });
+
+    // Subscribe to OpenCode channel
+    this.subscriber.subscribe(REDIS_CHANNELS.OPENCODE, (err) => {
+      if (err) {
+        logError('Failed to subscribe to OpenCode channel:', err);
+      } else {
+        log('Subscribed to OpenCode channel');
+      }
+    });
+
     this.subscriber.on('message', async (channel, message) => {
       try {
         const data = JSON.parse(message);
-        log(`📨 Received message on ${channel}: ${data.type}`);
+        // Log message type, or jobId for worktree jobs, or truncated message for others
+        const messageInfo = data.type || data.jobId || JSON.stringify(data).substring(0, 50);
+        log(`📨 Received message on ${channel}: ${messageInfo}`);
 
         // Store all events in the database
         await this.storeEvent(channel, message, data);
@@ -383,6 +441,90 @@ class WorkstreamDaemon {
             log(`  💓 VSCode heartbeat from ${projectName}`);
             await this.handleVSCodeHeartbeat(data.workspacePath);
           }
+        } else if (channel === REDIS_CHANNELS.WORKTREE_JOBS) {
+          // Handle worktree job requests
+          if (data.jobId && data.worktreeName && data.repoPath) {
+            log(`  🌳 Worktree job received: ${data.worktreeName} (job: ${data.jobId})`);
+            // Handle worktree job asynchronously (don't await to allow quick ack)
+            this.handleWorktreeJob(data).catch((error) => {
+              logError('Error handling worktree job:', error);
+            });
+          }
+        } else if (channel === REDIS_CHANNELS.OPENCODE) {
+          const projectName = data.path?.split('/').pop() || 'unknown';
+          
+          // Events that indicate a status change - trigger immediate API poll
+          const statusChangeEvents = [
+            'opencode_session_created',
+            'opencode_session_active',
+            'opencode_session_idle',
+            'opencode_session_compacting',
+            'opencode_session_error',
+            'opencode_work_started',
+            'opencode_waiting_for_input',
+            'opencode_work_stopped',
+            'opencode_status_changed',
+          ];
+          
+          // Log events for debugging
+          if (data.type === 'opencode_session_created') {
+            log(`  🤖 OpenCode session created in ${projectName} (session: ${data.sessionId})`);
+          } else if (data.type === 'opencode_work_started') {
+            log(`  ▶️  OpenCode started working in ${projectName}`);
+          } else if (data.type === 'opencode_waiting_for_input') {
+            log(`  ⏸️  OpenCode waiting for input in ${projectName}`);
+          } else if (data.type === 'opencode_work_stopped') {
+            log(`  ⏹️  OpenCode finished in ${projectName}`);
+          } else if (data.type === 'opencode_session_active') {
+            log(`  🟢 OpenCode active in ${projectName}`);
+          } else if (data.type === 'opencode_session_idle') {
+            log(`  💤 OpenCode idle in ${projectName}`);
+          } else if (data.type === 'opencode_session_compacting') {
+            log(`  🔄 OpenCode compacting in ${projectName}`);
+          } else if (data.type === 'opencode_status_changed') {
+            log(`  ⚡ OpenCode status changed to ${data.newStatus} in ${projectName}`);
+          } else if (data.type === 'opencode_tool_bash') {
+            log(`  💻 OpenCode ran bash command in ${projectName}`);
+          } else if (data.type === 'opencode_tool_read') {
+            log(`  📖 OpenCode read file in ${projectName}`);
+          } else if (data.type === 'opencode_tool_write') {
+            log(`  ✏️  OpenCode wrote file in ${projectName}`);
+          } else if (data.type === 'opencode_tool_edit') {
+            log(`  ✂️  OpenCode edited file in ${projectName}`);
+          } else if (data.type === 'opencode_file_edited') {
+            log(`  📝 OpenCode edited ${data.filePath} in ${projectName}`);
+          } else if (data.type === 'opencode_safety_warning') {
+            log(`  ⚠️  OpenCode safety warning in ${projectName}: ${data.message}`);
+          } else if (data.type === 'opencode_safety_blocked') {
+            log(`  🛑 OpenCode blocked operation in ${projectName}: ${data.message}`);
+          } else if (data.type === 'opencode_session_error') {
+            log(`  ❌ OpenCode error in ${projectName}`);
+          } else if (data.type === 'opencode_session_status') {
+            log(`  📊 OpenCode status: ${data.status} in ${projectName}`);
+          } else if (data.type === 'opencode_heartbeat') {
+            // Process heartbeat to update status (but don't log)
+            if (data.path) {
+              await this.handleOpenCodeHeartbeat(
+                data.path,
+                data.sessionId,
+                data.isWorking,
+                data.lastActivityTime,
+                data.isWaiting,
+                data.isIdle
+              );
+            }
+          } else {
+            log(`  📊 OpenCode event: ${data.type} in ${projectName}`);
+          }
+          
+          // For status change events, immediately poll the API for updated status
+          if (statusChangeEvents.includes(data.type) && data.path) {
+            await this.handleOpenCodeStatusChange(data.path, data.type, projectName);
+          }
+        } else if (channel === REDIS_CHANNELS.NOTIFICATIONS) {
+          // Handle incoming notifications - send as system notification
+          log(`  🔔 Notification: ${data.title} - ${data.message}`);
+          await this.sendSystemNotification(data.title, data.message);
         }
       } catch (error) {
         logError('Error handling message:', error);
@@ -1086,6 +1228,20 @@ class WorkstreamDaemon {
       enriched.claudeStatus = this.checkClaudeTimeout(enriched.claudeStatus);
     }
 
+    // Get OpenCode status by polling the API server
+    const openCodeStatus = await this.getOpenCodeStatus(instance.path);
+    if (openCodeStatus) {
+      enriched.opencodeStatus = openCodeStatus;
+    } else if (existingInstance?.opencodeStatus) {
+      // Fallback: preserve existing OpenCode status if API not available
+      enriched.opencodeStatus = existingInstance.opencodeStatus;
+    }
+    
+    // Check for timeout and reset stale OpenCode working/waiting states
+    if (enriched.opencodeStatus) {
+      enriched.opencodeStatus = this.checkOpenCodeTimeout(enriched.opencodeStatus);
+    }
+
     // Apply intelligent status based on PR checks
     if (enriched.claudeStatus && enriched.prStatus?.checks?.conclusion === 'pending') {
       // If PR checks are pending, update status based on Claude's current state
@@ -1385,6 +1541,170 @@ class WorkstreamDaemon {
   }
 
   /**
+   * Get OpenCode status by polling all registered API servers for this workspace.
+   * Supports multiple OpenCode instances per workspace.
+   * Also supports legacy single-instance format for backwards compatibility.
+   */
+  private async getOpenCodeStatus(repoPath: string): Promise<OpenCodeStatus | undefined> {
+    const projectName = repoPath.split('/').pop() || 'unknown';
+    const workspaceKey = Buffer.from(repoPath).toString('base64');
+    const instancesSetKey = `workstream:opencode:instances:${workspaceKey}`;
+    const legacyKey = `workstream:opencode:api:${workspaceKey}`;
+    
+    try {
+      // Get all registered instance PIDs for this workspace (new format)
+      let pids = await this.redis.smembers(instancesSetKey);
+      
+      // Also check for legacy single-instance format
+      const legacyInfo = await this.redis.get(legacyKey);
+      if (legacyInfo) {
+        const { pid } = JSON.parse(legacyInfo);
+        if (pid && !pids.includes(String(pid))) {
+          // Add legacy instance to the list
+          pids = [...pids, `legacy:${pid}`];
+        }
+      }
+      
+      if (pids.length === 0) {
+        return undefined;
+      }
+      
+      log(`[OpenCode] Found ${pids.length} registered instance(s) for ${projectName}`);
+      
+      const sessions: Record<number, OpenCodeSessionInfo> = {};
+      let primarySession: number | undefined;
+      let mostRecentActivity = 0;
+      
+      // Poll each instance
+      for (const pidStr of pids) {
+        // Handle legacy format (legacy:pid) vs new format (just pid)
+        const isLegacy = pidStr.startsWith('legacy:');
+        const pid = isLegacy ? parseInt(pidStr.replace('legacy:', ''), 10) : parseInt(pidStr, 10);
+        
+        // Get instance info from appropriate key
+        const instanceKey = isLegacy 
+          ? legacyKey  // Legacy format: workstream:opencode:api:{base64}
+          : `workstream:opencode:api:${workspaceKey}:${pid}`;  // New format: workstream:opencode:api:{base64}:{pid}
+        
+        const instanceInfo = await this.redis.get(instanceKey);
+        
+        if (!instanceInfo) {
+          // Instance registration expired, remove from set if not legacy
+          if (!isLegacy) {
+            await this.redis.srem(instancesSetKey, pidStr);
+          }
+          continue;
+        }
+        
+        const { port, workspacePath } = JSON.parse(instanceInfo);
+        
+        if (workspacePath !== repoPath) {
+          continue;
+        }
+        
+        // Poll the API server
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 1000);
+        
+        try {
+          const response = await fetch(`http://127.0.0.1:${port}/status`, {
+            signal: controller.signal,
+          });
+          
+          clearTimeout(timeoutId);
+          
+          if (!response.ok) {
+            // Remove stale instance
+            await this.redis.del(instanceKey);
+            if (!isLegacy) {
+              await this.redis.srem(instancesSetKey, pidStr);
+            }
+            continue;
+          }
+          
+          const status = await response.json() as {
+            sessionId: string | null;
+            workspacePath: string;
+            projectName: string;
+            pid?: number;
+            status: 'working' | 'waiting' | 'idle' | 'finished' | 'error';
+            isWorking: boolean;
+            isWaiting: boolean;
+            isIdle: boolean;
+            lastActivityTime: number;
+            workStartedAt: number | null;
+            metrics: {
+              toolsUsed: Record<string, number>;
+              filesEdited: number;
+              commandsRun: number;
+            };
+          };
+          
+          // Use PID from status response if available, otherwise from key
+          const actualPid = status.pid || pid;
+          
+          log(`[OpenCode] ${projectName} (PID ${actualPid}): status=${status.status}, working=${status.isWorking}, waiting=${status.isWaiting}, idle=${status.isIdle}`);
+          
+          // Add to sessions
+          sessions[actualPid] = {
+            pid: actualPid,
+            sessionId: status.sessionId,
+            status: status.status === 'finished' ? 'idle' : status.status,
+            lastActivity: status.lastActivityTime,
+            workStartedAt: status.workStartedAt || undefined,
+            metrics: status.metrics,
+          };
+          
+          // Track most recently active session as primary
+          if (status.lastActivityTime > mostRecentActivity) {
+            mostRecentActivity = status.lastActivityTime;
+            primarySession = pid;
+          }
+        } catch (fetchError) {
+          clearTimeout(timeoutId);
+          // API server not responding, remove stale registration
+          log(`[OpenCode] API server not responding for ${projectName} PID ${pid}, removing`);
+          await this.redis.del(instanceKey);
+          await this.redis.srem(instancesSetKey, pidStr);
+        }
+      }
+      
+      // If no valid sessions found, return undefined
+      if (Object.keys(sessions).length === 0) {
+        return undefined;
+      }
+      
+      // Compute aggregate status from all sessions
+      // If ANY session is working, overall is working
+      // Else if ANY session is waiting, overall is waiting
+      // Else all are idle
+      const isWorking = Object.values(sessions).some(s => s.status === 'working');
+      const isWaiting = !isWorking && Object.values(sessions).some(s => s.status === 'waiting');
+      const isIdle = !isWorking && !isWaiting;
+      
+      // Get primary session for legacy fields
+      const primary = primarySession ? sessions[primarySession] : Object.values(sessions)[0];
+      
+      return {
+        sessions,
+        primarySession,
+        active: true,
+        sessionId: primary?.sessionId || undefined,
+        isWorking,
+        isWaiting,
+        isIdle,
+        opencodeFinished: false,
+        lastEventTime: mostRecentActivity,
+        workStartedAt: primary?.workStartedAt,
+        metrics: primary?.metrics,
+      };
+    } catch (error) {
+      logError(`[OpenCode] Error polling API for ${projectName}:`, error);
+      return undefined;
+    }
+  }
+
+  /**
    * Check if Claude status has timed out and reset if necessary.
    * This prevents the "Working" state from getting stuck when a task is interrupted.
    * Also cleans up old finished sessions.
@@ -1476,6 +1796,46 @@ class WorkstreamDaemon {
     }
 
     return claudeStatus;
+  }
+
+  /**
+   * Check if OpenCode status has timed out and reset if necessary.
+   * This prevents the "Working" state from getting stuck when a task is interrupted.
+   */
+  private checkOpenCodeTimeout(opencodeStatus: OpenCodeStatus): OpenCodeStatus {
+    const now = Date.now();
+    
+    // Check if working state has timed out
+    if (opencodeStatus.isWorking && opencodeStatus.workStartedAt) {
+      const elapsed = now - opencodeStatus.workStartedAt;
+      if (elapsed > OPENCODE_WORK_TIMEOUT) {
+        const projectName = opencodeStatus.sessionId || 'unknown';
+        log(`⏱️  OpenCode work timeout detected (${Math.round(elapsed / 1000)}s), resetting to idle`);
+        return {
+          ...opencodeStatus,
+          isWorking: false,
+          isWaiting: false,
+          isIdle: true,
+          workStartedAt: undefined,
+        };
+      }
+    }
+    
+    // Check if waiting state has timed out
+    if (opencodeStatus.isWaiting && opencodeStatus.lastEventTime) {
+      const elapsed = now - opencodeStatus.lastEventTime;
+      if (elapsed > OPENCODE_WAIT_TIMEOUT) {
+        log(`⏱️  OpenCode wait timeout detected (${Math.round(elapsed / 1000)}s), resetting to idle`);
+        return {
+          ...opencodeStatus,
+          isWorking: false,
+          isWaiting: false,
+          isIdle: true,
+        };
+      }
+    }
+    
+    return opencodeStatus;
   }
 
   private async getTmuxStatus(repoPath: string, branch?: string): Promise<TmuxStatus | undefined> {
@@ -1707,6 +2067,40 @@ class WorkstreamDaemon {
     } catch (error) {
       logError(`Failed to fetch terminal context for Claude PID ${claudePid}:`, error);
       return null;
+    }
+  }
+
+  /**
+   * Handle OpenCode status change events by immediately polling the API
+   * This provides near real-time status updates instead of waiting for the next poll cycle
+   */
+  private async handleOpenCodeStatusChange(repoPath: string, eventType: string, projectName: string) {
+    try {
+      // Poll the OpenCode API for updated status
+      const updatedStatus = await this.getOpenCodeStatus(repoPath);
+      
+      if (updatedStatus) {
+        // Get or create instance entry
+        let instance = this.instances.get(repoPath);
+        
+        if (instance) {
+          // Update the existing instance with new OpenCode status
+          instance.opencodeStatus = updatedStatus;
+          instance.lastUpdated = Date.now();
+          this.instances.set(repoPath, instance);
+          
+          // Publish the update immediately
+          await this.publishUpdate();
+          
+          log(`  ⚡ [OpenCode] Immediate status update for ${projectName}: ${updatedStatus.isWorking ? 'working' : updatedStatus.isWaiting ? 'waiting' : 'idle'}`);
+        } else {
+          // Instance not in our map yet - this might happen if OpenCode starts before VSCode is detected
+          // Store the status in Redis for when the instance is discovered
+          log(`  ⚡ [OpenCode] Status update for ${projectName} (instance not yet tracked)`);
+        }
+      }
+    } catch (error) {
+      logError(`[OpenCode] Error handling status change for ${projectName}:`, error);
     }
   }
 
@@ -2088,6 +2482,435 @@ class WorkstreamDaemon {
     }
   }
 
+  // ============================================================================
+  // OpenCode Event Handlers
+  // ============================================================================
+
+  private async handleOpenCodeSessionCreated(repoPath: string, sessionId: string) {
+    try {
+      const instance = this.instances.get(repoPath);
+      if (!instance) {
+        // Instance might not be tracked yet, that's okay
+        log(`  ℹ️  OpenCode session created for untracked path: ${repoPath}`);
+        return;
+      }
+
+      const now = Date.now();
+      instance.opencodeStatus = {
+        active: true,
+        sessionId,
+        isWorking: false,
+        isWaiting: false,
+        isIdle: true, // New session starts idle
+        lastEventTime: now,
+        workStartedAt: now,
+        metrics: {
+          toolsUsed: {},
+          filesEdited: 0,
+          commandsRun: 0,
+        },
+      };
+
+      await this.writeCache();
+      await this.publishUpdate();
+
+      const projectName = repoPath.split('/').pop() || 'project';
+      log(`OpenCode session created in ${projectName}`);
+    } catch (error) {
+      logError('Error handling OpenCode session created:', error);
+    }
+  }
+
+  private async handleOpenCodeActive(repoPath: string, sessionId?: string, metrics?: any) {
+    try {
+      const instance = this.instances.get(repoPath);
+      if (!instance) return;
+
+      const now = Date.now();
+      
+      // Initialize status if not present
+      if (!instance.opencodeStatus) {
+        instance.opencodeStatus = {
+          active: true,
+          sessionId,
+          isWorking: true,
+          isWaiting: false,
+          isIdle: false,
+          lastEventTime: now,
+          workStartedAt: now,
+          metrics: {
+            toolsUsed: {},
+            filesEdited: 0,
+            commandsRun: 0,
+          },
+        };
+      } else {
+        instance.opencodeStatus.active = true;
+        instance.opencodeStatus.isWorking = true;
+        instance.opencodeStatus.isWaiting = false;
+        instance.opencodeStatus.isIdle = false;
+        instance.opencodeStatus.lastEventTime = now;
+        if (!instance.opencodeStatus.workStartedAt) {
+          instance.opencodeStatus.workStartedAt = now;
+        }
+        if (metrics) {
+          instance.opencodeStatus.metrics = metrics;
+        }
+      }
+
+      await this.writeCache();
+      await this.publishUpdate();
+
+      const projectName = repoPath.split('/').pop() || 'project';
+      log(`OpenCode active in ${projectName}`);
+    } catch (error) {
+      logError('Error handling OpenCode active:', error);
+    }
+  }
+
+  private async handleOpenCodeIdle(repoPath: string, sessionId?: string) {
+    try {
+      const instance = this.instances.get(repoPath);
+      if (!instance || !instance.opencodeStatus) return;
+
+      const now = Date.now();
+      instance.opencodeStatus.isWorking = false;
+      instance.opencodeStatus.isIdle = true;
+      // Don't set isWaiting here - idle is different from waiting for input
+      instance.opencodeStatus.lastEventTime = now;
+
+      await this.writeCache();
+      await this.publishUpdate();
+
+      const projectName = repoPath.split('/').pop() || 'project';
+      log(`OpenCode idle in ${projectName}`);
+    } catch (error) {
+      logError('Error handling OpenCode idle:', error);
+    }
+  }
+
+  private async handleOpenCodeToolUsed(repoPath: string, sessionId?: string, tool?: string) {
+    try {
+      const instance = this.instances.get(repoPath);
+      if (!instance) return;
+
+      const now = Date.now();
+      
+      // Initialize status if not present
+      if (!instance.opencodeStatus) {
+        instance.opencodeStatus = {
+          active: true,
+          sessionId,
+          isWorking: true,
+          isWaiting: false,
+          isIdle: false,
+          lastEventTime: now,
+          workStartedAt: now,
+          metrics: {
+            toolsUsed: {},
+            filesEdited: 0,
+            commandsRun: 0,
+          },
+        };
+      }
+
+      // Update working state - tool use means actively working
+      instance.opencodeStatus.isWorking = true;
+      instance.opencodeStatus.isWaiting = false;
+      instance.opencodeStatus.isIdle = false;
+      instance.opencodeStatus.lastEventTime = now;
+
+      // Update metrics
+      if (tool && instance.opencodeStatus.metrics) {
+        instance.opencodeStatus.metrics.toolsUsed[tool] = 
+          (instance.opencodeStatus.metrics.toolsUsed[tool] || 0) + 1;
+        
+        if (tool === 'bash') {
+          instance.opencodeStatus.metrics.commandsRun++;
+        } else if (tool === 'write' || tool === 'edit') {
+          instance.opencodeStatus.metrics.filesEdited++;
+        }
+      }
+
+      await this.writeCache();
+      await this.publishUpdate();
+    } catch (error) {
+      logError('Error handling OpenCode tool used:', error);
+    }
+  }
+
+  private async handleOpenCodeError(repoPath: string, sessionId?: string) {
+    try {
+      const instance = this.instances.get(repoPath);
+      if (!instance || !instance.opencodeStatus) return;
+
+      const now = Date.now();
+      instance.opencodeStatus.isWorking = false;
+      instance.opencodeStatus.isIdle = true;
+      instance.opencodeStatus.lastEventTime = now;
+
+      await this.writeCache();
+      await this.publishUpdate();
+
+      const projectName = repoPath.split('/').pop() || 'project';
+      log(`OpenCode error in ${projectName}`);
+    } catch (error) {
+      logError('Error handling OpenCode error:', error);
+    }
+  }
+
+  private async handleOpenCodeStatus(repoPath: string, sessionId?: string, status?: string) {
+    try {
+      const instance = this.instances.get(repoPath);
+      if (!instance) return;
+
+      const now = Date.now();
+      
+      // Initialize status if not present
+      if (!instance.opencodeStatus) {
+        instance.opencodeStatus = {
+          active: true,
+          sessionId,
+          isWorking: false,
+          isWaiting: false,
+          isIdle: true,
+          lastEventTime: now,
+          metrics: {
+            toolsUsed: {},
+            filesEdited: 0,
+            commandsRun: 0,
+          },
+        };
+      }
+
+      // Update based on status string
+      instance.opencodeStatus.lastEventTime = now;
+      
+      if (status === 'running' || status === 'working') {
+        instance.opencodeStatus.isWorking = true;
+        instance.opencodeStatus.isWaiting = false;
+        instance.opencodeStatus.isIdle = false;
+        instance.opencodeStatus.active = true;
+        if (!instance.opencodeStatus.workStartedAt) {
+          instance.opencodeStatus.workStartedAt = now;
+        }
+      } else if (status === 'waiting') {
+        // Explicit waiting status - waiting for user input
+        instance.opencodeStatus.isWorking = false;
+        instance.opencodeStatus.isWaiting = true;
+        instance.opencodeStatus.isIdle = false;
+      } else if (status === 'idle') {
+        // Idle status - not working but not waiting for input either
+        instance.opencodeStatus.isWorking = false;
+        instance.opencodeStatus.isWaiting = false;
+        instance.opencodeStatus.isIdle = true;
+      }
+
+      await this.writeCache();
+      await this.publishUpdate();
+
+      const projectName = repoPath.split('/').pop() || 'project';
+      log(`OpenCode status updated to ${status} in ${projectName}`);
+    } catch (error) {
+      logError('Error handling OpenCode status:', error);
+    }
+  }
+
+  /**
+   * Handle OpenCode heartbeat - silent status update without notifications
+   * Now accepts full state from the plugin for accurate status reporting.
+   */
+  private async handleOpenCodeHeartbeat(
+    repoPath: string,
+    sessionId?: string,
+    isWorking?: boolean,
+    lastActivityTime?: number,
+    isWaiting?: boolean,
+    isIdle?: boolean
+  ) {
+    try {
+      const instance = this.instances.get(repoPath);
+      if (!instance) return;
+
+      const now = Date.now();
+      
+      // Initialize status if not present
+      if (!instance.opencodeStatus) {
+        instance.opencodeStatus = {
+          active: true,
+          sessionId,
+          isWorking: isWorking || false,
+          isWaiting: isWaiting || false,
+          isIdle: isIdle !== undefined ? isIdle : (!isWorking && !isWaiting),
+          lastEventTime: now,
+          metrics: {
+            toolsUsed: {},
+            filesEdited: 0,
+            commandsRun: 0,
+          },
+        };
+      } else {
+        // Update status from heartbeat - trust the plugin's state
+        instance.opencodeStatus.active = true;
+        instance.opencodeStatus.isWorking = isWorking || false;
+        instance.opencodeStatus.isWaiting = isWaiting || false;
+        instance.opencodeStatus.isIdle = isIdle !== undefined ? isIdle : (!isWorking && !isWaiting);
+        instance.opencodeStatus.lastEventTime = now;
+        if (isWorking && !instance.opencodeStatus.workStartedAt) {
+          instance.opencodeStatus.workStartedAt = lastActivityTime || now;
+        }
+        // Clear workStartedAt when not working
+        if (!isWorking) {
+          instance.opencodeStatus.workStartedAt = undefined;
+        }
+      }
+
+      await this.writeCache();
+      await this.publishUpdate();
+    } catch (error) {
+      // Silent fail for heartbeat
+    }
+  }
+
+  /**
+   * Handle OpenCode work_started event (like Claude's work_started)
+   */
+  private async handleOpenCodeWorkStarted(repoPath: string, sessionId?: string) {
+    try {
+      const instance = this.instances.get(repoPath);
+      if (!instance) {
+        log(`  ℹ️  OpenCode work_started for untracked path: ${repoPath}`);
+        return;
+      }
+
+      const now = Date.now();
+      
+      // Initialize or update status
+      if (!instance.opencodeStatus) {
+        instance.opencodeStatus = {
+          active: true,
+          sessionId,
+          isWorking: true,
+          isWaiting: false,
+          isIdle: false,
+          lastEventTime: now,
+          workStartedAt: now,
+          metrics: {
+            toolsUsed: {},
+            filesEdited: 0,
+            commandsRun: 0,
+          },
+        };
+      } else {
+        instance.opencodeStatus.active = true;
+        instance.opencodeStatus.isWorking = true;
+        instance.opencodeStatus.isWaiting = false;
+        instance.opencodeStatus.isIdle = false;
+        instance.opencodeStatus.opencodeFinished = false;
+        instance.opencodeStatus.lastEventTime = now;
+        if (!instance.opencodeStatus.workStartedAt) {
+          instance.opencodeStatus.workStartedAt = now;
+        }
+      }
+
+      await this.writeCache();
+      await this.publishUpdate();
+
+      const projectName = repoPath.split('/').pop() || 'project';
+      log(`OpenCode started working in ${projectName}`);
+    } catch (error) {
+      logError('Error handling OpenCode work started:', error);
+    }
+  }
+
+  /**
+   * Handle OpenCode waiting_for_input event (like Claude's waiting_for_input)
+   * This is the ONLY event that should set isWaiting to true
+   */
+  private async handleOpenCodeWaiting(repoPath: string, sessionId?: string) {
+    try {
+      const instance = this.instances.get(repoPath);
+      if (!instance) return;
+
+      const now = Date.now();
+      
+      if (!instance.opencodeStatus) {
+        instance.opencodeStatus = {
+          active: true,
+          sessionId,
+          isWorking: false,
+          isWaiting: true,
+          isIdle: false,
+          lastEventTime: now,
+          metrics: {
+            toolsUsed: {},
+            filesEdited: 0,
+            commandsRun: 0,
+          },
+        };
+      } else {
+        instance.opencodeStatus.isWorking = false;
+        instance.opencodeStatus.isWaiting = true;
+        instance.opencodeStatus.isIdle = false;
+        instance.opencodeStatus.lastEventTime = now;
+      }
+
+      await this.writeCache();
+      await this.publishUpdate();
+
+      const projectName = repoPath.split('/').pop() || 'project';
+      log(`OpenCode waiting for input in ${projectName}`);
+    } catch (error) {
+      logError('Error handling OpenCode waiting:', error);
+    }
+  }
+
+  /**
+   * Handle OpenCode work_stopped event (like Claude's work_stopped/finished)
+   */
+  private async handleOpenCodeFinished(repoPath: string, sessionId?: string) {
+    try {
+      const instance = this.instances.get(repoPath);
+      if (!instance) return;
+
+      const now = Date.now();
+      
+      if (!instance.opencodeStatus) {
+        instance.opencodeStatus = {
+          active: false,
+          sessionId,
+          isWorking: false,
+          isWaiting: false,
+          isIdle: false,
+          opencodeFinished: true,
+          finishedAt: now,
+          lastEventTime: now,
+          metrics: {
+            toolsUsed: {},
+            filesEdited: 0,
+            commandsRun: 0,
+          },
+        };
+      } else {
+        instance.opencodeStatus.active = false;
+        instance.opencodeStatus.isWorking = false;
+        instance.opencodeStatus.isWaiting = false;
+        instance.opencodeStatus.isIdle = false;
+        instance.opencodeStatus.opencodeFinished = true;
+        instance.opencodeStatus.finishedAt = now;
+        instance.opencodeStatus.lastEventTime = now;
+      }
+
+      await this.writeCache();
+      await this.publishUpdate();
+
+      const projectName = repoPath.split('/').pop() || 'project';
+      log(`OpenCode finished in ${projectName}`);
+    } catch (error) {
+      logError('Error handling OpenCode finished:', error);
+    }
+  }
+
   private async handleVSCodeHeartbeat(workspacePath: string) {
     try {
       // Get the instance
@@ -2120,10 +2943,212 @@ class WorkstreamDaemon {
     }
   }
 
+  private async handleWorktreeJob(data: {
+    jobId: string;
+    worktreeName: string;
+    repoPath: string;
+    baseBranch?: string;
+    force?: boolean;
+    timestamp: number;
+  }) {
+    const { jobId, worktreeName, repoPath, baseBranch, force } = data;
+    let outputBuffer = '';
+    const lockKey = REDIS_KEYS.WORKTREE_LOCK(repoPath, worktreeName);
+    let lockAcquired = false;
+
+    try {
+      // Try to acquire a distributed lock to prevent race conditions
+      // Lock expires after 5 minutes (300 seconds) as a safety measure
+      const lockResult = await this.redis.set(lockKey, jobId, 'EX', 300, 'NX');
+      
+      if (!lockResult) {
+        // Another job is already processing this worktree
+        const existingJobId = await this.redis.get(lockKey);
+        log(`  ⚠️ Worktree creation already in progress for ${worktreeName} (held by job: ${existingJobId})`);
+        
+        // Mark this job as skipped/duplicate
+        await this.redis.set(
+          REDIS_KEYS.WORKTREE_JOB(jobId),
+          JSON.stringify({
+            ...data,
+            status: 'skipped',
+            output: `Worktree creation already in progress for ${worktreeName}. Another job (${existingJobId}) is handling this request.\n`,
+            error: 'duplicate_job',
+            startedAt: data.timestamp,
+            completedAt: Date.now(),
+          }),
+          'EX',
+          3600
+        );
+
+        // Publish skipped status
+        await this.publisher.publish(
+          REDIS_CHANNELS.WORKTREE_UPDATES,
+          JSON.stringify({
+            jobId,
+            status: 'skipped',
+            output: `Worktree creation already in progress for ${worktreeName}`,
+            error: 'duplicate_job',
+            timestamp: Date.now(),
+          })
+        );
+        return;
+      }
+      
+      lockAcquired = true;
+      log(`  🔒 Acquired lock for worktree: ${worktreeName}`);
+
+      // Store initial job status in Redis
+      await this.redis.set(
+        REDIS_KEYS.WORKTREE_JOB(jobId),
+        JSON.stringify({
+          ...data,
+          status: 'running',
+          output: 'Starting worktree creation...\n',
+          startedAt: Date.now(),
+        }),
+        'EX',
+        3600 // Expire after 1 hour
+      );
+
+      // Publish initial status update
+      await this.publisher.publish(
+        REDIS_CHANNELS.WORKTREE_UPDATES,
+        JSON.stringify({
+          jobId,
+          status: 'running',
+          output: 'Starting worktree creation...\n',
+          timestamp: Date.now(),
+        })
+      );
+
+      // Create worktree with streaming output
+      const result = await createWorktree({
+        branchName: worktreeName,
+        repoPath,
+        baseBranch,
+        force: force || false,
+        onOutput: (message, type) => {
+          const formattedMessage = `${message}\n`;
+          outputBuffer += formattedMessage;
+
+          // Publish streaming update
+          this.publisher.publish(
+            REDIS_CHANNELS.WORKTREE_UPDATES,
+            JSON.stringify({
+              jobId,
+              status: 'running',
+              output: formattedMessage,
+              timestamp: Date.now(),
+            })
+          ).catch((err) => logError('Error publishing worktree update:', err));
+
+          // Also update the job in Redis
+          this.redis.get(REDIS_KEYS.WORKTREE_JOB(jobId)).then((jobData) => {
+            if (jobData) {
+              const job = JSON.parse(jobData);
+              job.output = outputBuffer;
+              this.redis.set(
+                REDIS_KEYS.WORKTREE_JOB(jobId),
+                JSON.stringify(job),
+                'EX',
+                3600
+              ).catch((err) => logError('Error updating job in Redis:', err));
+            }
+          }).catch((err) => logError('Error getting job from Redis:', err));
+        },
+      });
+
+      if (result.success) {
+        // Open VS Code
+        outputBuffer += 'Opening VS Code...\n';
+        try {
+          await $`code "${result.worktreePath}"`;
+          outputBuffer += 'VS Code opened successfully!\n';
+        } catch (err) {
+          outputBuffer += `Warning: Could not open VS Code: ${err}\n`;
+        }
+
+        // Store final success status
+        await this.redis.set(
+          REDIS_KEYS.WORKTREE_JOB(jobId),
+          JSON.stringify({
+            ...data,
+            status: 'completed',
+            output: outputBuffer,
+            worktreePath: result.worktreePath,
+            startedAt: data.timestamp,
+            completedAt: Date.now(),
+          }),
+          'EX',
+          3600
+        );
+
+        // Publish completion
+        await this.publisher.publish(
+          REDIS_CHANNELS.WORKTREE_UPDATES,
+          JSON.stringify({
+            jobId,
+            status: 'completed',
+            output: outputBuffer,
+            worktreePath: result.worktreePath,
+            timestamp: Date.now(),
+          })
+        );
+
+        log(`  ✅ Worktree created successfully: ${result.worktreePath}`);
+      } else {
+        throw new Error(result.error || 'Worktree creation failed');
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      outputBuffer += `Error: ${errorMessage}\n`;
+
+      // Store failure status
+      await this.redis.set(
+        REDIS_KEYS.WORKTREE_JOB(jobId),
+        JSON.stringify({
+          ...data,
+          status: 'failed',
+          output: outputBuffer,
+          error: errorMessage,
+          startedAt: data.timestamp,
+          completedAt: Date.now(),
+        }),
+        'EX',
+        3600
+      );
+
+      // Publish failure
+      await this.publisher.publish(
+        REDIS_CHANNELS.WORKTREE_UPDATES,
+        JSON.stringify({
+          jobId,
+          status: 'failed',
+          output: outputBuffer,
+          error: errorMessage,
+          timestamp: Date.now(),
+        })
+      );
+
+      logError(`  ❌ Worktree creation failed:`, error);
+    } finally {
+      // Always release the lock if we acquired it
+      if (lockAcquired) {
+        try {
+          await this.redis.del(lockKey);
+          log(`  🔓 Released lock for worktree: ${worktreeName}`);
+        } catch (unlockError) {
+          logError(`  ⚠️ Failed to release lock for ${worktreeName}:`, unlockError);
+        }
+      }
+    }
+  }
+
   private async sendNotification(
     title: string,
     message: string,
-    type: 'claude_started' | 'claude_waiting' | 'claude_finished' | 'pr_check_failed' | 'pr_check_success' | 'pr_merge_blocked' | 'notification' = 'notification',
+    type: 'claude_started' | 'claude_waiting' | 'claude_finished' | 'pr_check_failed' | 'pr_check_success' | 'pr_merge_blocked' | 'opencode_session_started' | 'opencode_waiting' | 'opencode_error' | 'notification' = 'notification',
     style: 'success' | 'failure' | 'info' = 'info',
     projectPath?: string
   ) {
@@ -2142,21 +3167,28 @@ class WorkstreamDaemon {
         })
       );
 
-      // 2. Keep system notifications as fallback (for users without Raycast open)
-      try {
-        // Try terminal-notifier first (already approved in permissions)
-        await $`/opt/homebrew/bin/terminal-notifier -title ${title} -message ${message}`.quiet();
-      } catch {
-        // Fallback to osascript (built-in macOS)
-        try {
-          await $`/usr/bin/osascript -e 'display notification "${message}" with title "${title}"'`.quiet();
-        } catch (error) {
-          // Silent fail - notifications are nice-to-have
-        }
-      }
+      // 2. Send macOS system notification
+      await this.sendSystemNotification(title, message);
     } catch (error) {
       // Don't crash if notification fails
       logError('Failed to send notification:', error);
+    }
+  }
+
+  /**
+   * Send a macOS system notification (without publishing to Redis)
+   */
+  private async sendSystemNotification(title: string, message: string) {
+    try {
+      // Try terminal-notifier first (already approved in permissions)
+      await $`/opt/homebrew/bin/terminal-notifier -title ${title} -message ${message}`.quiet();
+    } catch {
+      // Fallback to osascript (built-in macOS)
+      try {
+        await $`/usr/bin/osascript -e 'display notification "${message}" with title "${title}"'`.quiet();
+      } catch (error) {
+        // Silent fail - notifications are nice-to-have
+      }
     }
   }
 

@@ -1,0 +1,40 @@
+{
+  "redis": {
+    "host": "localhost",
+    "port": 6379
+  },
+  "features": {
+    "eventTracking": true,
+    "customTools": true,
+    "contextInjection": true,
+    "safetyGuards": true,
+    "analytics": true,
+    "notifications": true,
+    "biDirectionalControl": true
+  },
+  "analytics": {
+    "costThreshold": 5.0,
+    "timeThreshold": 30,
+    "errorThreshold": 10
+  },
+  "safety": {
+    "protectedBranches": ["main", "master", "production", "prod"],
+    "requireCleanBranch": false,
+    "confirmDestructiveCommands": [
+      "rm -rf",
+      "sudo rm",
+      "drop table",
+      "drop database",
+      "truncate table",
+      "git reset --hard",
+      "git clean -fd"
+    ],
+    "maxConcurrentSessions": 3
+  },
+  "notifications": {
+    "onSessionIdle": true,
+    "onError": true,
+    "onCostThreshold": true,
+    "onPRCheckComplete": true
+  }
+}

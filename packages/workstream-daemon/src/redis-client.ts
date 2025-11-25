@@ -8,6 +8,12 @@ export const REDIS_KEYS = {
   CHROME_WINDOWS: 'workstream:chrome:windows',
   DAEMON_LOCK: 'workstream:daemon:lock',
   EVENTS_RECENT: 'workstream:events:recent',
+  WORKTREE_JOB: (jobId: string) => `workstream:worktree:job:${jobId}`,
+  WORKTREE_LOCK: (repoPath: string, worktreeName: string) => 
+    `workstream:worktree:lock:${Buffer.from(repoPath).toString('base64')}:${worktreeName}`,
+  // OpenCode uses pattern-based keys for multiple instances:
+  // workstream:opencode:instances:{base64(path)} - Set of PIDs
+  // workstream:opencode:api:{base64(path)}:{pid} - Instance info
 } as const;
 
 export const REDIS_CHANNELS = {
@@ -22,6 +28,9 @@ export const REDIS_CHANNELS = {
   VSCODE_GIT: 'workstream:vscode:git',
   VSCODE_TERMINAL: 'workstream:vscode:terminal',
   EVENTS_NEW: 'workstream:events:new',
+  WORKTREE_JOBS: 'workstream:worktree:jobs',
+  WORKTREE_UPDATES: 'workstream:worktree:updates',
+  OPENCODE: 'workstream:opencode',
 } as const;
 
 // TTL for instance data (30 seconds - auto-expires if daemon stops)

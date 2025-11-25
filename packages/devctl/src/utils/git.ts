@@ -48,3 +48,40 @@ export async function getWorktreeRoot(): Promise<string> {
     return process.cwd();
   }
 }
+
+/**
+ * Get the main worktree path (the original repo, not a linked worktree)
+ * Returns null if we're already in the main worktree or can't determine it
+ */
+export async function getMainWorktreePath(): Promise<string | null> {
+  try {
+    // Get the list of all worktrees
+    const result = await $`git worktree list --porcelain`;
+    const lines = result.stdout.trim().split('\n');
+    
+    // Parse worktree entries - the first one is always the main worktree
+    let mainWorktreePath: string | null = null;
+    let currentWorktreePath: string | null = null;
+    
+    for (const line of lines) {
+      if (line.startsWith('worktree ')) {
+        const path = line.substring('worktree '.length);
+        if (mainWorktreePath === null) {
+          mainWorktreePath = path;
+        }
+      }
+    }
+    
+    // Get current worktree path
+    currentWorktreePath = await getWorktreeRoot();
+    
+    // If we're in the main worktree, return null
+    if (mainWorktreePath === currentWorktreePath) {
+      return null;
+    }
+    
+    return mainWorktreePath;
+  } catch {
+    return null;
+  }
+}
