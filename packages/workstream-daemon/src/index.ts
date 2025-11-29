@@ -2949,9 +2949,10 @@ class WorkstreamDaemon {
     repoPath: string;
     baseBranch?: string;
     force?: boolean;
+    createOwnUpstream?: boolean;
     timestamp: number;
   }) {
-    const { jobId, worktreeName, repoPath, baseBranch, force } = data;
+    const { jobId, worktreeName, repoPath, baseBranch, force, createOwnUpstream } = data;
     let outputBuffer = '';
     const lockKey = REDIS_KEYS.WORKTREE_LOCK(repoPath, worktreeName);
     let lockAcquired = false;
@@ -3028,6 +3029,7 @@ class WorkstreamDaemon {
         repoPath,
         baseBranch,
         force: force || false,
+        createOwnUpstream,
         onOutput: (message, type) => {
           const formattedMessage = `${message}\n`;
           outputBuffer += formattedMessage;

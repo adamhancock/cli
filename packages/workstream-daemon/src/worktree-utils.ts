@@ -98,6 +98,7 @@ interface CreateWorktreeOptions {
   repoPath: string;
   baseBranch?: string;
   force?: boolean;
+  createOwnUpstream?: boolean;
   onOutput?: (message: string, type?: 'info' | 'success' | 'warning' | 'error') => void;
 }
 
@@ -236,7 +237,7 @@ async function executePostCreateHooks(
  * Create a worktree for a branch
  */
 export async function createWorktree(options: CreateWorktreeOptions): Promise<CreateWorktreeResult> {
-  const { branchName, repoPath, baseBranch: providedBaseBranch, force, onOutput } = options;
+  const { branchName, repoPath, baseBranch: providedBaseBranch, force, createOwnUpstream, onOutput } = options;
 
   try {
     // Load configuration
@@ -424,6 +425,42 @@ export async function createWorktree(options: CreateWorktreeOptions): Promise<Cr
     }
 
     onOutput?.('Worktree created successfully!', 'success');
+
+    // Set up branch tracking
+    // Determine if we should create own upstream (default true for new branches)
+    const shouldCreateOwnUpstream = createOwnUpstream !== false;
+    
+    try {
+      if (remoteBranchExists) {
+        // Branch already exists on remote - always track its own remote branch
+        onOutput?.(`Setting upstream for ${branchName} to track ${remote}/${branchName}`, 'info');
+        await $`git -C ${absoluteWorktreePath} branch --set-upstream-to=${remote}/${branchName} ${branchName}`;
+      } else if (shouldCreateOwnUpstream) {
+        // New branch - create its own upstream for PR-based workflow
+        onOutput?.(`New branch ${branchName} created. Configuring to push to ${remote}/${branchName}`, 'info');
+        await $`git -C ${absoluteWorktreePath} config branch.${branchName}.remote ${remote}`;
+        await $`git -C ${absoluteWorktreePath} config branch.${branchName}.merge refs/heads/${branchName}`;
+        await $`git -C ${absoluteWorktreePath} config push.default simple`;
+      } else {
+        // New branch - track the base branch upstream (for direct merge workflow)
+        onOutput?.(`New branch ${branchName} created. Setting upstream to track ${remote}/${baseBranch}`, 'info');
+        await $`git -C ${absoluteWorktreePath} branch --set-upstream-to=${remote}/${baseBranch} ${branchName}`;
+        await $`git -C ${absoluteWorktreePath} config push.default simple`;
+      }
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      onOutput?.(`Warning: Could not set upstream tracking: ${errorMsg}`, 'warning');
+    }
+
+    // Open VS Code early so user can start working while dependencies install
+    onOutput?.('Opening VS Code...', 'info');
+    try {
+      await $`code ${absoluteWorktreePath}`;
+      onOutput?.('VS Code opened successfully', 'success');
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      onOutput?.(`Warning: Could not open VS Code: ${errorMsg}`, 'warning');
+    }
 
     // Automatically install dependencies if package.json exists
     await runPackageManagerInstall(absoluteWorktreePath, onOutput);

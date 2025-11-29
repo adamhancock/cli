@@ -6,6 +6,7 @@ export interface WorktreeConfig {
   config?: WorktreeRcConfig; // Optional configuration override
   baseBranch?: string; // Optional base branch to create from
   force?: boolean; // Force remove existing directory and recreate
+  createOwnUpstream?: boolean; // Create own upstream branch instead of tracking base branch
 }
 
 export interface WorktreeResult {
@@ -35,6 +36,7 @@ export async function createWorktree(branchName: string, config: WorktreeConfig)
     config: config.config,
     baseBranch: config.baseBranch,
     force: config.force,
+    createOwnUpstream: config.createOwnUpstream,
     onOutput: appendOutput,
     skipVSCode: false,
   });
@@ -70,6 +72,7 @@ export async function createWorktreeStreaming(
     config: config.config,
     baseBranch: config.baseBranch,
     force: config.force,
+    createOwnUpstream: config.createOwnUpstream,
     onOutput: wrappedOutput,
     skipVSCode: false,
   });

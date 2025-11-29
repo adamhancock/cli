@@ -146,6 +146,14 @@ export interface CreateWorktreeOptions {
    * Force remove existing directory and recreate
    */
   force?: boolean;
+
+  /**
+   * Create own upstream branch instead of tracking the base branch.
+   * When true (default for new branches from non-default branches), the new branch
+   * will track its own remote branch for PR-based merging.
+   * When false, the new branch will track the base branch upstream.
+   */
+  createOwnUpstream?: boolean;
 }
 
 /**
@@ -342,7 +350,7 @@ async function executePostCreateHooks(
  * Create a git worktree with full environment setup
  */
 export async function createWorktree(options: CreateWorktreeOptions): Promise<CreateWorktreeResult> {
-  const { branchName, repoPath, config: providedConfig, baseBranch: providedBaseBranch, onOutput, skipVSCode } = options;
+  const { branchName, repoPath, config: providedConfig, baseBranch: providedBaseBranch, onOutput, skipVSCode, createOwnUpstream } = options;
 
   try {
     // Load configuration
@@ -492,11 +500,16 @@ export async function createWorktree(options: CreateWorktreeOptions): Promise<Cr
     // Worktree created successfully - no artificial delay needed with deterministic cleanup
 
     // Set up branch tracking
+    // Determine if we should create own upstream (default true for new branches)
+    const shouldCreateOwnUpstream = createOwnUpstream !== false;
+    
     try {
       if (remoteExists) {
+        // Branch already exists on remote - always track its own remote branch
         onOutput?.(`Setting upstream for ${selectedBranch} to track ${remote}/${selectedBranch}`, 'info');
         await execInDir(`git branch --set-upstream-to=${remote}/${selectedBranch} ${selectedBranch}`, absoluteWorktreePath);
-      } else {
+      } else if (shouldCreateOwnUpstream) {
+        // New branch - create its own upstream for PR-based workflow
         onOutput?.(
           `New branch ${selectedBranch} created locally. Configuring to push to ${remote}/${selectedBranch}`,
           'info'
@@ -516,6 +529,14 @@ export async function createWorktree(options: CreateWorktreeOptions): Promise<Cr
             onOutput?.(`Warning: Could not push new branch: ${errorMsg}`, 'warning');
           }
         }
+      } else {
+        // New branch - track the base branch upstream (for direct merge workflow)
+        onOutput?.(
+          `New branch ${selectedBranch} created locally. Setting upstream to track ${remote}/${baseBranch}`,
+          'info'
+        );
+        await execInDir(`git branch --set-upstream-to=${remote}/${baseBranch} ${selectedBranch}`, absoluteWorktreePath);
+        await execInDir('git config push.default simple', absoluteWorktreePath);
       }
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
@@ -540,6 +561,20 @@ export async function createWorktree(options: CreateWorktreeOptions): Promise<Cr
         // Copy the file
         await execAsync(`cp "${envFile}" "${targetPath}"`);
         onOutput?.(`Copied: ${relativePath}`, 'success');
+      }
+    }
+
+    // Open in VS Code early so user can start working while dependencies install
+    if (config.vscode?.open !== false) {
+      onOutput?.(`Opening VS Code at: ${absoluteWorktreePath}`, 'info');
+      try {
+        const vscodeCommand = config.vscode?.command || 'code';
+        const vscodeArgs = config.vscode?.args || [];
+        const command = `${vscodeCommand} ${vscodeArgs.join(' ')} "${absoluteWorktreePath}"`;
+
+        await execAsync(command);
+      } catch (err) {
+        onOutput?.('Failed to open VS Code', 'warning');
       }
     }
 
@@ -569,20 +604,6 @@ export async function createWorktree(options: CreateWorktreeOptions): Promise<Cr
       };
 
       await executePostCreateHooks(config.hooks.postCreate, templateVars, onOutput);
-    }
-
-    // Open in VS Code
-    if (config.vscode?.open !== false) {
-      onOutput?.(`Opening VS Code at: ${absoluteWorktreePath}`, 'info');
-      try {
-        const vscodeCommand = config.vscode?.command || 'code';
-        const vscodeArgs = config.vscode?.args || [];
-        const command = `${vscodeCommand} ${vscodeArgs.join(' ')} "${absoluteWorktreePath}"`;
-
-        await execAsync(command);
-      } catch (err) {
-        onOutput?.('Failed to open VS Code', 'warning');
-      }
     }
 
     onOutput?.('✅ Worktree created successfully!', 'success');
