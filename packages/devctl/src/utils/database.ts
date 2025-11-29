@@ -210,15 +210,19 @@ export async function createDatabase(config: DevCtlConfig, dbName: string, workd
     console.log(chalk.green(`✅ Database ${dbName} created successfully`));
     return { created: true, dbName };
 
-  } catch (error: any) {
-    if (error.stdout?.includes('already exists')) {
+  } catch (error: unknown) {
+    const err = error as any;
+    const errorMessage = err?.message || err?.stderr || String(error);
+    const errorStdout = err?.stdout || '';
+
+    if (errorStdout.includes('already exists') || errorMessage.includes('already exists')) {
       console.log(chalk.yellow(`⚠️  Database ${dbName} already exists`));
       return { created: true, dbName };
-    } else {
-      console.log(chalk.yellow(`⚠️  Could not create database ${dbName}:`));
-      console.log(chalk.gray(`   ${error.message}`));
-      return { created: false, dbName };
     }
+
+    console.log(chalk.yellow(`⚠️  Could not create database ${dbName}:`));
+    console.log(chalk.gray(`   ${errorMessage}`));
+    return { created: false, dbName };
   }
 }
 

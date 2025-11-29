@@ -68,8 +68,8 @@ export async function updateEnvFiles(
   // First, copy any missing .env files from the main worktree
   await copyEnvFilesFromMainWorktree(workdir);
 
-  // Update DATABASE_URL in all .env files if database was created
-  if (config.features.database && databaseInfo?.created) {
+  // Update DATABASE_URL in all .env files (even if database creation failed, so it's ready when available)
+  if (config.features.database) {
     const newDatabaseUrl = `postgresql://${config.database.user}:${config.database.password}@${config.database.host}:${config.database.port}/${dbName}`;
 
     // Find all .env files (excluding .env.example files)

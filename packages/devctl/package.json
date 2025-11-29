@@ -1,6 +1,6 @@
 {
   "name": "@adamhancock/devctl",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Development environment manager for multi-worktree projects with Caddy, database isolation, and port management",
   "type": "module",
   "bin": {
