@@ -34,7 +34,7 @@ interface FormValues {
 function parseStatusMessage(output: string): string {
   const lines = output.trim().split('\n').filter(Boolean);
   const lastLine = lines[lines.length - 1] || '';
-  
+
   // Map common messages to friendly status
   if (lastLine.includes('Fetching latest from')) return 'Fetching from remote...';
   if (lastLine.includes('Pulling latest changes')) return 'Pulling latest changes...';
@@ -46,13 +46,21 @@ function parseStatusMessage(output: string): string {
   if (lastLine.includes('Running post-create hooks')) return 'Running setup hooks...';
   if (lastLine.includes('Worktree created successfully')) return 'Finishing up...';
   if (lastLine.includes('Pruning stale')) return 'Cleaning up stale entries...';
-  
+
   // Return a truncated version of the last line if no match
   return lastLine.length > 50 ? lastLine.substring(0, 47) + '...' : lastLine || 'Starting...';
 }
 
 /**
- * Start worktree creation with toast-based progress updates
+ * Check if VS Code has been opened based on output
+ */
+function hasVSCodeOpened(output: string): boolean {
+  return output.includes('Opening VS Code') || output.includes('VS Code opened');
+}
+
+/**
+ * Start worktree creation - hands off to daemon and closes once VS Code opens
+ * Progress continues to be shown in VS Code's status bar via the extension
  */
 async function startWorktreeCreation(
   worktreeName: string,
@@ -69,6 +77,23 @@ async function startWorktreeCreation(
   });
 
   let lastOutput = '';
+  let handedOff = false;
+
+  // Helper to close Raycast after handoff
+  const closeRaycast = async () => {
+    if (handedOff) return;
+    handedOff = true;
+
+    toast.style = Toast.Style.Success;
+    toast.title = 'Handed off to VS Code';
+    toast.message = 'Progress continues in VS Code status bar';
+
+    // Close Raycast after a short delay
+    setTimeout(async () => {
+      await closeMainWindow();
+      await popToRoot();
+    }, 800);
+  };
 
   // Try to use daemon-based worktree creation
   const jobId = await publishWorktreeJob(worktreeName, repoPath, baseBranch, force, createOwnUpstream);
@@ -77,95 +102,23 @@ async function startWorktreeCreation(
     // Fallback to direct worktree creation if daemon is unavailable
     console.log('Daemon unavailable, falling back to direct worktree creation');
     toast.message = 'Running locally (daemon unavailable)...';
-    
+
     const result = await createWorktreeStreaming(
       worktreeName,
       { repoPath, baseBranch, force, createOwnUpstream },
       (chunk) => {
         lastOutput += chunk;
         toast.message = parseStatusMessage(lastOutput);
+
+        // Close Raycast once VS Code opens
+        if (hasVSCodeOpened(lastOutput)) {
+          closeRaycast();
+        }
       }
     );
 
-    if (result.success) {
-      toast.style = Toast.Style.Success;
-      toast.title = 'Worktree created successfully';
-      toast.message = worktreeName;
-
-      // Trigger daemon to refresh
-      await triggerDaemonRefresh();
-
-      // Close Raycast after a short delay
-      setTimeout(async () => {
-        await closeMainWindow();
-        await popToRoot();
-      }, 1500);
-    } else {
-      toast.style = Toast.Style.Failure;
-      toast.title = 'Failed to create worktree';
-      toast.message = result.error || 'Unknown error';
-    }
-    return;
-  }
-
-  // Track completion
-  let completed = false;
-
-  // Handler for processing updates
-  const handleUpdate = async (update: WorktreeUpdate) => {
-    if (completed) return;
-
-    // Update toast with latest status
-    if (update.output) {
-      lastOutput += update.output;
-      toast.message = parseStatusMessage(lastOutput);
-    }
-
-    // Handle completion states
-    if (update.status === 'completed') {
-      completed = true;
-      toast.style = Toast.Style.Success;
-      toast.title = 'Worktree created successfully';
-      toast.message = worktreeName;
-
-      // Trigger daemon refresh
-      await triggerDaemonRefresh();
-
-      // Close Raycast after a short delay
-      setTimeout(async () => {
-        await closeMainWindow();
-        await popToRoot();
-      }, 1500);
-    } else if (update.status === 'failed') {
-      completed = true;
-      toast.style = Toast.Style.Failure;
-      toast.title = 'Failed to create worktree';
-      toast.message = update.error || 'Unknown error';
-    } else if (update.status === 'skipped') {
-      completed = true;
-      toast.style = Toast.Style.Failure;
-      toast.title = 'Worktree creation skipped';
-      toast.message = 'Another job is already creating this worktree';
-    }
-  };
-
-  // Subscribe to updates for this job
-  console.log(`Subscribing to worktree job: ${jobId}`);
-  const unsubscribe = subscribeToWorktreeUpdates(jobId, handleUpdate, async () => {
-    // Error callback - fallback to direct creation
-    if (!completed) {
-      console.log('Redis subscription failed, falling back to direct creation');
-      toast.message = 'Switching to local mode...';
-      
-      const result = await createWorktreeStreaming(
-        worktreeName,
-        { repoPath, baseBranch, force, createOwnUpstream },
-        (chunk) => {
-          lastOutput += chunk;
-          toast.message = parseStatusMessage(lastOutput);
-        }
-      );
-
+    // Handle final result if we haven't handed off yet
+    if (!handedOff) {
       if (result.success) {
         toast.style = Toast.Style.Success;
         toast.title = 'Worktree created successfully';
@@ -181,49 +134,133 @@ async function startWorktreeCreation(
         toast.message = result.error || 'Unknown error';
       }
     }
+    return;
+  }
+
+  // Handler for processing updates from daemon
+  const handleUpdate = async (update: WorktreeUpdate) => {
+    if (handedOff) return;
+
+    // Update toast with latest status
+    if (update.output) {
+      lastOutput += update.output;
+      toast.message = parseStatusMessage(lastOutput);
+
+      // Close Raycast once VS Code opens
+      if (hasVSCodeOpened(lastOutput)) {
+        unsubscribe();
+        clearInterval(pollInterval);
+        await closeRaycast();
+        return;
+      }
+    }
+
+    // Handle early failure states (before VS Code opens)
+    if (update.status === 'failed') {
+      unsubscribe();
+      clearInterval(pollInterval);
+      toast.style = Toast.Style.Failure;
+      toast.title = 'Failed to create worktree';
+      toast.message = update.error || 'Unknown error';
+    } else if (update.status === 'skipped') {
+      unsubscribe();
+      clearInterval(pollInterval);
+      toast.style = Toast.Style.Failure;
+      toast.title = 'Worktree creation skipped';
+      toast.message = 'Another job is already creating this worktree';
+    }
+  };
+
+  // Subscribe to updates for this job
+  console.log(`Subscribing to worktree job: ${jobId}`);
+  const unsubscribe = subscribeToWorktreeUpdates(jobId, handleUpdate, async () => {
+    // Error callback - fallback to direct creation
+    if (!handedOff) {
+      console.log('Redis subscription failed, falling back to direct creation');
+      toast.message = 'Switching to local mode...';
+
+      const result = await createWorktreeStreaming(
+        worktreeName,
+        { repoPath, baseBranch, force, createOwnUpstream },
+        (chunk) => {
+          lastOutput += chunk;
+          toast.message = parseStatusMessage(lastOutput);
+
+          if (hasVSCodeOpened(lastOutput)) {
+            closeRaycast();
+          }
+        }
+      );
+
+      if (!handedOff) {
+        if (result.success) {
+          toast.style = Toast.Style.Success;
+          toast.title = 'Worktree created successfully';
+          toast.message = worktreeName;
+          await triggerDaemonRefresh();
+          setTimeout(async () => {
+            await closeMainWindow();
+            await popToRoot();
+          }, 1500);
+        } else {
+          toast.style = Toast.Style.Failure;
+          toast.title = 'Failed to create worktree';
+          toast.message = result.error || 'Unknown error';
+        }
+      }
+    }
   });
 
-  // Also poll for status as a fallback (in case pub/sub misses the update)
-  let pollCount = 0;
+  // Poll for status as a fallback (in case pub/sub misses the update)
   const pollInterval = setInterval(async () => {
-    pollCount++;
-    if (completed) {
+    if (handedOff) {
       clearInterval(pollInterval);
       unsubscribe();
       return;
     }
-    
+
     try {
       const status = await getWorktreeJobStatus(jobId);
-      
-      if (status && status.status && status.status !== 'running') {
-        console.log('Poll detected job completion:', status.status);
-        await handleUpdate({
-          jobId,
-          status: status.status as 'completed' | 'failed' | 'skipped',
-          output: status.output,
-          error: status.error,
-          worktreePath: status.worktreePath,
-          timestamp: status.timestamp || Date.now(),
-        });
+
+      if (status && status.output) {
+        // Check if VS Code has opened from polled status
+        if (hasVSCodeOpened(status.output)) {
+          clearInterval(pollInterval);
+          unsubscribe();
+          await closeRaycast();
+          return;
+        }
+      }
+
+      // Handle failure from poll
+      if (status && status.status === 'failed') {
         clearInterval(pollInterval);
         unsubscribe();
+        toast.style = Toast.Style.Failure;
+        toast.title = 'Failed to create worktree';
+        toast.message = status.error || 'Unknown error';
+      } else if (status && status.status === 'skipped') {
+        clearInterval(pollInterval);
+        unsubscribe();
+        toast.style = Toast.Style.Failure;
+        toast.title = 'Worktree creation skipped';
+        toast.message = 'Another job is already creating this worktree';
       }
     } catch (e) {
       console.error('Poll error:', e);
     }
   }, 1000);
 
-  // Set a timeout to clean up after 5 minutes
+  // Set a timeout to clean up after 2 minutes (VS Code should open much sooner)
   setTimeout(() => {
-    if (!completed) {
+    if (!handedOff) {
       clearInterval(pollInterval);
       unsubscribe();
       toast.style = Toast.Style.Failure;
       toast.title = 'Worktree creation timed out';
-      toast.message = 'Please check the daemon logs';
+      toast.message = 'VS Code did not open in time';
     }
-  }, 5 * 60 * 1000);
+  }, 2 * 60 * 1000);
 }
 
 export default function CreateWorktreeCommand() {

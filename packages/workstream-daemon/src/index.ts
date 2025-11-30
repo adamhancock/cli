@@ -2990,6 +2990,8 @@ class WorkstreamDaemon {
             status: 'skipped',
             output: `Worktree creation already in progress for ${worktreeName}`,
             error: 'duplicate_job',
+            repoPath,
+            worktreeName,
             timestamp: Date.now(),
           })
         );
@@ -3019,6 +3021,8 @@ class WorkstreamDaemon {
           jobId,
           status: 'running',
           output: 'Starting worktree creation...\n',
+          repoPath,
+          worktreeName,
           timestamp: Date.now(),
         })
       );
@@ -3041,6 +3045,8 @@ class WorkstreamDaemon {
               jobId,
               status: 'running',
               output: formattedMessage,
+              repoPath,
+              worktreeName,
               timestamp: Date.now(),
             })
           ).catch((err) => logError('Error publishing worktree update:', err));
@@ -3094,6 +3100,8 @@ class WorkstreamDaemon {
             status: 'completed',
             output: outputBuffer,
             worktreePath: result.worktreePath,
+            repoPath,
+            worktreeName,
             timestamp: Date.now(),
           })
         );
@@ -3129,6 +3137,8 @@ class WorkstreamDaemon {
           status: 'failed',
           output: outputBuffer,
           error: errorMessage,
+          repoPath,
+          worktreeName,
           timestamp: Date.now(),
         })
       );

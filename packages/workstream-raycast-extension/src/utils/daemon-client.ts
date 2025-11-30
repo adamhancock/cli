@@ -254,7 +254,7 @@ export interface WorktreeJobData {
   force?: boolean;
   createOwnUpstream?: boolean;
   timestamp: number;
-  status?: 'pending' | 'running' | 'completed' | 'failed';
+  status?: 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
   output?: string;
   error?: string;
   worktreePath?: string;

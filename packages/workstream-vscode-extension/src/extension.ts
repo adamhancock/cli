@@ -6,6 +6,7 @@ import { WorkspaceTracker } from './trackers/WorkspaceTracker';
 import { FileTracker } from './trackers/FileTracker';
 import { GitTracker } from './trackers/GitTracker';
 import { TerminalTracker } from './trackers/TerminalTracker';
+import { WorktreeProgressTracker } from './trackers/WorktreeProgressTracker';
 import { Config } from './config';
 
 let publisher: RedisPublisher | null = null;
@@ -16,6 +17,7 @@ let trackers: {
   file?: FileTracker;
   git?: GitTracker;
   terminal?: TerminalTracker;
+  worktreeProgress?: WorktreeProgressTracker;
 } = {};
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
@@ -61,6 +63,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     // Subscribe to terminal focus requests
     await setupTerminalFocusListener(context);
+
+    // Initialize worktree progress tracker (uses the same subscriber)
+    if (subscriber) {
+      trackers.worktreeProgress = new WorktreeProgressTracker(subscriber);
+      await trackers.worktreeProgress.start();
+
+      // Register dismiss command
+      context.subscriptions.push(
+        vscode.commands.registerCommand('workstream.dismissWorktreeProgress', () => {
+          trackers.worktreeProgress?.dismiss();
+        })
+      );
+    }
 
     // Register cleanup
     context.subscriptions.push({

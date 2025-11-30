@@ -80,3 +80,14 @@ export interface ZshTerminalState {
 }
 
 export type TerminalPurpose = 'dev-server' | 'testing' | 'build' | 'general';
+
+export interface WorktreeUpdate {
+  jobId: string;
+  status: 'running' | 'completed' | 'failed' | 'skipped';
+  output?: string;
+  error?: string;
+  worktreePath?: string;
+  repoPath?: string;
+  worktreeName?: string;
+  timestamp: number;
+}
