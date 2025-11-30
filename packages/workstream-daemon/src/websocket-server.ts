@@ -7,7 +7,10 @@ import type {
   ClientToServerEvents,
   ServerToClientEvents,
   ClaudeEventData,
-  NotificationData
+  NotificationData,
+  ChromeCookieUpdate,
+  ChromeRequestLog,
+  ChromeLocalStorageUpdate
 } from './websocket-types.js';
 
 interface WebSocketServerOptions {
@@ -100,6 +103,66 @@ export class WebSocketServer {
       // Handle ping
       socket.on('ping', () => {
         socket.emit('pong');
+      });
+
+      // Handle Chrome extension cookie updates
+      socket.on('chrome:cookies', async (data: ChromeCookieUpdate) => {
+        try {
+          console.log(`[WebSocket] Received cookies for domain: ${data.domain}`);
+          await this.redis.hset(
+            REDIS_KEYS.CHROME_COOKIES,
+            data.domain,
+            JSON.stringify(data.cookies)
+          );
+          // Publish event for other listeners
+          await this.redis.publish(
+            REDIS_CHANNELS.CHROME_COOKIES,
+            JSON.stringify(data)
+          );
+        } catch (error) {
+          console.error('[WebSocket] Error storing cookies:', error);
+        }
+      });
+
+      // Handle Chrome extension request logs
+      socket.on('chrome:requests', async (data: ChromeRequestLog[]) => {
+        try {
+          console.log(`[WebSocket] Received ${data.length} request logs`);
+          // Add each request to the list
+          const pipeline = this.redis.pipeline();
+          for (const request of data) {
+            pipeline.lpush(REDIS_KEYS.CHROME_REQUESTS, JSON.stringify(request));
+          }
+          // Trim to keep only the most recent 1000 requests
+          pipeline.ltrim(REDIS_KEYS.CHROME_REQUESTS, 0, 999);
+          await pipeline.exec();
+          // Publish event for other listeners
+          await this.redis.publish(
+            REDIS_CHANNELS.CHROME_REQUESTS,
+            JSON.stringify({ count: data.length, timestamp: Date.now() })
+          );
+        } catch (error) {
+          console.error('[WebSocket] Error storing request logs:', error);
+        }
+      });
+
+      // Handle Chrome extension localStorage updates
+      socket.on('chrome:localstorage', async (data: ChromeLocalStorageUpdate) => {
+        try {
+          console.log(`[WebSocket] Received localStorage for origin: ${data.origin}`);
+          await this.redis.hset(
+            REDIS_KEYS.CHROME_LOCALSTORAGE,
+            data.origin,
+            JSON.stringify(data.data)
+          );
+          // Publish event for other listeners
+          await this.redis.publish(
+            REDIS_CHANNELS.CHROME_LOCALSTORAGE,
+            JSON.stringify(data)
+          );
+        } catch (error) {
+          console.error('[WebSocket] Error storing localStorage:', error);
+        }
       });
 
       // Handle disconnect

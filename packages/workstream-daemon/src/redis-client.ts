@@ -9,11 +9,17 @@ export const REDIS_KEYS = {
   DAEMON_LOCK: 'workstream:daemon:lock',
   EVENTS_RECENT: 'workstream:events:recent',
   WORKTREE_JOB: (jobId: string) => `workstream:worktree:job:${jobId}`,
-  WORKTREE_LOCK: (repoPath: string, worktreeName: string) => 
+  WORKTREE_LOCK: (repoPath: string, worktreeName: string) =>
     `workstream:worktree:lock:${Buffer.from(repoPath).toString('base64')}:${worktreeName}`,
   // OpenCode uses pattern-based keys for multiple instances:
   // workstream:opencode:instances:{base64(path)} - Set of PIDs
   // workstream:opencode:api:{base64(path)}:{pid} - Instance info
+
+  // Chrome extension keys
+  CHROME_COOKIES: 'workstream:chrome:cookies',         // Hash: domain -> JSON cookies array
+  CHROME_REQUESTS: 'workstream:chrome:requests',       // List: recent requests (capped at 1000)
+  CHROME_LOCALSTORAGE: 'workstream:chrome:localstorage', // Hash: origin -> JSON localStorage
+  CHROME_CONFIG: 'workstream:chrome:config',           // Hash: extension config
 } as const;
 
 export const REDIS_CHANNELS = {
@@ -31,6 +37,9 @@ export const REDIS_CHANNELS = {
   WORKTREE_JOBS: 'workstream:worktree:jobs',
   WORKTREE_UPDATES: 'workstream:worktree:updates',
   OPENCODE: 'workstream:opencode',
+  CHROME_COOKIES: 'workstream:chrome:cookies',
+  CHROME_REQUESTS: 'workstream:chrome:requests',
+  CHROME_LOCALSTORAGE: 'workstream:chrome:localstorage',
 } as const;
 
 // TTL for instance data (30 seconds - auto-expires if daemon stops)

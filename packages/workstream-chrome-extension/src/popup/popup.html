@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Workstream Cookie Sync</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <h1>Workstream</h1>
+    <div id="status" class="status disconnected">
+      <span class="status-dot"></span>
+      <span id="status-text">Disconnected</span>
+    </div>
+
+    <div class="section">
+      <label class="toggle">
+        <input type="checkbox" id="enabled">
+        <span class="toggle-slider"></span>
+        <span class="toggle-label">Enable tracking</span>
+      </label>
+    </div>
+
+    <div class="section">
+      <label for="domains">Tracked domains:</label>
+      <textarea id="domains" rows="3" placeholder="*.localhost&#10;*.dev.example.com"></textarea>
+      <small>One pattern per line. Use *.domain for wildcards.</small>
+    </div>
+
+    <div class="section">
+      <label for="daemon-url">Daemon WebSocket URL:</label>
+      <input type="text" id="daemon-url" placeholder="ws://localhost:58234">
+    </div>
+
+    <div class="section">
+      <label for="auth-token">Auth Token (optional):</label>
+      <input type="password" id="auth-token" placeholder="Leave empty if not required">
+    </div>
+
+    <div class="actions">
+      <button id="save" class="btn-primary">Save</button>
+      <button id="sync" class="btn-secondary">Sync Now</button>
+    </div>
+
+    <div id="stats" class="stats">
+      <small>Buffered requests: <span id="buffered-count">0</span></small>
+    </div>
+  </div>
+
+  <script src="./popup.ts" type="module"></script>
+</body>
+</html>
