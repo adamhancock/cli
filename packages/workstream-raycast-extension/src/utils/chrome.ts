@@ -8,6 +8,21 @@ import { getSelectedChromeProfile } from './cache';
 
 const execAsync = promisify(exec);
 
+async function focusChromeApp() {
+  try {
+    const script = `
+      tell application "System Events"
+        if exists process "Google Chrome" then
+          set frontmost of process "Google Chrome" to true
+        end if
+      end tell
+    `;
+    await execAsync(`osascript -e '${script}'`);
+  } catch (error) {
+    console.error('[Chrome Focus] Failed to bring Chrome forward:', error);
+  }
+}
+
 export interface ChromeTab {
   index: number;
   title: string;
@@ -122,6 +137,7 @@ export async function switchToChromeTab(windowId: number, tabIndex: number, prof
     end tell
   `;
   await execAsync(`osascript -e '${script}'`);
+  await focusChromeApp();
 }
 
 /**
@@ -136,6 +152,7 @@ export async function openNewChromeTab(url: string, profile?: string) {
     const escapedUrl = url.replace(/"/g, '\\"');
     const escapedProfile = profile.replace(/"/g, '\\"');
     await execAsync(`open -na "Google Chrome" --args --profile-directory="${escapedProfile}" "${escapedUrl}"`);
+    await focusChromeApp();
   } else {
     // Fallback to AppleScript if no profile specified
     const escapedUrl = url.replace(/'/g, "'\"'\"'");
@@ -146,6 +163,7 @@ export async function openNewChromeTab(url: string, profile?: string) {
       end tell
     `;
     await execAsync(`osascript -e '${script}'`);
+    await focusChromeApp();
   }
 }
 
