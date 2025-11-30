@@ -30,8 +30,15 @@ export interface ChromeLocalStorageData {
 }
 
 // Redis keys - must match workstream-daemon/src/redis-client.ts
+// Keys are per-domain/origin with 24h TTL
+export const REDIS_KEY_PATTERNS = {
+  CHROME_COOKIES: 'workstream:chrome:cookies:*',
+  CHROME_REQUESTS: 'workstream:chrome:requests:*',
+  CHROME_LOCALSTORAGE: 'workstream:chrome:localstorage:*',
+} as const;
+
 export const REDIS_KEYS = {
-  CHROME_COOKIES: 'workstream:chrome:cookies',
-  CHROME_REQUESTS: 'workstream:chrome:requests',
-  CHROME_LOCALSTORAGE: 'workstream:chrome:localstorage',
+  CHROME_COOKIES: (domain: string) => `workstream:chrome:cookies:${domain}`,
+  CHROME_REQUESTS: (domain: string) => `workstream:chrome:requests:${domain}`,
+  CHROME_LOCALSTORAGE: (origin: string) => `workstream:chrome:localstorage:${encodeURIComponent(origin)}`,
 } as const;

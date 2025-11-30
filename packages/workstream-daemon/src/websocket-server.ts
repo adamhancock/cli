@@ -2,7 +2,7 @@ import { Server as SocketIOServer } from 'socket.io';
 import type { Server as HTTPServer } from 'http';
 import { createServer } from 'http';
 import Redis from 'ioredis';
-import { REDIS_KEYS, REDIS_CHANNELS } from './redis-client.js';
+import { REDIS_KEYS, REDIS_CHANNELS, CHROME_DATA_TTL } from './redis-client.js';
 import type {
   ClientToServerEvents,
   ServerToClientEvents,
@@ -109,11 +109,8 @@ export class WebSocketServer {
       socket.on('chrome:cookies', async (data: ChromeCookieUpdate) => {
         try {
           console.log(`[WebSocket] Received cookies for domain: ${data.domain}`);
-          await this.redis.hset(
-            REDIS_KEYS.CHROME_COOKIES,
-            data.domain,
-            JSON.stringify(data.cookies)
-          );
+          const key = REDIS_KEYS.CHROME_COOKIES(data.domain);
+          await this.redis.set(key, JSON.stringify(data.cookies), 'EX', CHROME_DATA_TTL);
           // Publish event for other listeners
           await this.redis.publish(
             REDIS_CHANNELS.CHROME_COOKIES,
@@ -128,18 +125,44 @@ export class WebSocketServer {
       socket.on('chrome:requests', async (data: ChromeRequestLog[]) => {
         try {
           console.log(`[WebSocket] Received ${data.length} request logs`);
-          // Add each request to the list
-          const pipeline = this.redis.pipeline();
+
+          // Group requests by domain
+          const requestsByDomain = new Map<string, ChromeRequestLog[]>();
           for (const request of data) {
-            pipeline.lpush(REDIS_KEYS.CHROME_REQUESTS, JSON.stringify(request));
+            try {
+              const url = new URL(request.url);
+              const domain = url.hostname;
+              if (!requestsByDomain.has(domain)) {
+                requestsByDomain.set(domain, []);
+              }
+              requestsByDomain.get(domain)!.push(request);
+            } catch {
+              // Skip invalid URLs
+            }
           }
-          // Trim to keep only the most recent 1000 requests
-          pipeline.ltrim(REDIS_KEYS.CHROME_REQUESTS, 0, 999);
-          await pipeline.exec();
+
+          // Update each domain's request list
+          for (const [domain, requests] of requestsByDomain) {
+            const key = REDIS_KEYS.CHROME_REQUESTS(domain);
+            // Get existing requests for this domain
+            const existing = await this.redis.get(key);
+            let allRequests: ChromeRequestLog[] = [];
+            if (existing) {
+              try {
+                allRequests = JSON.parse(existing);
+              } catch {
+                // Invalid JSON, start fresh
+              }
+            }
+            // Prepend new requests and cap at 100 per domain
+            allRequests = [...requests, ...allRequests].slice(0, 100);
+            await this.redis.set(key, JSON.stringify(allRequests), 'EX', CHROME_DATA_TTL);
+          }
+
           // Publish event for other listeners
           await this.redis.publish(
             REDIS_CHANNELS.CHROME_REQUESTS,
-            JSON.stringify({ count: data.length, timestamp: Date.now() })
+            JSON.stringify({ count: data.length, domains: Array.from(requestsByDomain.keys()), timestamp: Date.now() })
           );
         } catch (error) {
           console.error('[WebSocket] Error storing request logs:', error);
@@ -150,11 +173,8 @@ export class WebSocketServer {
       socket.on('chrome:localstorage', async (data: ChromeLocalStorageUpdate) => {
         try {
           console.log(`[WebSocket] Received localStorage for origin: ${data.origin}`);
-          await this.redis.hset(
-            REDIS_KEYS.CHROME_LOCALSTORAGE,
-            data.origin,
-            JSON.stringify(data.data)
-          );
+          const key = REDIS_KEYS.CHROME_LOCALSTORAGE(data.origin);
+          await this.redis.set(key, JSON.stringify(data.data), 'EX', CHROME_DATA_TTL);
           // Publish event for other listeners
           await this.redis.publish(
             REDIS_CHANNELS.CHROME_LOCALSTORAGE,

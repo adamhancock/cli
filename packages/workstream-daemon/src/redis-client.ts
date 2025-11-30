@@ -15,10 +15,10 @@ export const REDIS_KEYS = {
   // workstream:opencode:instances:{base64(path)} - Set of PIDs
   // workstream:opencode:api:{base64(path)}:{pid} - Instance info
 
-  // Chrome extension keys
-  CHROME_COOKIES: 'workstream:chrome:cookies',         // Hash: domain -> JSON cookies array
-  CHROME_REQUESTS: 'workstream:chrome:requests',       // List: recent requests (capped at 1000)
-  CHROME_LOCALSTORAGE: 'workstream:chrome:localstorage', // Hash: origin -> JSON localStorage
+  // Chrome extension keys (separate keys per domain with 24h TTL)
+  CHROME_COOKIES: (domain: string) => `workstream:chrome:cookies:${domain}`,
+  CHROME_REQUESTS: (domain: string) => `workstream:chrome:requests:${domain}`,
+  CHROME_LOCALSTORAGE: (origin: string) => `workstream:chrome:localstorage:${encodeURIComponent(origin)}`,
   CHROME_CONFIG: 'workstream:chrome:config',           // Hash: extension config
 } as const;
 
@@ -44,6 +44,9 @@ export const REDIS_CHANNELS = {
 
 // TTL for instance data (30 seconds - auto-expires if daemon stops)
 export const INSTANCE_TTL = 30;
+
+// TTL for Chrome extension data (24 hours)
+export const CHROME_DATA_TTL = 24 * 60 * 60;
 
 let redisClient: Redis | null = null;
 let publisherClient: Redis | null = null;

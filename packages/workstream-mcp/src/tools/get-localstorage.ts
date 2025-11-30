@@ -1,5 +1,5 @@
 import { getRedisClient } from '../redis-client.js';
-import { REDIS_KEYS } from '../types.js';
+import { REDIS_KEY_PATTERNS } from '../types.js';
 
 export interface GetLocalStorageInput {
   origin?: string;
@@ -11,25 +11,47 @@ export interface GetLocalStorageOutput {
   origins: string[];
 }
 
+// Extract origin from key like "workstream:chrome:localstorage:http%3A%2F%2Fexample.com"
+function extractOriginFromKey(key: string): string {
+  const prefix = 'workstream:chrome:localstorage:';
+  const encoded = key.startsWith(prefix) ? key.slice(prefix.length) : key;
+  try {
+    return decodeURIComponent(encoded);
+  } catch {
+    return encoded;
+  }
+}
+
 export async function getLocalStorage(input: GetLocalStorageInput): Promise<GetLocalStorageOutput> {
   const redis = getRedisClient();
 
-  // Get all origins with localStorage
-  const allOrigins = await redis.hkeys(REDIS_KEYS.CHROME_LOCALSTORAGE);
+  // Scan for all localStorage keys
+  const allKeys: string[] = [];
+  let cursor = '0';
+  do {
+    const [nextCursor, keys] = await redis.scan(cursor, 'MATCH', REDIS_KEY_PATTERNS.CHROME_LOCALSTORAGE, 'COUNT', 100);
+    cursor = nextCursor;
+    allKeys.push(...keys);
+  } while (cursor !== '0');
 
-  // Filter origins if a specific origin is requested
-  const originsToFetch = input.origin
-    ? allOrigins.filter((o) => o.includes(input.origin!) || input.origin!.includes(o))
-    : allOrigins;
+  const allOrigins = allKeys.map(extractOriginFromKey);
 
-  if (originsToFetch.length === 0) {
+  // Filter keys if a specific origin is requested
+  const keysToFetch = input.origin
+    ? allKeys.filter((key) => {
+        const origin = extractOriginFromKey(key);
+        return origin.includes(input.origin!) || input.origin!.includes(origin);
+      })
+    : allKeys;
+
+  if (keysToFetch.length === 0) {
     return { storage: [], origins: allOrigins };
   }
 
-  // Fetch localStorage for matching origins
+  // Fetch localStorage for matching keys
   const pipeline = redis.pipeline();
-  for (const origin of originsToFetch) {
-    pipeline.hget(REDIS_KEYS.CHROME_LOCALSTORAGE, origin);
+  for (const key of keysToFetch) {
+    pipeline.get(key);
   }
 
   const results = await pipeline.exec();
@@ -53,7 +75,7 @@ export async function getLocalStorage(input: GetLocalStorageInput): Promise<GetL
         }
 
         if (Object.keys(data).length > 0) {
-          storage.push({ origin: originsToFetch[i], data });
+          storage.push({ origin: extractOriginFromKey(keysToFetch[i]), data });
         }
       } catch {
         // Skip invalid data

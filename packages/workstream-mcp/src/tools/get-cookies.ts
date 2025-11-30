@@ -1,5 +1,5 @@
 import { getRedisClient } from '../redis-client.js';
-import { REDIS_KEYS, type ChromeCookie } from '../types.js';
+import { REDIS_KEY_PATTERNS, REDIS_KEYS, type ChromeCookie } from '../types.js';
 
 export interface GetCookiesInput {
   domain?: string;
@@ -11,25 +11,42 @@ export interface GetCookiesOutput {
   domains: string[];
 }
 
+// Extract domain from key like "workstream:chrome:cookies:example.com"
+function extractDomainFromKey(key: string): string {
+  const prefix = 'workstream:chrome:cookies:';
+  return key.startsWith(prefix) ? key.slice(prefix.length) : key;
+}
+
 export async function getCookies(input: GetCookiesInput): Promise<GetCookiesOutput> {
   const redis = getRedisClient();
 
-  // Get all domains with cookies
-  const allDomains = await redis.hkeys(REDIS_KEYS.CHROME_COOKIES);
+  // Scan for all cookie keys
+  const allKeys: string[] = [];
+  let cursor = '0';
+  do {
+    const [nextCursor, keys] = await redis.scan(cursor, 'MATCH', REDIS_KEY_PATTERNS.CHROME_COOKIES, 'COUNT', 100);
+    cursor = nextCursor;
+    allKeys.push(...keys);
+  } while (cursor !== '0');
+
+  const allDomains = allKeys.map(extractDomainFromKey);
 
   // Filter domains if a specific domain is requested
-  const domainsToFetch = input.domain
-    ? allDomains.filter((d) => d.includes(input.domain!) || input.domain!.includes(d))
-    : allDomains;
+  const keysToFetch = input.domain
+    ? allKeys.filter((key) => {
+        const domain = extractDomainFromKey(key);
+        return domain.includes(input.domain!) || input.domain!.includes(domain);
+      })
+    : allKeys;
 
-  if (domainsToFetch.length === 0) {
+  if (keysToFetch.length === 0) {
     return { cookies: [], domains: allDomains };
   }
 
-  // Fetch cookies for matching domains
+  // Fetch cookies for matching keys
   const pipeline = redis.pipeline();
-  for (const domain of domainsToFetch) {
-    pipeline.hget(REDIS_KEYS.CHROME_COOKIES, domain);
+  for (const key of keysToFetch) {
+    pipeline.get(key);
   }
 
   const results = await pipeline.exec();
@@ -42,12 +59,13 @@ export async function getCookies(input: GetCookiesInput): Promise<GetCookiesOutp
 
       try {
         const domainCookies: ChromeCookie[] = JSON.parse(data as string);
+        const sourceDomain = extractDomainFromKey(keysToFetch[i]);
         for (const cookie of domainCookies) {
           // Filter by name if specified
           if (input.name && cookie.name !== input.name) {
             continue;
           }
-          cookies.push({ ...cookie, sourceDomain: domainsToFetch[i] });
+          cookies.push({ ...cookie, sourceDomain });
         }
       } catch {
         // Skip invalid data

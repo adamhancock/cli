@@ -1,5 +1,5 @@
 import { getRedisClient } from '../redis-client.js';
-import { REDIS_KEYS, type ChromeCookie } from '../types.js';
+import { REDIS_KEY_PATTERNS, REDIS_KEYS, type ChromeCookie } from '../types.js';
 
 export interface GenerateCurlInput {
   url: string;
@@ -12,6 +12,12 @@ export interface GenerateCurlInput {
 export interface GenerateCurlOutput {
   curl: string;
   cookiesUsed: string[];
+}
+
+// Extract domain from key like "workstream:chrome:cookies:example.com"
+function extractDomainFromKey(key: string): string {
+  const prefix = 'workstream:chrome:cookies:';
+  return key.startsWith(prefix) ? key.slice(prefix.length) : key;
 }
 
 export async function generateCurl(input: GenerateCurlInput): Promise<GenerateCurlOutput> {
@@ -37,14 +43,23 @@ export async function generateCurl(input: GenerateCurlInput): Promise<GenerateCu
   // Add cookies if requested
   const cookiesUsed: string[] = [];
   if (input.includeAuth !== false) {
-    // Find matching domain in stored cookies
-    const allDomains = await redis.hkeys(REDIS_KEYS.CHROME_COOKIES);
-    const matchingDomain = allDomains.find(
-      (d) => domain === d || domain.endsWith('.' + d) || d.endsWith('.' + domain)
-    );
+    // Scan for all cookie keys
+    const allKeys: string[] = [];
+    let cursor = '0';
+    do {
+      const [nextCursor, keys] = await redis.scan(cursor, 'MATCH', REDIS_KEY_PATTERNS.CHROME_COOKIES, 'COUNT', 100);
+      cursor = nextCursor;
+      allKeys.push(...keys);
+    } while (cursor !== '0');
 
-    if (matchingDomain) {
-      const cookieData = await redis.hget(REDIS_KEYS.CHROME_COOKIES, matchingDomain);
+    // Find matching domain in stored cookies
+    const matchingKey = allKeys.find((key) => {
+      const d = extractDomainFromKey(key);
+      return domain === d || domain.endsWith('.' + d) || d.endsWith('.' + domain);
+    });
+
+    if (matchingKey) {
+      const cookieData = await redis.get(matchingKey);
       if (cookieData) {
         try {
           const cookies: ChromeCookie[] = JSON.parse(cookieData);
