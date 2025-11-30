@@ -57,6 +57,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: 'string',
               description: 'Filter by domain (e.g., "dev.localhost")',
             },
+            port: {
+              type: 'number',
+              description: 'Filter by destination port (e.g., 3000, 8080)',
+            },
             method: {
               type: 'string',
               description: 'Filter by HTTP method (GET, POST, PUT, DELETE, etc.)',

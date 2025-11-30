@@ -126,25 +126,28 @@ export class WebSocketServer {
         try {
           console.log(`[WebSocket] Received ${data.length} request logs`);
 
-          // Group requests by domain
-          const requestsByDomain = new Map<string, ChromeRequestLog[]>();
+          // Group requests by domain:port
+          const requestsByDestination = new Map<string, ChromeRequestLog[]>();
           for (const request of data) {
             try {
               const url = new URL(request.url);
               const domain = url.hostname;
-              if (!requestsByDomain.has(domain)) {
-                requestsByDomain.set(domain, []);
+              const port = url.port || (url.protocol === 'https:' ? '443' : '80');
+              const destination = `${domain}:${port}`;
+              if (!requestsByDestination.has(destination)) {
+                requestsByDestination.set(destination, []);
               }
-              requestsByDomain.get(domain)!.push(request);
+              requestsByDestination.get(destination)!.push(request);
             } catch {
               // Skip invalid URLs
             }
           }
 
-          // Update each domain's request list
-          for (const [domain, requests] of requestsByDomain) {
-            const key = REDIS_KEYS.CHROME_REQUESTS(domain);
-            // Get existing requests for this domain
+          // Update each destination's request list
+          for (const [destination, requests] of requestsByDestination) {
+            const [domain, port] = destination.split(':');
+            const key = REDIS_KEYS.CHROME_REQUESTS(domain, port);
+            // Get existing requests for this destination
             const existing = await this.redis.get(key);
             let allRequests: ChromeRequestLog[] = [];
             if (existing) {
@@ -154,7 +157,7 @@ export class WebSocketServer {
                 // Invalid JSON, start fresh
               }
             }
-            // Prepend new requests and cap at 100 per domain
+            // Prepend new requests and cap at 100 per destination
             allRequests = [...requests, ...allRequests].slice(0, 100);
             await this.redis.set(key, JSON.stringify(allRequests), 'EX', CHROME_DATA_TTL);
           }
@@ -162,7 +165,7 @@ export class WebSocketServer {
           // Publish event for other listeners
           await this.redis.publish(
             REDIS_CHANNELS.CHROME_REQUESTS,
-            JSON.stringify({ count: data.length, domains: Array.from(requestsByDomain.keys()), timestamp: Date.now() })
+            JSON.stringify({ count: data.length, destinations: Array.from(requestsByDestination.keys()), timestamp: Date.now() })
           );
         } catch (error) {
           console.error('[WebSocket] Error storing request logs:', error);

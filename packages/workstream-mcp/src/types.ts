@@ -39,6 +39,6 @@ export const REDIS_KEY_PATTERNS = {
 
 export const REDIS_KEYS = {
   CHROME_COOKIES: (domain: string) => `workstream:chrome:cookies:${domain}`,
-  CHROME_REQUESTS: (domain: string) => `workstream:chrome:requests:${domain}`,
+  CHROME_REQUESTS: (domain: string, port: string | number) => `workstream:chrome:requests:${domain}:${port}`,
   CHROME_LOCALSTORAGE: (origin: string) => `workstream:chrome:localstorage:${encodeURIComponent(origin)}`,
 } as const;

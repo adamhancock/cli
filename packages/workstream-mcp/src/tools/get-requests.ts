@@ -3,6 +3,7 @@ import { REDIS_KEY_PATTERNS, type ChromeRequestLog } from '../types.js';
 
 export interface GetRequestsInput {
   domain?: string;
+  port?: number | string;
   method?: string;
   limit?: number;
   statusCode?: number;
@@ -12,14 +13,23 @@ export interface GetRequestsInput {
 
 export interface GetRequestsOutput {
   requests: ChromeRequestLog[];
-  domains: string[];
+  destinations: string[];  // domain:port pairs
   total: number;
 }
 
-// Extract domain from key like "workstream:chrome:requests:example.com"
-function extractDomainFromKey(key: string): string {
+// Extract domain and port from key like "workstream:chrome:requests:example.com:3000"
+function extractDestinationFromKey(key: string): { domain: string; port: string } {
   const prefix = 'workstream:chrome:requests:';
-  return key.startsWith(prefix) ? key.slice(prefix.length) : key;
+  const rest = key.startsWith(prefix) ? key.slice(prefix.length) : key;
+  // Split on last colon to handle IPv6 or domains with colons
+  const lastColonIndex = rest.lastIndexOf(':');
+  if (lastColonIndex === -1) {
+    return { domain: rest, port: '80' };
+  }
+  return {
+    domain: rest.slice(0, lastColonIndex),
+    port: rest.slice(lastColonIndex + 1),
+  };
 }
 
 export async function getRecentRequests(input: GetRequestsInput): Promise<GetRequestsOutput> {
@@ -35,18 +45,32 @@ export async function getRecentRequests(input: GetRequestsInput): Promise<GetReq
     allKeys.push(...keys);
   } while (cursor !== '0');
 
-  const allDomains = allKeys.map(extractDomainFromKey);
+  const allDestinations = allKeys.map((key) => {
+    const { domain, port } = extractDestinationFromKey(key);
+    return `${domain}:${port}`;
+  });
 
-  // Filter keys if a specific domain is requested
-  const keysToFetch = input.domain
-    ? allKeys.filter((key) => {
-        const domain = extractDomainFromKey(key);
-        return domain.includes(input.domain!) || input.domain!.includes(domain);
-      })
-    : allKeys;
+  // Filter keys by domain and/or port if specified
+  const keysToFetch = allKeys.filter((key) => {
+    const { domain, port } = extractDestinationFromKey(key);
+
+    if (input.domain) {
+      if (!domain.includes(input.domain) && !input.domain.includes(domain)) {
+        return false;
+      }
+    }
+
+    if (input.port) {
+      if (port !== String(input.port)) {
+        return false;
+      }
+    }
+
+    return true;
+  });
 
   if (keysToFetch.length === 0) {
-    return { requests: [], domains: allDomains, total: 0 };
+    return { requests: [], destinations: allDestinations, total: 0 };
   }
 
   // Fetch requests for matching keys
@@ -63,8 +87,8 @@ export async function getRecentRequests(input: GetRequestsInput): Promise<GetReq
       if (err || !rawData) continue;
 
       try {
-        const domainRequests: ChromeRequestLog[] = JSON.parse(rawData as string);
-        allRequests.push(...domainRequests);
+        const destRequests: ChromeRequestLog[] = JSON.parse(rawData as string);
+        allRequests.push(...destRequests);
       } catch {
         // Skip invalid data
       }
@@ -105,5 +129,5 @@ export async function getRecentRequests(input: GetRequestsInput): Promise<GetReq
     if (filteredRequests.length >= limit) break;
   }
 
-  return { requests: filteredRequests, domains: allDomains, total };
+  return { requests: filteredRequests, destinations: allDestinations, total };
 }

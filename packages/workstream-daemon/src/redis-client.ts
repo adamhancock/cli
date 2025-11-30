@@ -17,7 +17,7 @@ export const REDIS_KEYS = {
 
   // Chrome extension keys (separate keys per domain with 24h TTL)
   CHROME_COOKIES: (domain: string) => `workstream:chrome:cookies:${domain}`,
-  CHROME_REQUESTS: (domain: string) => `workstream:chrome:requests:${domain}`,
+  CHROME_REQUESTS: (domain: string, port: string | number) => `workstream:chrome:requests:${domain}:${port}`,
   CHROME_LOCALSTORAGE: (origin: string) => `workstream:chrome:localstorage:${encodeURIComponent(origin)}`,
   CHROME_CONFIG: 'workstream:chrome:config',           // Hash: extension config
 } as const;
