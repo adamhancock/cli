@@ -19,6 +19,7 @@ export const REDIS_KEYS = {
   CHROME_COOKIES: (domain: string) => `workstream:chrome:cookies:${domain}`,
   CHROME_REQUESTS: (domain: string, port: string | number) => `workstream:chrome:requests:${domain}:${port}`,
   CHROME_LOCALSTORAGE: (origin: string) => `workstream:chrome:localstorage:${encodeURIComponent(origin)}`,
+  CHROME_CONSOLE: (origin: string) => `workstream:chrome:console:${encodeURIComponent(origin)}`,
   CHROME_CONFIG: 'workstream:chrome:config',           // Hash: extension config
 } as const;
 
@@ -40,13 +41,14 @@ export const REDIS_CHANNELS = {
   CHROME_COOKIES: 'workstream:chrome:cookies',
   CHROME_REQUESTS: 'workstream:chrome:requests',
   CHROME_LOCALSTORAGE: 'workstream:chrome:localstorage',
+  CHROME_CONSOLE: 'workstream:chrome:console',
 } as const;
 
 // TTL for instance data (30 seconds - auto-expires if daemon stops)
 export const INSTANCE_TTL = 30;
 
-// TTL for Chrome extension data (24 hours)
-export const CHROME_DATA_TTL = 24 * 60 * 60;
+// TTL for Chrome extension data (30 minutes)
+export const CHROME_DATA_TTL = 30 * 60;
 
 let redisClient: Redis | null = null;
 let publisherClient: Redis | null = null;

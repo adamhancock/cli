@@ -10,7 +10,8 @@ import type {
   NotificationData,
   ChromeCookieUpdate,
   ChromeRequestLog,
-  ChromeLocalStorageUpdate
+  ChromeLocalStorageUpdate,
+  ChromeConsoleMessage
 } from './websocket-types.js';
 
 interface WebSocketServerOptions {
@@ -185,6 +186,55 @@ export class WebSocketServer {
           );
         } catch (error) {
           console.error('[WebSocket] Error storing localStorage:', error);
+        }
+      });
+
+      // Handle Chrome extension console messages
+      socket.on('chrome:console', async (messages: ChromeConsoleMessage[]) => {
+        if (!Array.isArray(messages) || messages.length === 0) {
+          return;
+        }
+
+        try {
+          console.log(`[WebSocket] Received ${messages.length} console messages`);
+          const messagesByOrigin = new Map<string, ChromeConsoleMessage[]>();
+
+          for (const message of messages) {
+            if (!message?.origin) {
+              continue;
+            }
+            if (!messagesByOrigin.has(message.origin)) {
+              messagesByOrigin.set(message.origin, []);
+            }
+            messagesByOrigin.get(message.origin)!.push(message);
+          }
+
+          for (const [origin, originMessages] of messagesByOrigin) {
+            const key = REDIS_KEYS.CHROME_CONSOLE(origin);
+            const existing = await this.redis.get(key);
+            let storedMessages: ChromeConsoleMessage[] = [];
+            if (existing) {
+              try {
+                storedMessages = JSON.parse(existing);
+              } catch {
+                storedMessages = [];
+              }
+            }
+
+            storedMessages = [...originMessages, ...storedMessages].slice(0, 200);
+            await this.redis.set(key, JSON.stringify(storedMessages), 'EX', CHROME_DATA_TTL);
+          }
+
+          await this.redis.publish(
+            REDIS_CHANNELS.CHROME_CONSOLE,
+            JSON.stringify({
+              count: messages.length,
+              origins: Array.from(messagesByOrigin.keys()),
+              timestamp: Date.now(),
+            })
+          );
+        } catch (error) {
+          console.error('[WebSocket] Error storing console messages:', error);
         }
       });
 

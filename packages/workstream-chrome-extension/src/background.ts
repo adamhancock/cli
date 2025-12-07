@@ -4,6 +4,7 @@ import type {
   ChromeCookieUpdate,
   ChromeRequestLog,
   ChromeLocalStorageUpdate,
+  ChromeConsoleMessage,
   ExtensionConfig,
 } from './types';
 import { DEFAULT_CONFIG } from './types';
@@ -12,6 +13,9 @@ let socket: Socket | null = null;
 let config: ExtensionConfig = DEFAULT_CONFIG;
 let requestBuffer: ChromeRequestLog[] = [];
 let flushTimeout: ReturnType<typeof setTimeout> | null = null;
+let consoleBuffer: ChromeConsoleMessage[] = [];
+let consoleFlushTimeout: ReturnType<typeof setTimeout> | null = null;
+const MAX_CONSOLE_ARG_LENGTH = 500;
 
 // Load config from storage
 async function loadConfig(): Promise<ExtensionConfig> {
@@ -71,6 +75,8 @@ function connectToDaemon(): void {
     console.log('[Workstream] Connected to daemon');
     // Sync all cookies for tracked domains on connect
     syncAllCookies();
+    flushRequests();
+    flushConsoleMessages();
   });
 
   socket.on('disconnect', () => {
@@ -150,6 +156,18 @@ function flushRequests(): void {
   flushTimeout = null;
 }
 
+function flushConsoleMessages(): void {
+  if (!socket?.connected || consoleBuffer.length === 0) {
+    return;
+  }
+
+  const messages = consoleBuffer;
+  consoleBuffer = [];
+  consoleFlushTimeout = null;
+  socket.emit('chrome:console', messages);
+  console.log(`[Workstream] Sent ${messages.length} console messages`);
+}
+
 // Buffer a request and schedule flush
 function bufferRequest(request: ChromeRequestLog): void {
   requestBuffer.push(request);
@@ -163,6 +181,20 @@ function bufferRequest(request: ChromeRequestLog): void {
     flushRequests();
   } else if (!flushTimeout) {
     flushTimeout = setTimeout(flushRequests, 1000);
+  }
+}
+
+function bufferConsoleMessage(message: ChromeConsoleMessage): void {
+  consoleBuffer.push(message);
+
+  if (consoleBuffer.length >= 50) {
+    if (consoleFlushTimeout) {
+      clearTimeout(consoleFlushTimeout);
+      consoleFlushTimeout = null;
+    }
+    flushConsoleMessages();
+  } else if (!consoleFlushTimeout) {
+    consoleFlushTimeout = setTimeout(flushConsoleMessages, 1000);
   }
 }
 
@@ -224,7 +256,7 @@ chrome.webRequest.onCompleted.addListener(
 );
 
 // Listen for messages from popup and content scripts
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'LOCALSTORAGE_UPDATE') {
     // From content script
     if (config.enabled) {
@@ -235,6 +267,34 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
     }
     sendResponse({ success: true });
+  } else if (message.type === 'CONSOLE_MESSAGE') {
+    if (!config.enabled || !message.payload) {
+      return;
+    }
+
+    const payload = message.payload as ChromeConsoleMessage;
+    try {
+      const domain = new URL(payload.origin).hostname;
+      if (!matchesDomain(domain)) {
+        return;
+      }
+    } catch {
+      return;
+    }
+
+    const normalizedArgs = (payload.args || []).map((arg) =>
+      arg.length > MAX_CONSOLE_ARG_LENGTH ? `${arg.slice(0, MAX_CONSOLE_ARG_LENGTH)}…` : arg
+    );
+
+    const consoleMessage: ChromeConsoleMessage = {
+      ...payload,
+      args: normalizedArgs,
+      timestamp: payload.timestamp || Date.now(),
+      tabId: sender?.tab?.id ?? payload.tabId,
+      tabTitle: sender?.tab?.title ?? payload.tabTitle,
+    };
+
+    bufferConsoleMessage(consoleMessage);
   } else if (message.type === 'GET_CONFIG') {
     sendResponse(config);
   } else if (message.type === 'SET_CONFIG') {
@@ -267,6 +327,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   } else if (message.type === 'SYNC_NOW') {
     syncAllCookies().then(() => {
       flushRequests();
+      flushConsoleMessages();
       sendResponse({ success: true });
     });
     return true;

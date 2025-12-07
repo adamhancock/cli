@@ -40,6 +40,17 @@ export interface ChromeLocalStorageUpdate {
   timestamp: number;
 }
 
+export interface ChromeConsoleMessage {
+  level: 'log' | 'info' | 'warn' | 'error' | 'debug';
+  args: string[];
+  origin: string;
+  url: string;
+  timestamp: number;
+  stack?: string;
+  tabId?: number;
+  tabTitle?: string;
+}
+
 // Client → Server messages
 export interface ClientToServerEvents {
   subscribe: () => void;
@@ -49,6 +60,7 @@ export interface ClientToServerEvents {
   'chrome:cookies': (data: ChromeCookieUpdate) => void;
   'chrome:requests': (data: ChromeRequestLog[]) => void;
   'chrome:localstorage': (data: ChromeLocalStorageUpdate) => void;
+  'chrome:console': (data: ChromeConsoleMessage[]) => void;
 }
 
 // Server → Client messages

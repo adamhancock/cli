@@ -36,6 +36,17 @@ export interface ChromeLocalStorageUpdate {
   timestamp: number;
 }
 
+export interface ChromeConsoleMessage {
+  level: 'log' | 'info' | 'warn' | 'error' | 'debug';
+  args: string[];
+  origin: string;
+  url: string;
+  timestamp: number;
+  stack?: string;
+  tabId?: number;
+  tabTitle?: string;
+}
+
 export interface ExtensionConfig {
   enabled: boolean;
   trackedDomains: string[];

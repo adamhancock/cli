@@ -9,6 +9,7 @@ import {
 import { getCookies, type GetCookiesInput } from './tools/get-cookies.js';
 import { getRecentRequests, type GetRequestsInput } from './tools/get-requests.js';
 import { getLocalStorage, type GetLocalStorageInput } from './tools/get-localstorage.js';
+import { getConsoleLogs, type GetConsoleLogsInput } from './tools/get-console-logs.js';
 import { generateCurl, type GenerateCurlInput } from './tools/generate-curl.js';
 import { closeRedisConnection } from './redis-client.js';
 
@@ -103,6 +104,32 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: 'get_console_logs',
+        description: 'Get console output captured via the Workstream Chrome extension for tracked domains.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            origin: {
+              type: 'string',
+              description: 'Optional origin filter (e.g., "http://dev.localhost:3000")',
+            },
+            level: {
+              type: 'string',
+              enum: ['log', 'info', 'warn', 'error', 'debug'],
+              description: 'Filter by console level',
+            },
+            search: {
+              type: 'string',
+              description: 'Filter messages by text appearing in args, stack, or URL',
+            },
+            limit: {
+              type: 'number',
+              description: 'Maximum number of logs to return (default: 100, max: 500)',
+            },
+          },
+        },
+      },
+      {
         name: 'generate_curl',
         description:
           'Generate a curl command with authentication cookies from the Workstream Chrome extension. Use this to make authenticated API requests to development environments.',
@@ -173,6 +200,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'get_localstorage': {
         const input = (args ?? {}) as GetLocalStorageInput;
         const result = await getLocalStorage(input);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+        };
+      }
+
+      case 'get_console_logs': {
+        const input = (args ?? {}) as GetConsoleLogsInput;
+        const result = await getConsoleLogs(input);
         return {
           content: [
             {
