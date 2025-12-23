@@ -21,6 +21,10 @@ export const REDIS_KEYS = {
   CHROME_LOCALSTORAGE: (origin: string) => `workstream:chrome:localstorage:${encodeURIComponent(origin)}`,
   CHROME_CONSOLE: (origin: string) => `workstream:chrome:console:${encodeURIComponent(origin)}`,
   CHROME_CONFIG: 'workstream:chrome:config',           // Hash: extension config
+
+  // Notion integration keys
+  NOTION_TASKS: 'workstream:notion:tasks',             // Cached Notion tasks
+  NOTION_CONFIG: 'workstream:notion:config',           // Notion configuration
 } as const;
 
 export const REDIS_CHANNELS = {
@@ -42,6 +46,12 @@ export const REDIS_CHANNELS = {
   CHROME_REQUESTS: 'workstream:chrome:requests',
   CHROME_LOCALSTORAGE: 'workstream:chrome:localstorage',
   CHROME_CONSOLE: 'workstream:chrome:console',
+
+  // Notion integration channels
+  NOTION_TASKS_REQUEST: 'workstream:notion:tasks:request',
+  NOTION_TASKS_RESPONSE: 'workstream:notion:tasks:response',
+  NOTION_UPDATE_STATUS_REQUEST: 'workstream:notion:status:request',
+  NOTION_UPDATE_STATUS_RESPONSE: 'workstream:notion:status:response',
 } as const;
 
 // TTL for instance data (30 seconds - auto-expires if daemon stops)
@@ -49,6 +59,9 @@ export const INSTANCE_TTL = 30;
 
 // TTL for Chrome extension data (30 minutes)
 export const CHROME_DATA_TTL = 30 * 60;
+
+// TTL for Notion tasks cache (5 minutes)
+export const NOTION_TASKS_TTL = 5 * 60;
 
 let redisClient: Redis | null = null;
 let publisherClient: Redis | null = null;

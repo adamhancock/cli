@@ -1,0 +1,58 @@
+{
+  "name": "@adamhancock/devctl2",
+  "version": "1.0.0",
+  "description": "Generic development environment manager for multi-worktree projects with configurable apps, Caddy, database isolation, and port management",
+  "type": "module",
+  "bin": {
+    "devctl2": "./bin/devctl2.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "pnpm clean && pnpm build",
+    "dev": "tsc --watch"
+  },
+  "keywords": [
+    "development",
+    "worktree",
+    "caddy",
+    "database",
+    "devops",
+    "environment",
+    "cli",
+    "typescript"
+  ],
+  "author": "Adam Hancock",
+  "license": "MIT",
+  "dependencies": {
+    "chalk": "^5.3.0",
+    "commander": "^12.0.0",
+    "cosmiconfig": "^9.0.0",
+    "fs-extra": "^11.2.0",
+    "ora": "^8.0.0",
+    "zx": "^8.0.0"
+  },
+  "devDependencies": {
+    "@types/fs-extra": "^11.0.4",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "config.example.json",
+    "README.md"
+  ]
+}

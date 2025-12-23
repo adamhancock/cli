@@ -7,6 +7,7 @@ export const REDIS_KEYS = {
   TIMESTAMP: 'workstream:timestamp',
   EVENTS_RECENT: 'workstream:events:recent',
   WORKTREE_JOB: (jobId: string) => `workstream:worktree:job:${jobId}`,
+  NOTION_TASKS: 'workstream:notion:tasks',
 } as const;
 
 export const REDIS_CHANNELS = {
@@ -17,6 +18,10 @@ export const REDIS_CHANNELS = {
   EVENTS_NEW: 'workstream:events:new',
   WORKTREE_JOBS: 'workstream:worktree:jobs',
   WORKTREE_UPDATES: 'workstream:worktree:updates',
+  NOTION_TASKS_REQUEST: 'workstream:notion:tasks:request',
+  NOTION_TASKS_RESPONSE: 'workstream:notion:tasks:response',
+  NOTION_UPDATE_STATUS_REQUEST: 'workstream:notion:status:request',
+  NOTION_UPDATE_STATUS_RESPONSE: 'workstream:notion:status:response',
 } as const;
 
 let redisClient: Redis | null = null;

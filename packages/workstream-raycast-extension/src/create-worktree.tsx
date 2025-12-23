@@ -13,8 +13,11 @@ import { useEffect, useState, useCallback } from 'react';
 import { createWorktreeStreaming } from './utils/worktree';
 import { triggerDaemonRefresh, publishWorktreeJob, subscribeToWorktreeUpdates, getWorktreeJobStatus, type WorktreeUpdate } from './utils/daemon-client';
 import { getUnmergedBranches, branchExists as checkBranchExists, getLocalBranches, getRemoteBranches } from './utils/git';
+import { requestNotionTasks, refreshNotionTasks, updateNotionTaskStatus } from './utils/notion-client';
+import type { NotionTask } from './types';
 import { homedir } from 'os';
-import { join } from 'path';
+import { join, dirname, basename } from 'path';
+import { writeFile } from 'fs/promises';
 
 interface Preferences {
   defaultRepoPath?: string;
@@ -59,6 +62,38 @@ function hasVSCodeOpened(output: string): boolean {
 }
 
 /**
+ * Calculate the worktree path from repo path and branch name
+ */
+function calculateWorktreePath(repoPath: string, branchName: string): string {
+  const repoName = basename(repoPath);
+  return join(dirname(repoPath), `${repoName}-${branchName}`);
+}
+
+/**
+ * Write a brief.md file with Notion task details to the worktree
+ */
+async function writeBriefFile(worktreePath: string, task: NotionTask): Promise<void> {
+  const briefContent = `# ${task.taskId}: ${task.title}
+
+**Status:** ${task.status}
+**Notion:** [Open in Notion](${task.url})
+**Branch:** \`${task.branchName}\`
+
+---
+
+*This file was auto-generated when creating the worktree.*
+`;
+
+  const briefPath = join(worktreePath, 'brief.md');
+  try {
+    await writeFile(briefPath, briefContent, 'utf-8');
+    console.log(`Brief written to ${briefPath}`);
+  } catch (error) {
+    console.error('Failed to write brief.md:', error);
+  }
+}
+
+/**
  * Start worktree creation - hands off to daemon and closes once VS Code opens
  * Progress continues to be shown in VS Code's status bar via the extension
  */
@@ -67,7 +102,8 @@ async function startWorktreeCreation(
   repoPath: string,
   baseBranch?: string,
   force?: boolean,
-  createOwnUpstream?: boolean
+  createOwnUpstream?: boolean,
+  notionTask?: NotionTask | null
 ): Promise<void> {
   // Create an animated toast for progress
   const toast = await showToast({
@@ -84,9 +120,27 @@ async function startWorktreeCreation(
     if (handedOff) return;
     handedOff = true;
 
+    // If a Notion task was selected, write brief.md and update status
+    if (notionTask) {
+      const worktreePath = calculateWorktreePath(repoPath, worktreeName);
+
+      // Write the brief.md file
+      toast.message = 'Writing task brief...';
+      await writeBriefFile(worktreePath, notionTask);
+
+      // Update Notion task status to "In Progress"
+      toast.message = 'Updating Notion task status...';
+      const result = await updateNotionTaskStatus(notionTask.id, 'In Progress');
+      if (result.success) {
+        console.log('Notion task status updated to In Progress');
+      } else {
+        console.error('Failed to update Notion task status:', result.error);
+      }
+    }
+
     toast.style = Toast.Style.Success;
     toast.title = 'Handed off to VS Code';
-    toast.message = 'Progress continues in VS Code status bar';
+    toast.message = notionTask ? 'Brief created & task marked In Progress' : 'Progress continues in VS Code status bar';
 
     // Close Raycast after a short delay
     setTimeout(async () => {
@@ -275,6 +329,29 @@ export default function CreateWorktreeCommand() {
   const [repoPath, setRepoPath] = useState(defaultPath);
   const [showBaseBranchSelector, setShowBaseBranchSelector] = useState(false);
   const [isCheckingBranch, setIsCheckingBranch] = useState(false);
+  const [notionTasks, setNotionTasks] = useState<NotionTask[]>([]);
+  const [isLoadingNotionTasks, setIsLoadingNotionTasks] = useState(false);
+  const [selectedNotionTask, setSelectedNotionTask] = useState<NotionTask | null>(null);
+
+  // Load Notion tasks on mount
+  useEffect(() => {
+    loadNotionTasks();
+  }, []);
+
+  async function loadNotionTasks() {
+    setIsLoadingNotionTasks(true);
+    try {
+      const tasks = await requestNotionTasks();
+      setNotionTasks(tasks);
+      if (tasks.length > 0) {
+        console.log(`Loaded ${tasks.length} Notion tasks`);
+      }
+    } catch (error) {
+      console.error('Failed to load Notion tasks:', error);
+    } finally {
+      setIsLoadingNotionTasks(false);
+    }
+  }
 
   // Load unmerged branches on mount
   useEffect(() => {
@@ -357,7 +434,8 @@ export default function CreateWorktreeCommand() {
       values.repoPath,
       values.baseBranch,
       false,
-      values.createOwnUpstream
+      values.createOwnUpstream,
+      selectedNotionTask
     );
   }
 
@@ -397,6 +475,35 @@ export default function CreateWorktreeCommand() {
               }
             }}
           />
+          <Action
+            title="Refresh Notion Tasks"
+            icon={Icon.Document}
+            shortcut={{ modifiers: ['cmd', 'shift'], key: 'r' }}
+            onAction={async () => {
+              await showToast({
+                style: Toast.Style.Animated,
+                title: 'Fetching Notion tasks...',
+              });
+              setIsLoadingNotionTasks(true);
+              try {
+                const tasks = await refreshNotionTasks();
+                setNotionTasks(tasks);
+                await showToast({
+                  style: Toast.Style.Success,
+                  title: tasks.length > 0 ? `${tasks.length} tasks loaded` : 'No tasks found',
+                  message: tasks.length === 0 ? 'Check daemon Notion config' : undefined,
+                });
+              } catch (error) {
+                await showToast({
+                  style: Toast.Style.Failure,
+                  title: 'Failed to refresh Notion tasks',
+                  message: error instanceof Error ? error.message : 'Unknown error',
+                });
+              } finally {
+                setIsLoadingNotionTasks(false);
+              }
+            }}
+          />
         </ActionPanel>
       }
     >
@@ -410,6 +517,50 @@ export default function CreateWorktreeCommand() {
           setBranchName(value);
         }}
       />
+
+      {notionTasks.length > 0 && (
+        <Form.Dropdown
+          id="notionTask"
+          title="Notion Tasks"
+          info="Select a task to use its branch name"
+          value=""
+          onChange={(taskId) => {
+            const task = notionTasks.find((t) => t.id === taskId);
+            if (task) {
+              setBranchName(task.branchName);
+              setSelectedNotionTask(task);
+            } else {
+              setSelectedNotionTask(null);
+            }
+          }}
+        >
+          <Form.Dropdown.Item value="" title={isLoadingNotionTasks ? 'Loading...' : 'Select a task...'} />
+          <Form.Dropdown.Section title="In Progress">
+            {notionTasks
+              .filter((task) => task.statusGroup === 'in_progress')
+              .map((task) => (
+                <Form.Dropdown.Item
+                  key={task.id}
+                  value={task.id}
+                  title={`${task.taskId} - ${task.title}`}
+                  icon={Icon.Circle}
+                />
+              ))}
+          </Form.Dropdown.Section>
+          <Form.Dropdown.Section title="To Do">
+            {notionTasks
+              .filter((task) => task.statusGroup === 'to_do')
+              .map((task) => (
+                <Form.Dropdown.Item
+                  key={task.id}
+                  value={task.id}
+                  title={`${task.taskId} - ${task.title}`}
+                  icon={Icon.Circle}
+                />
+              ))}
+          </Form.Dropdown.Section>
+        </Form.Dropdown>
+      )}
 
       {branchSuggestions.length > 0 && (
         <Form.Dropdown

@@ -1,0 +1,37 @@
+{
+  "projectName": "my-project",
+  "baseDomain": "dev.local",
+  "databasePrefix": "myproject",
+  "caddyApi": "http://localhost:2019",
+  "portRanges": {
+    "api": {
+      "start": 3000,
+      "count": 1000
+    },
+    "web": {
+      "start": 5000,
+      "count": 1000
+    },
+    "spotlight": {
+      "start": 7000,
+      "count": 1000
+    }
+  },
+  "envFiles": {
+    "api": "packages/api/.env",
+    "web": "packages/web/.env",
+  },
+  "database": {
+    "host": "localhost",
+    "port": 5432
+  },
+  "features": {
+    "database": true,
+    "spotlight": true,
+    "queuePrefix": true
+  },
+  "integrations": {
+    "mcp": true,
+    "spotlight": true
+  }
+}

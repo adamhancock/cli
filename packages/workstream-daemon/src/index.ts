@@ -11,8 +11,10 @@ import {
   closeRedisConnections,
   REDIS_KEYS,
   REDIS_CHANNELS,
-  INSTANCE_TTL
+  INSTANCE_TTL,
+  NOTION_TASKS_TTL
 } from './redis-client.js';
+import { fetchNotionTasks, isNotionConfigured, updateNotionTaskStatus } from './notion-client.js';
 import { spotlightMonitor } from './spotlight-monitor.js';
 import { getEventStore, closeEventStore } from './event-store.js';
 import { BullBoardServer } from './bull-board-server.js';
@@ -389,6 +391,24 @@ class WorkstreamDaemon {
       }
     });
 
+    // Subscribe to Notion tasks request channel
+    this.subscriber.subscribe(REDIS_CHANNELS.NOTION_TASKS_REQUEST, (err) => {
+      if (err) {
+        logError('Failed to subscribe to Notion tasks request channel:', err);
+      } else {
+        log('Subscribed to Notion tasks request channel');
+      }
+    });
+
+    // Subscribe to Notion status update request channel
+    this.subscriber.subscribe(REDIS_CHANNELS.NOTION_UPDATE_STATUS_REQUEST, (err) => {
+      if (err) {
+        logError('Failed to subscribe to Notion status update channel:', err);
+      } else {
+        log('Subscribed to Notion status update channel');
+      }
+    });
+
     this.subscriber.on('message', async (channel, message) => {
       try {
         const data = JSON.parse(message);
@@ -525,6 +545,68 @@ class WorkstreamDaemon {
           // Handle incoming notifications - send as system notification
           log(`  🔔 Notification: ${data.title} - ${data.message}`);
           await this.sendSystemNotification(data.title, data.message);
+        } else if (channel === REDIS_CHANNELS.NOTION_TASKS_REQUEST) {
+          // Handle Notion tasks request - fetch from Notion API and respond
+          log('  📝 Notion tasks request received');
+
+          if (!isNotionConfigured()) {
+            log('  ⚠️ Notion not configured - missing env vars');
+            await this.publisher.publish(
+              REDIS_CHANNELS.NOTION_TASKS_RESPONSE,
+              JSON.stringify({ success: false, error: 'Notion not configured', tasks: [] })
+            );
+          } else {
+            try {
+              const tasks = await fetchNotionTasks();
+              // Cache tasks in Redis
+              await this.redis.set(
+                REDIS_KEYS.NOTION_TASKS,
+                JSON.stringify(tasks),
+                'EX',
+                NOTION_TASKS_TTL
+              );
+              // Publish response
+              await this.publisher.publish(
+                REDIS_CHANNELS.NOTION_TASKS_RESPONSE,
+                JSON.stringify({ success: true, tasks })
+              );
+              log(`  ✅ Notion tasks fetched and cached: ${tasks.length} tasks`);
+            } catch (error) {
+              logError('Failed to fetch Notion tasks:', error);
+              await this.publisher.publish(
+                REDIS_CHANNELS.NOTION_TASKS_RESPONSE,
+                JSON.stringify({ success: false, error: String(error), tasks: [] })
+              );
+            }
+          }
+        } else if (channel === REDIS_CHANNELS.NOTION_UPDATE_STATUS_REQUEST) {
+          // Handle Notion status update request
+          const { pageId, statusName, requestId } = data;
+          log(`  📝 Notion status update request: ${pageId} -> ${statusName || 'In Progress'}`);
+
+          if (!isNotionConfigured()) {
+            log('  ⚠️ Notion not configured - missing env vars');
+            await this.publisher.publish(
+              REDIS_CHANNELS.NOTION_UPDATE_STATUS_RESPONSE,
+              JSON.stringify({ success: false, error: 'Notion not configured', requestId })
+            );
+          } else if (!pageId) {
+            await this.publisher.publish(
+              REDIS_CHANNELS.NOTION_UPDATE_STATUS_RESPONSE,
+              JSON.stringify({ success: false, error: 'Missing pageId', requestId })
+            );
+          } else {
+            const result = await updateNotionTaskStatus(pageId, statusName || 'In Progress');
+            await this.publisher.publish(
+              REDIS_CHANNELS.NOTION_UPDATE_STATUS_RESPONSE,
+              JSON.stringify({ ...result, requestId })
+            );
+            if (result.success) {
+              log(`  ✅ Notion task status updated: ${pageId}`);
+              // Clear the tasks cache so next fetch gets updated status
+              await this.redis.del(REDIS_KEYS.NOTION_TASKS);
+            }
+          }
         }
       } catch (error) {
         logError('Error handling message:', error);
@@ -1130,6 +1212,7 @@ class WorkstreamDaemon {
         const currentConclusion = enriched.prStatus.checks?.conclusion;
         const currentMergeable = enriched.prStatus.mergeable;
         const projectName = instance.path.split('/').pop() || 'project';
+        const hasChecks = (enriched.prStatus.checks?.total ?? 0) > 0;
 
         // Detect check failure transition
         if (currentConclusion === 'failure' && previousState?.conclusion !== 'failure') {
@@ -1150,8 +1233,8 @@ class WorkstreamDaemon {
           );
         }
 
-        // Detect check success transition (recovery from failure)
-        if (currentConclusion === 'success' && previousState?.conclusion === 'failure') {
+        // Detect check success transition (first time or recovery)
+        if (currentConclusion === 'success' && previousState?.conclusion !== 'success' && hasChecks) {
           await this.sendNotification(
             'PR Checks Passing',
             `✅ All checks passed in ${projectName} (PR #${enriched.prStatus.number})`,
