@@ -258,13 +258,15 @@ export class CaddyClient {
 
   /**
    * Add a standalone route for an app with a custom hostname
-   * This creates a simple reverse proxy without the api/web subroute structure
+   * When apiPort is provided, creates subroute with /api/* → apiPort
+   * Otherwise creates a simple reverse proxy
    */
   async addStandaloneRoute(
     routeId: string,
     hostname: string,
     port: number,
-    workdir: string
+    workdir: string,
+    apiPort?: number
   ): Promise<boolean> {
     // Ensure server is configured
     await this.checkServer();
@@ -272,7 +274,52 @@ export class CaddyClient {
     const route: any = {
       '@id': `route-${routeId}`,
       match: [{ host: [hostname] }],
-      handle: [{
+      handle: apiPort ? [{
+        handler: 'subroute',
+        routes: [
+          {
+            match: [{ path: ['/api/*'] }],
+            handle: [{
+              handler: 'reverse_proxy',
+              upstreams: [{ dial: `localhost:${apiPort}` }],
+              health_checks: {
+                passive: {
+                  unhealthy_request_count: 0
+                }
+              },
+              headers: {
+                response: {
+                  set: {
+                    'X-Worktree-Path': [workdir],
+                    'X-Api-Port': [String(apiPort)],
+                    'X-App-Port': [String(port)]
+                  }
+                }
+              }
+            }]
+          },
+          {
+            handle: [{
+              handler: 'reverse_proxy',
+              upstreams: [{ dial: `localhost:${port}` }],
+              health_checks: {
+                passive: {
+                  unhealthy_request_count: 0
+                }
+              },
+              headers: {
+                response: {
+                  set: {
+                    'X-Worktree-Path': [workdir],
+                    'X-Api-Port': [String(apiPort)],
+                    'X-App-Port': [String(port)]
+                  }
+                }
+              }
+            }]
+          }
+        ]
+      }] : [{
         handler: 'reverse_proxy',
         upstreams: [{ dial: `localhost:${port}` }],
         health_checks: {

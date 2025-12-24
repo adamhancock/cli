@@ -151,7 +151,7 @@ program
               const hostname = interpolate(appConfig.hostname, context);
               const routeId = `${subdomain}-${appName}`;
 
-              await caddy.addStandaloneRoute(routeId, hostname, ports[appName], workdir);
+              await caddy.addStandaloneRoute(routeId, hostname, ports[appName], workdir, ports.api);
               console.log(`   🌐 ${chalk.blue(`https://${hostname}`)} (${appName})`);
             }
           }
