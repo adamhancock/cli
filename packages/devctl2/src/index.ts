@@ -2,7 +2,7 @@
 
 import { Command } from 'commander';
 import chalk from 'chalk';
-import { writeFileSync } from 'fs';
+import { writeFileSync, existsSync, readFileSync } from 'fs';
 import path from 'path';
 import { $ } from 'zx';
 import { loadConfig, validateConfig, createExampleConfig } from './config.js';
@@ -72,7 +72,31 @@ program
         await runHooks(config.hooks.preSetup, workdir);
       }
 
-      const ports = await generatePorts(config, workdir);
+      // Use existing ports from .env files for main branch, generate unique ports for worktrees
+      let ports: Record<string, number>;
+      if (isMainBranch) {
+        // Read ports directly from .env files for main branch
+        ports = {};
+        for (const [appName, appConfig] of Object.entries(config.apps)) {
+          if (appConfig.portVar && config.portRanges[appName]) {
+            const envPath = path.join(workdir, appConfig.envFile);
+            if (existsSync(envPath)) {
+              const envContent = readFileSync(envPath, 'utf8');
+              const regex = new RegExp(`^${appConfig.portVar}=(\\d+)$`, 'm');
+              const match = envContent.match(regex);
+              if (match) {
+                ports[appName] = parseInt(match[1]);
+              }
+            }
+            // Fallback to portRanges.start if not found in .env
+            if (!ports[appName]) {
+              ports[appName] = config.portRanges[appName].start;
+            }
+          }
+        }
+      } else {
+        ports = await generatePorts(config, workdir);
+      }
 
       console.log(chalk.blue('🔧 Setting up worktree...'));
       console.log(chalk.gray(`   Branch: ${branch}`));
@@ -151,9 +175,17 @@ program
               const hostname = interpolate(appConfig.hostname, context);
               const routeId = `${subdomain}-${appName}`;
 
+              // Pass API port so standalone routes can proxy /api/* requests
               await caddy.addStandaloneRoute(routeId, hostname, ports[appName], workdir, ports.api);
               console.log(`   🌐 ${chalk.blue(`https://${hostname}`)} (${appName})`);
             }
+          }
+
+          // Add API-only route for OAuth callbacks
+          if (ports.api) {
+            const apiHostname = `${subdomain}-api.${config.baseDomain}`;
+            await caddy.addStandaloneRoute(`${subdomain}-api`, apiHostname, ports.api, workdir);
+            console.log(`   🌐 ${chalk.blue(`https://${apiHostname}`)} (api)`);
           }
         } catch (error) {
           console.log(chalk.yellow('⚠️  Could not add Caddy route (Caddy may not be running)'));

@@ -164,6 +164,53 @@ export async function findPsqlPath(): Promise<PostgresTools | null> {
 }
 
 /**
+ * Create database via dump/restore (fallback when template DB has active connections)
+ */
+async function createDatabaseViaDump(
+  pgTools: PostgresTools,
+  creds: DatabaseCredentials,
+  templateDb: string,
+  dbName: string
+): Promise<boolean> {
+  const tempFile = `/tmp/devctl2-template-${Date.now()}.sql`;
+
+  try {
+    // Step 1: Dump template database
+    console.log(chalk.gray(`   Dumping ${templateDb} to temp file...`));
+    if (Array.isArray(pgTools.pg_dump)) {
+      await $`${pgTools.pg_dump} -U ${creds.user} -h ${creds.host} -d ${templateDb} -f ${tempFile} --clean --if-exists --no-owner --no-acl`.quiet();
+    } else {
+      await $`PGPASSWORD=${creds.password} ${pgTools.pg_dump} -U ${creds.user} -h ${creds.host} -d ${templateDb} -f ${tempFile} --clean --if-exists --no-owner --no-acl`.quiet();
+    }
+
+    // Step 2: Create empty database (no -T flag)
+    console.log(chalk.gray(`   Creating empty database ${dbName}...`));
+    if (Array.isArray(pgTools.createdb)) {
+      await $`${pgTools.createdb} -U ${creds.user} -h ${creds.host} ${dbName}`.quiet();
+    } else {
+      await $`PGPASSWORD=${creds.password} ${pgTools.createdb} -U ${creds.user} -h ${creds.host} ${dbName}`.quiet();
+    }
+
+    // Step 3: Restore dump to new database
+    console.log(chalk.gray(`   Restoring dump to ${dbName}...`));
+    if (Array.isArray(pgTools.psql)) {
+      await $`${pgTools.psql} -U ${creds.user} -h ${creds.host} -d ${dbName} -f ${tempFile}`.quiet();
+    } else {
+      await $`PGPASSWORD=${creds.password} ${pgTools.psql} -U ${creds.user} -h ${creds.host} -d ${dbName} -f ${tempFile}`.quiet();
+    }
+
+    return true;
+  } finally {
+    // Clean up temp file
+    try {
+      await $`rm -f ${tempFile}`.quiet();
+    } catch {
+      // Ignore cleanup errors
+    }
+  }
+}
+
+/**
  * Create database for worktree
  */
 export async function createDatabase(config: DevCtl2Config, dbName: string, workdir: string | null = null): Promise<DatabaseInfo> {
@@ -215,9 +262,27 @@ export async function createDatabase(config: DevCtl2Config, dbName: string, work
     const errorMessage = err?.message || err?.stderr || String(error);
     const errorStdout = err?.stdout || '';
 
+    // Handle "already exists" case
     if (errorStdout.includes('already exists') || errorMessage.includes('already exists')) {
       console.log(chalk.yellow(`⚠️  Database ${dbName} already exists`));
       return { created: true, dbName };
+    }
+
+    // Handle "being accessed by other users" - fallback to dump/restore
+    if (errorMessage.includes('being accessed by other users') ||
+        errorMessage.includes('is being accessed')) {
+      console.log(chalk.yellow(`⚠️  Template DB has active connections, using backup/restore fallback...`));
+
+      try {
+        const success = await createDatabaseViaDump(pgTools, creds, templateDb, dbName);
+        if (success) {
+          console.log(chalk.green(`✅ Database ${dbName} created successfully (via dump/restore)`));
+          return { created: true, dbName };
+        }
+      } catch (fallbackError: any) {
+        console.log(chalk.red(`❌ Fallback also failed:`));
+        console.log(chalk.gray(`   ${fallbackError.message || fallbackError}`));
+      }
     }
 
     console.log(chalk.yellow(`⚠️  Could not create database ${dbName}:`));

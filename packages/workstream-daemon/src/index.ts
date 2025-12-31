@@ -1,7 +1,7 @@
 #!/usr/bin/env tsx
 
 import { $ } from 'zx';
-import { writeFile, mkdir } from 'fs/promises';
+import { writeFile, mkdir, access } from 'fs/promises';
 import { join } from 'path';
 import { homedir } from 'os';
 import Redis from 'ioredis';
@@ -14,7 +14,7 @@ import {
   INSTANCE_TTL,
   NOTION_TASKS_TTL
 } from './redis-client.js';
-import { fetchNotionTasks, isNotionConfigured, updateNotionTaskStatus } from './notion-client.js';
+import { fetchNotionTasks, isNotionConfigured, updateNotionTaskStatus, createNotionTask } from './notion-client.js';
 import { spotlightMonitor } from './spotlight-monitor.js';
 import { getEventStore, closeEventStore } from './event-store.js';
 import { BullBoardServer } from './bull-board-server.js';
@@ -261,6 +261,7 @@ class WorkstreamDaemon {
   private publisher: Redis;
   private subscriber: Redis;
   private pollTimer?: NodeJS.Timeout;
+  private notionRefreshTimer?: NodeJS.Timeout;
   private currentPollInterval: number = POLL_INTERVAL;
   private ghRateLimit?: GitHubRateLimit;
   private lastRateLimitCheck: number = 0;
@@ -607,6 +608,34 @@ class WorkstreamDaemon {
               await this.redis.del(REDIS_KEYS.NOTION_TASKS);
             }
           }
+        } else if (channel === REDIS_CHANNELS.NOTION_CREATE_TASK_REQUEST) {
+          // Handle Notion task creation request
+          const { title, requestId } = data;
+          log(`  📝 Notion create task request: "${title}"`);
+
+          if (!isNotionConfigured()) {
+            log('  ⚠️ Notion not configured - missing env vars');
+            await this.publisher.publish(
+              REDIS_CHANNELS.NOTION_CREATE_TASK_RESPONSE,
+              JSON.stringify({ success: false, error: 'Notion not configured', requestId })
+            );
+          } else if (!title || !title.trim()) {
+            await this.publisher.publish(
+              REDIS_CHANNELS.NOTION_CREATE_TASK_RESPONSE,
+              JSON.stringify({ success: false, error: 'Title is required', requestId })
+            );
+          } else {
+            const result = await createNotionTask(title.trim());
+            await this.publisher.publish(
+              REDIS_CHANNELS.NOTION_CREATE_TASK_RESPONSE,
+              JSON.stringify({ ...result, requestId })
+            );
+            if (result.success) {
+              log(`  ✅ Notion task created: ${result.task?.taskId || result.task?.id}`);
+              // Clear the tasks cache so next fetch includes the new task
+              await this.redis.del(REDIS_KEYS.NOTION_TASKS);
+            }
+          }
         }
       } catch (error) {
         logError('Error handling message:', error);
@@ -774,6 +803,15 @@ class WorkstreamDaemon {
     });
     await this.websocketServer.start();
 
+    // Start background Notion task fetching (every 5 minutes)
+    if (isNotionConfigured()) {
+      log('📝 Starting background Notion task fetching...');
+      // Fetch immediately on startup
+      this.refreshNotionTasksCache();
+      // Then fetch every 5 minutes
+      this.notionRefreshTimer = setInterval(() => this.refreshNotionTasksCache(), 5 * 60 * 1000);
+    }
+
     log('');
     log('✅ Daemon running');
     log(`   Polling interval: ${this.currentPollInterval}ms`);
@@ -797,9 +835,36 @@ class WorkstreamDaemon {
     }, this.currentPollInterval);
   }
 
+  /**
+   * Background refresh of Notion tasks cache
+   * Runs every 5 minutes to ensure tasks are always available instantly
+   */
+  private async refreshNotionTasksCache() {
+    try {
+      log('[Notion] Background refresh: fetching tasks...');
+      const tasks = await fetchNotionTasks();
+
+      // Cache the tasks in Redis
+      await this.redis.set(
+        REDIS_KEYS.NOTION_TASKS,
+        JSON.stringify(tasks),
+        'EX',
+        NOTION_TASKS_TTL
+      );
+
+      log(`[Notion] Background refresh: cached ${tasks.length} tasks`);
+    } catch (error) {
+      logError('[Notion] Background refresh failed:', error);
+    }
+  }
+
   async stop() {
     if (this.pollTimer) {
       clearTimeout(this.pollTimer);
+    }
+
+    if (this.notionRefreshTimer) {
+      clearInterval(this.notionRefreshTimer);
     }
 
     // Stop WebSocket server
@@ -1070,17 +1135,33 @@ class WorkstreamDaemon {
           enrichmentTasks.map(async ({ instance, shouldUpdatePR, projectName }) => {
             try {
               const enriched = await this.enrichInstance(instance, shouldUpdatePR);
-              return { success: true as const, enriched, projectName, shouldUpdatePR };
+              // enriched is null if directory no longer exists
+              return { success: true as const, enriched, projectName, shouldUpdatePR, path: instance.path };
             } catch (error) {
               logError(`  ❌ Failed to enrich ${projectName}:`, error);
-              return { success: false as const, projectName, enriched: undefined };
+              return { success: false as const, projectName, enriched: undefined, path: instance.path };
             }
           })
         );
 
         // Process results and update instances map
         for (const result of enrichmentResults) {
-          if (result.success && result.enriched) {
+          if (result.success && result.enriched === null) {
+            // Directory no longer exists - remove the stale instance
+            log(`  🗑️  Removing stale instance: ${result.projectName}`);
+            this.instances.delete(result.path);
+
+            // Disconnect spotlight monitoring
+            if (spotlightMonitor.isConnected(result.path)) {
+              spotlightMonitor.disconnectStream(result.path);
+            }
+
+            // Remove from Redis
+            await this.redis.del(REDIS_KEYS.INSTANCE(result.path));
+            await this.redis.srem(REDIS_KEYS.INSTANCES_LIST, result.path);
+
+            removedCount++;
+          } else if (result.success && result.enriched) {
             this.instances.set(result.enriched.path, result.enriched);
             updatedCount++;
 
@@ -1153,6 +1234,14 @@ class WorkstreamDaemon {
       const instances: VSCodeInstance[] = [];
 
       for (const folderPath of folderPaths) {
+        // Skip directories that no longer exist
+        try {
+          await access(folderPath);
+        } catch {
+          // Directory doesn't exist, skip it
+          continue;
+        }
+
         const name = folderPath.split('/').pop() || folderPath;
         let branch: string | undefined;
         let isGitRepo = false;
@@ -1174,7 +1263,16 @@ class WorkstreamDaemon {
     }
   }
 
-  private async enrichInstance(instance: VSCodeInstance, updatePR: boolean = true): Promise<InstanceWithMetadata> {
+  private async enrichInstance(instance: VSCodeInstance, updatePR: boolean = true): Promise<InstanceWithMetadata | null> {
+    // Check if directory still exists before doing any work
+    try {
+      await access(instance.path);
+    } catch {
+      // Directory doesn't exist - signal to caller to remove this instance
+      log(`  ⚠️  Directory no longer exists: ${instance.path}`);
+      return null;
+    }
+
     const enriched: InstanceWithMetadata = {
       ...instance,
       lastUpdated: Date.now(),

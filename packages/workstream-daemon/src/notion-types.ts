@@ -8,7 +8,9 @@ export interface NotionTask {
   branchName: string;            // Generated branch name (e.g., "DEV-42-fix-login-bug")
   status: string;                // Current status text
   statusGroup: 'to_do' | 'in_progress' | 'complete' | 'unknown';
+  type?: string;                 // Task type (Bug, Feature, Check, etc.)
   url: string;                   // Notion page URL
+  contentMarkdown?: string;      // Full page content as markdown
 }
 
 /**
@@ -18,6 +20,7 @@ export interface NotionPropertyMapping {
   idProperty: string;            // Property name for task ID
   branchProperty: string;        // Property name for branch name
   statusProperty: string;        // Property name for status (default: "Status")
+  typeProperty: string;          // Property name for task type (default: "Task type")
 }
 
 /**
@@ -27,4 +30,5 @@ export interface NotionConfig {
   apiKey: string;
   databaseId: string;
   propertyMapping: NotionPropertyMapping;
+  excludeStatuses: string[];  // Status names to filter out (e.g., "Done", "Won't fix")
 }

@@ -13,8 +13,8 @@ import { useEffect, useState, useCallback } from 'react';
 import { createWorktreeStreaming } from './utils/worktree';
 import { triggerDaemonRefresh, publishWorktreeJob, subscribeToWorktreeUpdates, getWorktreeJobStatus, type WorktreeUpdate } from './utils/daemon-client';
 import { getUnmergedBranches, branchExists as checkBranchExists, getLocalBranches, getRemoteBranches } from './utils/git';
-import { requestNotionTasks, refreshNotionTasks, updateNotionTaskStatus } from './utils/notion-client';
-import type { NotionTask } from './types';
+import { requestNotionTasks, refreshNotionTasks, updateNotionTaskStatus, createNotionTask } from './utils/notion-client';
+import type { NotionTask, NotionTasksResult } from './types';
 import { homedir } from 'os';
 import { join, dirname, basename } from 'path';
 import { writeFile } from 'fs/promises';
@@ -29,6 +29,19 @@ interface FormValues {
   repoPath: string;
   baseBranch?: string;
   createOwnUpstream?: boolean;
+}
+
+/**
+ * Get an icon based on the task type (Bug, Feature, Check, etc.)
+ */
+function getTaskTypeIcon(type?: string): Icon {
+  const lowerType = type?.toLowerCase() || '';
+  if (lowerType.includes('bug')) return Icon.Bug;
+  if (lowerType.includes('feature')) return Icon.Star;
+  if (lowerType.includes('check')) return Icon.Checkmark;
+  if (lowerType.includes('improvement')) return Icon.ArrowUp;
+  if (lowerType.includes('task')) return Icon.Dot;
+  return Icon.Circle;
 }
 
 /**
@@ -73,11 +86,18 @@ function calculateWorktreePath(repoPath: string, branchName: string): string {
  * Write a brief.md file with Notion task details to the worktree
  */
 async function writeBriefFile(worktreePath: string, task: NotionTask): Promise<void> {
+  const notionDetails = task.contentMarkdown?.trim() || '_No additional context was available from Notion._';
   const briefContent = `# ${task.taskId}: ${task.title}
 
 **Status:** ${task.status}
 **Notion:** [Open in Notion](${task.url})
 **Branch:** \`${task.branchName}\`
+
+---
+
+## Notion Details
+
+${notionDetails}
 
 ---
 
@@ -317,6 +337,77 @@ async function startWorktreeCreation(
   }, 2 * 60 * 1000);
 }
 
+/**
+ * Form component for creating a new Notion task
+ */
+function CreateNotionTaskForm({
+  onTaskCreated,
+}: {
+  onTaskCreated: (task: NotionTask) => void;
+}) {
+  const [isCreating, setIsCreating] = useState(false);
+
+  async function handleSubmit(values: { taskTitle: string }) {
+    if (!values.taskTitle.trim()) {
+      await showToast({
+        style: Toast.Style.Failure,
+        title: 'Title required',
+        message: 'Please enter a title for the task',
+      });
+      return;
+    }
+
+    setIsCreating(true);
+    const toast = await showToast({
+      style: Toast.Style.Animated,
+      title: 'Creating task...',
+    });
+
+    try {
+      const result = await createNotionTask(values.taskTitle.trim());
+
+      if (result.success && result.task) {
+        toast.style = Toast.Style.Success;
+        toast.title = 'Task created';
+        toast.message = `${result.task.taskId || ''} - ${result.task.title}`;
+
+        // Notify parent and pop back
+        onTaskCreated(result.task);
+        await popToRoot();
+      } else {
+        toast.style = Toast.Style.Failure;
+        toast.title = 'Failed to create task';
+        toast.message = result.error || 'Unknown error';
+      }
+    } catch (error) {
+      toast.style = Toast.Style.Failure;
+      toast.title = 'Failed to create task';
+      toast.message = error instanceof Error ? error.message : 'Unknown error';
+    } finally {
+      setIsCreating(false);
+    }
+  }
+
+  return (
+    <Form
+      isLoading={isCreating}
+      actions={
+        <ActionPanel>
+          <Action.SubmitForm title="Create Task" onSubmit={handleSubmit} />
+        </ActionPanel>
+      }
+    >
+      <Form.TextField
+        id="taskTitle"
+        title="Task Title"
+        placeholder="Enter task title..."
+        info="A new task will be created in your Notion database with status 'Not started'"
+        autoFocus
+      />
+    </Form>
+  );
+}
+
 export default function CreateWorktreeCommand() {
   const preferences = getPreferenceValues<Preferences>();
   const [branchSuggestions, setBranchSuggestions] = useState<string[]>([]);
@@ -332,22 +423,49 @@ export default function CreateWorktreeCommand() {
   const [notionTasks, setNotionTasks] = useState<NotionTask[]>([]);
   const [isLoadingNotionTasks, setIsLoadingNotionTasks] = useState(false);
   const [selectedNotionTask, setSelectedNotionTask] = useState<NotionTask | null>(null);
+  const [notionTasksError, setNotionTasksError] = useState<string | null>(null);
 
   // Load Notion tasks on mount
   useEffect(() => {
     loadNotionTasks();
   }, []);
 
-  async function loadNotionTasks() {
+  async function loadNotionTasks(retryAttempt = 0) {
+    const maxRetries = 2;
     setIsLoadingNotionTasks(true);
+    setNotionTasksError(null);
+
     try {
-      const tasks = await requestNotionTasks();
-      setNotionTasks(tasks);
-      if (tasks.length > 0) {
-        console.log(`Loaded ${tasks.length} Notion tasks`);
+      const result = await requestNotionTasks();
+
+      if (result.error) {
+        // Error returned from request
+        setNotionTasksError(result.error);
+
+        // Auto-retry for transient errors (timeout, Redis unavailable)
+        if (retryAttempt < maxRetries && (result.source === 'timeout' || result.source === 'error')) {
+          console.log(`Retrying Notion tasks (attempt ${retryAttempt + 1}/${maxRetries})...`);
+          setTimeout(() => {
+            loadNotionTasks(retryAttempt + 1);
+          }, 2000 * (retryAttempt + 1)); // Exponential backoff
+          return;
+        }
+      } else if (result.tasks.length === 0 && retryAttempt === 0 && result.source === 'daemon') {
+        // Empty result from daemon on first try - might be timing issue, retry once
+        console.log('Got empty result from daemon, retrying once...');
+        setTimeout(() => {
+          loadNotionTasks(1);
+        }, 1500);
+        return;
+      }
+
+      setNotionTasks(result.tasks);
+      if (result.tasks.length > 0) {
+        console.log(`Loaded ${result.tasks.length} Notion tasks from ${result.source}`);
       }
     } catch (error) {
       console.error('Failed to load Notion tasks:', error);
+      setNotionTasksError(error instanceof Error ? error.message : 'Unknown error');
     } finally {
       setIsLoadingNotionTasks(false);
     }
@@ -475,9 +593,24 @@ export default function CreateWorktreeCommand() {
               }
             }}
           />
+          <Action.Push
+            title="Create Notion Task"
+            icon={Icon.Plus}
+            shortcut={{ modifiers: ['cmd'], key: 'n' }}
+            target={
+              <CreateNotionTaskForm
+                onTaskCreated={(task) => {
+                  // Add the new task to the list and select it
+                  setNotionTasks((prev) => [task, ...prev]);
+                  setBranchName(task.branchName);
+                  setSelectedNotionTask(task);
+                }}
+              />
+            }
+          />
           <Action
             title="Refresh Notion Tasks"
-            icon={Icon.Document}
+            icon={Icon.ArrowClockwise}
             shortcut={{ modifiers: ['cmd', 'shift'], key: 'r' }}
             onAction={async () => {
               await showToast({
@@ -485,19 +618,31 @@ export default function CreateWorktreeCommand() {
                 title: 'Fetching Notion tasks...',
               });
               setIsLoadingNotionTasks(true);
+              setNotionTasksError(null);
               try {
-                const tasks = await refreshNotionTasks();
-                setNotionTasks(tasks);
-                await showToast({
-                  style: Toast.Style.Success,
-                  title: tasks.length > 0 ? `${tasks.length} tasks loaded` : 'No tasks found',
-                  message: tasks.length === 0 ? 'Check daemon Notion config' : undefined,
-                });
+                const result = await refreshNotionTasks();
+                setNotionTasks(result.tasks);
+                if (result.error) {
+                  setNotionTasksError(result.error);
+                  await showToast({
+                    style: Toast.Style.Failure,
+                    title: 'Failed to refresh Notion tasks',
+                    message: result.error,
+                  });
+                } else {
+                  await showToast({
+                    style: Toast.Style.Success,
+                    title: result.tasks.length > 0 ? `${result.tasks.length} tasks loaded` : 'No tasks found',
+                    message: result.tasks.length === 0 ? 'Check daemon Notion config' : undefined,
+                  });
+                }
               } catch (error) {
+                const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+                setNotionTasksError(errorMsg);
                 await showToast({
                   style: Toast.Style.Failure,
                   title: 'Failed to refresh Notion tasks',
-                  message: error instanceof Error ? error.message : 'Unknown error',
+                  message: errorMsg,
                 });
               } finally {
                 setIsLoadingNotionTasks(false);
@@ -518,23 +663,70 @@ export default function CreateWorktreeCommand() {
         }}
       />
 
-      {notionTasks.length > 0 && (
-        <Form.Dropdown
-          id="notionTask"
-          title="Notion Tasks"
-          info="Select a task to use its branch name"
-          value=""
-          onChange={(taskId) => {
-            const task = notionTasks.find((t) => t.id === taskId);
-            if (task) {
-              setBranchName(task.branchName);
-              setSelectedNotionTask(task);
+      <Form.Dropdown
+        id="notionTask"
+        title="Notion Task"
+        info={
+          notionTasksError
+            ? `Error: ${notionTasksError}`
+            : notionTasks.length === 0 && !isLoadingNotionTasks
+              ? 'No tasks loaded. Cmd+Shift+R to refresh'
+              : 'Select a task to use its branch name'
+        }
+        value=""
+        onChange={async (taskId) => {
+          // Handle special refresh action
+          if (taskId === '__refresh__') {
+            await showToast({ style: Toast.Style.Animated, title: 'Refreshing tasks...' });
+            setIsLoadingNotionTasks(true);
+            setNotionTasksError(null);
+            const result = await refreshNotionTasks();
+            setNotionTasks(result.tasks);
+            if (result.error) {
+              setNotionTasksError(result.error);
+              await showToast({ style: Toast.Style.Failure, title: 'Failed', message: result.error });
             } else {
-              setSelectedNotionTask(null);
+              await showToast({ style: Toast.Style.Success, title: `${result.tasks.length} tasks loaded` });
             }
-          }}
-        >
-          <Form.Dropdown.Item value="" title={isLoadingNotionTasks ? 'Loading...' : 'Select a task...'} />
+            setIsLoadingNotionTasks(false);
+            return;
+          }
+
+          const task = notionTasks.find((t) => t.id === taskId);
+          if (task) {
+            setBranchName(task.branchName);
+            setSelectedNotionTask(task);
+          } else {
+            setSelectedNotionTask(null);
+          }
+        }}
+      >
+        {/* Only show "None" option when we have tasks to choose from */}
+        {notionTasks.length > 0 && (
+          <Form.Dropdown.Item value="" title="None (enter branch manually)" />
+        )}
+        {/* Show status/error as placeholder when no tasks */}
+        {notionTasks.length === 0 && (
+          <Form.Dropdown.Item
+            value=""
+            title={
+              isLoadingNotionTasks
+                ? 'Loading...'
+                : notionTasksError
+                  ? 'Error loading tasks'
+                  : 'No tasks found'
+            }
+          />
+        )}
+        {/* Refresh action - always available */}
+        <Form.Dropdown.Section title={notionTasksError ? '⚠️ Action Required' : 'Actions'}>
+          <Form.Dropdown.Item
+            value="__refresh__"
+            title={notionTasksError ? '↻ Retry - Load Tasks' : '↻ Refresh Tasks'}
+            icon={Icon.ArrowClockwise}
+          />
+        </Form.Dropdown.Section>
+        {notionTasks.filter((task) => task.statusGroup === 'in_progress').length > 0 && (
           <Form.Dropdown.Section title="In Progress">
             {notionTasks
               .filter((task) => task.statusGroup === 'in_progress')
@@ -543,10 +735,12 @@ export default function CreateWorktreeCommand() {
                   key={task.id}
                   value={task.id}
                   title={`${task.taskId} - ${task.title}`}
-                  icon={Icon.Circle}
+                  icon={getTaskTypeIcon(task.type)}
                 />
               ))}
           </Form.Dropdown.Section>
+        )}
+        {notionTasks.filter((task) => task.statusGroup === 'to_do').length > 0 && (
           <Form.Dropdown.Section title="To Do">
             {notionTasks
               .filter((task) => task.statusGroup === 'to_do')
@@ -555,12 +749,12 @@ export default function CreateWorktreeCommand() {
                   key={task.id}
                   value={task.id}
                   title={`${task.taskId} - ${task.title}`}
-                  icon={Icon.Circle}
+                  icon={getTaskTypeIcon(task.type)}
                 />
               ))}
           </Form.Dropdown.Section>
-        </Form.Dropdown>
-      )}
+        )}
+      </Form.Dropdown>
 
       {branchSuggestions.length > 0 && (
         <Form.Dropdown

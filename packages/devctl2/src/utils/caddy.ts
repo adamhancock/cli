@@ -132,7 +132,7 @@ export class CaddyClient {
             match: [{ path: ['/api/*'] }],
             handle: [{
               handler: 'reverse_proxy',
-              upstreams: [{ dial: `localhost:${ports.api}` }],
+              upstreams: [{ dial: `127.0.0.1:${ports.api}` }],
               health_checks: {
                 passive: {
                   unhealthy_request_count: 0
@@ -158,7 +158,7 @@ export class CaddyClient {
               },
               {
                 handler: 'reverse_proxy',
-                upstreams: [{ dial: `localhost:${ports.spotlight}` }],
+                upstreams: [{ dial: `127.0.0.1:${ports.spotlight}` }],
                 health_checks: {
                   passive: {
                     unhealthy_request_count: 0
@@ -178,7 +178,7 @@ export class CaddyClient {
           {
             handle: [{
               handler: 'reverse_proxy',
-              upstreams: [{ dial: `localhost:${ports.web}` }],
+              upstreams: [{ dial: `127.0.0.1:${ports.web}` }],
               health_checks: {
                 passive: {
                   unhealthy_request_count: 0
@@ -228,7 +228,7 @@ export class CaddyClient {
           match: [{ host: [hostname] }],
           handle: [{
             handler: 'reverse_proxy',
-            upstreams: [{ dial: `localhost:${ports.spotlight}` }],
+            upstreams: [{ dial: `127.0.0.1:${ports.spotlight}` }],
             health_checks: {
               passive: {
                 unhealthy_request_count: 0
@@ -258,8 +258,7 @@ export class CaddyClient {
 
   /**
    * Add a standalone route for an app with a custom hostname
-   * When apiPort is provided, creates subroute with /api/* → apiPort
-   * Otherwise creates a simple reverse proxy
+   * Optionally includes /api/* proxying to an API port
    */
   async addStandaloneRoute(
     routeId: string,
@@ -271,57 +270,38 @@ export class CaddyClient {
     // Ensure server is configured
     await this.checkServer();
 
-    const route: any = {
-      '@id': `route-${routeId}`,
-      match: [{ host: [hostname] }],
-      handle: apiPort ? [{
-        handler: 'subroute',
-        routes: [
-          {
-            match: [{ path: ['/api/*'] }],
-            handle: [{
-              handler: 'reverse_proxy',
-              upstreams: [{ dial: `localhost:${apiPort}` }],
-              health_checks: {
-                passive: {
-                  unhealthy_request_count: 0
-                }
-              },
-              headers: {
-                response: {
-                  set: {
-                    'X-Worktree-Path': [workdir],
-                    'X-Api-Port': [String(apiPort)],
-                    'X-App-Port': [String(port)]
-                  }
-                }
-              }
-            }]
+    // Build route with optional API subroute
+    const routes: any[] = [];
+
+    // Add /api/* subroute if apiPort is provided
+    if (apiPort) {
+      routes.push({
+        match: [{ path: ['/api/*'] }],
+        handle: [{
+          handler: 'reverse_proxy',
+          upstreams: [{ dial: `127.0.0.1:${apiPort}` }],
+          health_checks: {
+            passive: {
+              unhealthy_request_count: 0
+            }
           },
-          {
-            handle: [{
-              handler: 'reverse_proxy',
-              upstreams: [{ dial: `localhost:${port}` }],
-              health_checks: {
-                passive: {
-                  unhealthy_request_count: 0
-                }
-              },
-              headers: {
-                response: {
-                  set: {
-                    'X-Worktree-Path': [workdir],
-                    'X-Api-Port': [String(apiPort)],
-                    'X-App-Port': [String(port)]
-                  }
-                }
+          headers: {
+            response: {
+              set: {
+                'X-Worktree-Path': [workdir],
+                'X-Api-Port': [String(apiPort)]
               }
-            }]
+            }
           }
-        ]
-      }] : [{
+        }]
+      });
+    }
+
+    // Add default route for the app
+    routes.push({
+      handle: [{
         handler: 'reverse_proxy',
-        upstreams: [{ dial: `localhost:${port}` }],
+        upstreams: [{ dial: `127.0.0.1:${port}` }],
         health_checks: {
           passive: {
             unhealthy_request_count: 0
@@ -335,6 +315,15 @@ export class CaddyClient {
             }
           }
         }
+      }]
+    });
+
+    const route: any = {
+      '@id': `route-${routeId}`,
+      match: [{ host: [hostname] }],
+      handle: [{
+        handler: 'subroute',
+        routes
       }],
       terminal: true
     };

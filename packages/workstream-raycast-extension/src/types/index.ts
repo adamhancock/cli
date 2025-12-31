@@ -229,7 +229,9 @@ export interface NotionTask {
   branchName: string;            // Generated branch name (e.g., "DEV-42-fix-login-bug")
   status: string;                // Current status text
   statusGroup: 'to_do' | 'in_progress' | 'complete' | 'unknown';
+  type?: string;                 // Task type (Bug, Feature, Check, etc.)
   url: string;                   // Notion page URL
+  contentMarkdown?: string;      // Full page content rendered to markdown
 }
 
 /**
@@ -239,4 +241,32 @@ export interface NotionTasksResponse {
   success: boolean;
   tasks: NotionTask[];
   error?: string;
+}
+
+/**
+ * Result from requesting Notion tasks (includes metadata about the request)
+ */
+export interface NotionTasksResult {
+  tasks: NotionTask[];
+  error?: string;
+  source: 'cache' | 'daemon' | 'timeout' | 'error';
+}
+
+/**
+ * Request to create a new Notion task
+ */
+export interface CreateNotionTaskRequest {
+  title: string;
+  requestId: string;
+  timestamp: number;
+}
+
+/**
+ * Response from creating a Notion task
+ */
+export interface CreateNotionTaskResponse {
+  success: boolean;
+  task?: NotionTask;
+  error?: string;
+  requestId: string;
 }

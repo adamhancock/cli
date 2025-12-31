@@ -1,4 +1,5 @@
 import { Client } from '@notionhq/client';
+import { NotionToMarkdown } from 'notion-to-md';
 import type { NotionTask, NotionConfig, NotionPropertyMapping } from './notion-types.js';
 
 let notionClient: Client | null = null;
@@ -14,6 +15,11 @@ export function getNotionConfig(): NotionConfig | null {
     return null;
   }
 
+  // Comma-separated list of statuses to exclude (completed tasks)
+  const excludeStatuses = process.env.NOTION_EXCLUDE_STATUSES
+    ? process.env.NOTION_EXCLUDE_STATUSES.split(',').map(s => s.trim())
+    : ['Done', "Won't fix", 'Out of scope'];
+
   return {
     apiKey,
     databaseId,
@@ -21,7 +27,9 @@ export function getNotionConfig(): NotionConfig | null {
       idProperty: process.env.NOTION_ID_PROPERTY || 'ID',
       branchProperty: process.env.NOTION_BRANCH_PROPERTY || 'Branch name',
       statusProperty: process.env.NOTION_STATUS_PROPERTY || 'Status',
+      typeProperty: process.env.NOTION_TYPE_PROPERTY || 'Task type',
     },
+    excludeStatuses,
   };
 }
 
@@ -53,15 +61,26 @@ export async function fetchNotionTasks(): Promise<NotionTask[]> {
   }
 
   const client = getNotionClient(config.apiKey);
-  const { propertyMapping, databaseId } = config;
+  const markdownConverter = new NotionToMarkdown({ notionClient: client });
+  const { propertyMapping, databaseId, excludeStatuses } = config;
 
   try {
     console.log(`[Notion] Fetching tasks from database ${databaseId}...`);
+    console.log(`[Notion] Excluding statuses: ${excludeStatuses.join(', ')}`);
 
-    // Query the database - we'll filter client-side for status groups
+    // Build filter to exclude completed statuses at API level (faster than client-side filtering)
+    const statusFilters = excludeStatuses.map(status => ({
+      property: propertyMapping.statusProperty,
+      status: {
+        does_not_equal: status,
+      },
+    }));
+
+    // Query the database with API-level filter
     const response = await client.databases.query({
       database_id: databaseId,
       page_size: 100,
+      filter: statusFilters.length > 0 ? { and: statusFilters } : undefined,
     });
 
     const tasks: NotionTask[] = [];
@@ -71,8 +90,9 @@ export async function fetchNotionTasks(): Promise<NotionTask[]> {
 
       const task = parseNotionPage(page, propertyMapping);
 
-      // Only include to_do and in_progress tasks
-      if (task && (task.statusGroup === 'to_do' || task.statusGroup === 'in_progress')) {
+      // Double-check status group (in case of other completion statuses)
+      if (task && task.statusGroup !== 'complete') {
+        task.contentMarkdown = await convertPageToMarkdown(task.id, markdownConverter);
         tasks.push(task);
       }
     }
@@ -172,6 +192,19 @@ function parseNotionPage(
       }
     }
 
+    // Extract task type
+    const typeProp = properties[propertyMapping.typeProperty];
+    let type: string | undefined;
+    if (typeProp) {
+      if (typeProp.type === 'select') {
+        type = typeProp.select?.name;
+      } else if (typeProp.type === 'multi_select') {
+        type = typeProp.multi_select?.[0]?.name;
+      } else if (typeProp.type === 'rich_text') {
+        type = typeProp.rich_text.map((t: any) => t.plain_text).join('');
+      }
+    }
+
     // Generate branch name: {taskId}-{branchSuffix}
     const branchName = generateBranchName(taskId, branchNameSuffix, title);
 
@@ -185,11 +218,30 @@ function parseNotionPage(
       branchName,
       status,
       statusGroup,
+      type,
       url,
     };
   } catch (error) {
     console.error('[Notion] Failed to parse page:', error);
     return null;
+  }
+}
+
+/**
+ * Convert a Notion page to markdown, returning a helpful fallback on failure
+ */
+async function convertPageToMarkdown(
+  pageId: string,
+  converter: NotionToMarkdown
+): Promise<string | undefined> {
+  try {
+    const mdBlocks = await converter.pageToMarkdown(pageId);
+    const result = converter.toMarkdownString(mdBlocks);
+    const markdown = result.parent?.trim() || '';
+    return markdown || '_No additional details were provided in Notion._';
+  } catch (error) {
+    console.error(`[Notion] Failed to convert page ${pageId} to markdown:`, error);
+    return '_Unable to load Notion content. Please open the task in Notion._';
   }
 }
 
@@ -263,3 +315,69 @@ export async function updateNotionTaskStatus(
     return { success: false, error: String(error) };
   }
 }
+
+/**
+ * Create a new task in the Notion database
+ * Returns the created task if successful
+ */
+export async function createNotionTask(
+  title: string
+): Promise<{ success: boolean; task?: NotionTask; error?: string }> {
+  const config = getNotionConfig();
+  if (!config) {
+    return { success: false, error: 'Notion not configured' };
+  }
+
+  if (!title || !title.trim()) {
+    return { success: false, error: 'Title is required' };
+  }
+
+  const client = getNotionClient(config.apiKey);
+  const markdownConverter = new NotionToMarkdown({ notionClient: client });
+  const { propertyMapping, databaseId } = config;
+
+  try {
+    console.log(`[Notion] Creating task: "${title}"...`);
+
+    // First, we need to find the title property name by querying the database schema
+    const database = await client.databases.retrieve({ database_id: databaseId });
+    let titlePropertyName = 'Name'; // Default fallback
+
+    // Find the title property
+    for (const [propName, propValue] of Object.entries(database.properties)) {
+      if ((propValue as any).type === 'title') {
+        titlePropertyName = propName;
+        break;
+      }
+    }
+
+    // Create the page with title and initial status "Not started"
+    const response = await client.pages.create({
+      parent: { database_id: databaseId },
+      properties: {
+        [titlePropertyName]: {
+          title: [{ text: { content: title.trim() } }],
+        },
+        [propertyMapping.statusProperty]: {
+          status: { name: 'Not started' },
+        },
+      },
+    });
+
+    // Parse the created page
+    const task = parseNotionPage(response, propertyMapping);
+
+    if (task) {
+      // Fetch markdown content for the new task
+      task.contentMarkdown = await convertPageToMarkdown(task.id, markdownConverter);
+      console.log(`[Notion] Task created: ${task.taskId || task.id} - ${task.title}`);
+      return { success: true, task };
+    }
+
+    return { success: false, error: 'Failed to parse created task' };
+  } catch (error) {
+    console.error('[Notion] Failed to create task:', error);
+    return { success: false, error: String(error) };
+  }
+}
+

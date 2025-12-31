@@ -6,7 +6,10 @@ import {
   REDIS_KEYS,
   REDIS_CHANNELS,
 } from './redis-client';
-import type { NotionTask, NotionTasksResponse } from '../types';
+import type { NotionTask, NotionTasksResponse, NotionTasksResult, CreateNotionTaskResponse } from '../types';
+
+// Track in-flight requests to prevent duplicate daemon calls
+let pendingTasksRequest: Promise<NotionTasksResult> | null = null;
 
 /**
  * Get cached Notion tasks directly from Redis
@@ -35,9 +38,42 @@ export async function getCachedNotionTasks(): Promise<NotionTask[] | null> {
 /**
  * Request Notion tasks from the daemon via Redis pub/sub
  * The daemon will fetch from Notion API and respond on the response channel
- * Returns tasks if successful, empty array if failed
+ * Returns result with tasks and metadata about the request source
  */
-export async function requestNotionTasks(timeoutMs = 10000): Promise<NotionTask[]> {
+export async function requestNotionTasks(timeoutMs = 10000): Promise<NotionTasksResult> {
+  // First, always try cache synchronously before anything else
+  try {
+    if (await isRedisAvailable()) {
+      const cached = await getCachedNotionTasks();
+      if (cached && cached.length > 0) {
+        console.log(`Found ${cached.length} cached Notion tasks`);
+        return { tasks: cached, source: 'cache' };
+      }
+    }
+  } catch (e) {
+    console.error('Cache check failed:', e);
+  }
+
+  // If there's already a pending request, return that instead of making a new one
+  if (pendingTasksRequest) {
+    console.log('Reusing pending Notion tasks request');
+    return pendingTasksRequest;
+  }
+
+  // Create the daemon request
+  pendingTasksRequest = requestNotionTasksFromDaemon(timeoutMs);
+
+  try {
+    return await pendingTasksRequest;
+  } finally {
+    pendingTasksRequest = null;
+  }
+}
+
+/**
+ * Internal function to request tasks from daemon (no caching/deduplication)
+ */
+async function requestNotionTasksFromDaemon(timeoutMs: number): Promise<NotionTasksResult> {
   return new Promise(async (resolve) => {
     let subscriber: Redis | null = null;
     let timeoutId: NodeJS.Timeout | null = null;
@@ -55,26 +91,18 @@ export async function requestNotionTasks(timeoutMs = 10000): Promise<NotionTask[
       }
     };
 
-    const resolveOnce = (tasks: NotionTask[]) => {
+    const resolveOnce = (result: NotionTasksResult) => {
       if (!resolved) {
         resolved = true;
         cleanup();
-        resolve(tasks);
+        resolve(result);
       }
     };
 
     try {
       if (!(await isRedisAvailable())) {
         console.log('Redis not available, cannot request Notion tasks');
-        resolveOnce([]);
-        return;
-      }
-
-      // First try cached data
-      const cached = await getCachedNotionTasks();
-      if (cached && cached.length > 0) {
-        console.log(`Found ${cached.length} cached Notion tasks`);
-        resolveOnce(cached);
+        resolveOnce({ tasks: [], error: 'Redis not available', source: 'error' });
         return;
       }
 
@@ -89,7 +117,7 @@ export async function requestNotionTasks(timeoutMs = 10000): Promise<NotionTask[
 
       subscriber.on('error', (error) => {
         console.error('Notion subscriber error:', error.message);
-        resolveOnce([]);
+        resolveOnce({ tasks: [], error: error.message, source: 'error' });
       });
 
       subscriber.on('message', (channel, message) => {
@@ -98,14 +126,14 @@ export async function requestNotionTasks(timeoutMs = 10000): Promise<NotionTask[
             const response: NotionTasksResponse = JSON.parse(message);
             if (response.success) {
               console.log(`Received ${response.tasks.length} Notion tasks from daemon`);
-              resolveOnce(response.tasks);
+              resolveOnce({ tasks: response.tasks, source: 'daemon' });
             } else {
               console.error('Daemon returned error:', response.error);
-              resolveOnce([]);
+              resolveOnce({ tasks: [], error: response.error, source: 'error' });
             }
           } catch (error) {
             console.error('Failed to parse Notion response:', error);
-            resolveOnce([]);
+            resolveOnce({ tasks: [], error: 'Failed to parse response', source: 'error' });
           }
         }
       });
@@ -124,11 +152,11 @@ export async function requestNotionTasks(timeoutMs = 10000): Promise<NotionTask[
       // Set timeout
       timeoutId = setTimeout(() => {
         console.log('Notion tasks request timed out');
-        resolveOnce([]);
+        resolveOnce({ tasks: [], error: 'Request timed out - is daemon running?', source: 'timeout' });
       }, timeoutMs);
     } catch (error) {
       console.error('Failed to request Notion tasks:', error);
-      resolveOnce([]);
+      resolveOnce({ tasks: [], error: String(error), source: 'error' });
     }
   });
 }
@@ -137,10 +165,10 @@ export async function requestNotionTasks(timeoutMs = 10000): Promise<NotionTask[
  * Refresh Notion tasks from the daemon (force fetch from API)
  * Clears cache first to ensure fresh data
  */
-export async function refreshNotionTasks(): Promise<NotionTask[]> {
+export async function refreshNotionTasks(): Promise<NotionTasksResult> {
   try {
     if (!(await isRedisAvailable())) {
-      return [];
+      return { tasks: [], error: 'Redis not available', source: 'error' };
     }
 
     // Clear cached data to force fresh fetch
@@ -151,7 +179,7 @@ export async function refreshNotionTasks(): Promise<NotionTask[]> {
     return await requestNotionTasks();
   } catch (error) {
     console.error('Failed to refresh Notion tasks:', error);
-    return [];
+    return { tasks: [], error: String(error), source: 'error' };
   }
 }
 
@@ -250,6 +278,104 @@ export async function updateNotionTaskStatus(
     } catch (error) {
       console.error('Failed to update Notion task status:', error);
       resolveOnce({ success: false, error: String(error) });
+    }
+  });
+}
+
+/**
+ * Create a new Notion task via the daemon
+ * Returns the created task if successful
+ */
+export async function createNotionTask(
+  title: string
+): Promise<CreateNotionTaskResponse> {
+  return new Promise(async (resolve) => {
+    let subscriber: Redis | null = null;
+    let timeoutId: NodeJS.Timeout | null = null;
+    let resolved = false;
+    const requestId = `create-${Date.now()}-${Math.random().toString(36).substring(7)}`;
+
+    const cleanup = () => {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
+      if (subscriber) {
+        subscriber.unsubscribe().catch(() => {});
+        subscriber.quit().catch(() => {});
+        subscriber = null;
+      }
+    };
+
+    const resolveOnce = (result: CreateNotionTaskResponse) => {
+      if (!resolved) {
+        resolved = true;
+        cleanup();
+        resolve(result);
+      }
+    };
+
+    try {
+      if (!(await isRedisAvailable())) {
+        console.log('Redis not available, cannot create Notion task');
+        resolveOnce({ success: false, error: 'Redis not available', requestId });
+        return;
+      }
+
+      // Set up subscriber to listen for response
+      subscriber = new Redis({
+        host: 'localhost',
+        port: 6379,
+        lazyConnect: false,
+        retryStrategy: () => null,
+        connectTimeout: 2000,
+      });
+
+      subscriber.on('error', (error) => {
+        console.error('Notion create task subscriber error:', error.message);
+        resolveOnce({ success: false, error: error.message, requestId });
+      });
+
+      subscriber.on('message', (channel, message) => {
+        if (channel === REDIS_CHANNELS.NOTION_CREATE_TASK_RESPONSE) {
+          try {
+            const response: CreateNotionTaskResponse = JSON.parse(message);
+            // Only handle responses for our request
+            if (response.requestId === requestId) {
+              if (response.success && response.task) {
+                console.log(`Notion task created: ${response.task.taskId || response.task.id}`);
+                resolveOnce(response);
+              } else {
+                console.error('Daemon returned error:', response.error);
+                resolveOnce({ success: false, error: response.error, requestId });
+              }
+            }
+          } catch (error) {
+            console.error('Failed to parse Notion create task response:', error);
+            resolveOnce({ success: false, error: 'Failed to parse response', requestId });
+          }
+        }
+      });
+
+      await subscriber.subscribe(REDIS_CHANNELS.NOTION_CREATE_TASK_RESPONSE);
+
+      // Publish request to daemon
+      const publisher = getPublisherClient();
+      await publisher.publish(
+        REDIS_CHANNELS.NOTION_CREATE_TASK_REQUEST,
+        JSON.stringify({ title, requestId, timestamp: Date.now() })
+      );
+
+      console.log(`Published Notion create task request: "${title}"`);
+
+      // Set timeout
+      timeoutId = setTimeout(() => {
+        console.log('Notion create task request timed out');
+        resolveOnce({ success: false, error: 'Request timed out', requestId });
+      }, 15000); // Longer timeout for creation
+    } catch (error) {
+      console.error('Failed to create Notion task:', error);
+      resolveOnce({ success: false, error: String(error), requestId });
     }
   });
 }
