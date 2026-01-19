@@ -38,8 +38,39 @@ export class WebSocketServer {
     this.port = options.port ?? parseInt(process.env.WEBSOCKET_PORT || '9995');
     this.token = options.token;
 
-    // Create HTTP server for Socket.IO
-    this.httpServer = createServer();
+    // Create HTTP server for Socket.IO with request handling
+    this.httpServer = createServer((req, res) => {
+      // Handle POST /api/navigate for Chrome extension navigation
+      if (req.method === 'POST' && req.url === '/api/navigate') {
+        let body = '';
+        req.on('data', (chunk) => {
+          body += chunk.toString();
+        });
+        req.on('end', () => {
+          try {
+            const data = JSON.parse(body);
+            if (data.url) {
+              // Emit to all connected Chrome extensions
+              this.io.emit('navigate', { url: data.url });
+              console.log(`[WebSocket] Navigation request: ${data.url}`);
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ success: true }));
+            } else {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Missing url parameter' }));
+            }
+          } catch (error) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Invalid JSON' }));
+          }
+        });
+        return;
+      }
+
+      // For other requests, let Socket.IO handle or return 404
+      res.writeHead(404);
+      res.end();
+    });
 
     // Initialize Socket.IO server
     this.io = new SocketIOServer(this.httpServer, {

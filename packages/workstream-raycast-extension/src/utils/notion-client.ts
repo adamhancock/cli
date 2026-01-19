@@ -40,7 +40,7 @@ export async function getCachedNotionTasks(): Promise<NotionTask[] | null> {
  * The daemon will fetch from Notion API and respond on the response channel
  * Returns result with tasks and metadata about the request source
  */
-export async function requestNotionTasks(timeoutMs = 10000): Promise<NotionTasksResult> {
+export async function requestNotionTasks(timeoutMs = 30000): Promise<NotionTasksResult> {
   // First, always try cache synchronously before anything else
   try {
     if (await isRedisAvailable()) {

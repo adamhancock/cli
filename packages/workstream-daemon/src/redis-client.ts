@@ -25,6 +25,11 @@ export const REDIS_KEYS = {
   // Notion integration keys
   NOTION_TASKS: 'workstream:notion:tasks',             // Cached Notion tasks
   NOTION_CONFIG: 'workstream:notion:config',           // Notion configuration
+
+  // Vibe Kanban integration keys
+  KANBAN_TASKS: 'workstream:kanban:tasks',             // Set of task IDs with open PRs
+  KANBAN_TASK: (taskId: string) => `workstream:kanban:task:${taskId}`,
+  KANBAN_TIMESTAMP: 'workstream:kanban:timestamp',
 } as const;
 
 export const REDIS_CHANNELS = {
@@ -54,6 +59,9 @@ export const REDIS_CHANNELS = {
   NOTION_UPDATE_STATUS_RESPONSE: 'workstream:notion:status:response',
   NOTION_CREATE_TASK_REQUEST: 'workstream:notion:task:create:request',
   NOTION_CREATE_TASK_RESPONSE: 'workstream:notion:task:create:response',
+
+  // Vibe Kanban integration channels
+  KANBAN_UPDATES: 'workstream:kanban:updates',
 } as const;
 
 // TTL for instance data (30 seconds - auto-expires if daemon stops)

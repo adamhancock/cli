@@ -44,6 +44,13 @@
       "mode": "view"
     },
     {
+      "name": "switch-instance",
+      "title": "Switch Instance",
+      "subtitle": "Workstream",
+      "description": "Switch between VS Code windows and Kanban tasks with direct links",
+      "mode": "view"
+    },
+    {
       "name": "create-worktree",
       "title": "Create Worktree",
       "subtitle": "Workstream",

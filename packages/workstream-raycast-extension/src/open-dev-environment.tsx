@@ -8,14 +8,13 @@ import {
   Toast,
   closeMainWindow,
   getPreferenceValues,
+  open,
 } from '@raycast/api';
 import { useState, useEffect } from 'react';
-import { exec } from 'child_process';
-import { getVSCodeInstances, focusVSCodeInstance } from './utils/vscode';
-import { getGitInfo } from './utils/git';
-import { getPRStatus } from './utils/github';
-import { loadFromDaemon } from './utils/daemon-client';
+import { focusVSCodeInstance } from './utils/vscode';
+import { loadFromDaemon, loadFromRedis } from './utils/daemon-client';
 import { getUsageHistory, recordUsage } from './utils/cache';
+import { fetchCaddyConfig, extractHosts } from './utils/caddy';
 import {
   normalizeUrl,
   getChromeWindows,
@@ -25,34 +24,23 @@ import {
   resolveTargetChromeProfile,
   type ChromeWindow,
 } from './utils/chrome';
-import type { InstanceWithStatus } from './types';
+import type { InstanceWithStatus, CaddyHost } from './types';
 
 interface Preferences {
   defaultRepoPath?: string;
   devDomain?: string;
 }
 
-function sortByUsageHistory(instances: InstanceWithStatus[]): InstanceWithStatus[] {
-  const usageHistory = getUsageHistory();
-
-  return [...instances].sort((a, b) => {
-    const aTime = usageHistory[a.path] || 0;
-    const bTime = usageHistory[b.path] || 0;
-
-    // Most recently used first
-    if (aTime !== bTime) {
-      return bTime - aTime;
-    }
-
-    // If both never used or same time, sort alphabetically
-    return a.name.localeCompare(b.name);
-  });
+// Combined type for display - Caddy host with optional VSCode instance data
+interface DevEnvironment {
+  caddyHost: CaddyHost;
+  instance?: InstanceWithStatus; // VSCode instance if open for this path
 }
 
 export default function OpenDevEnvironmentCommand() {
   const preferences = getPreferenceValues<Preferences>();
   const devDomain = preferences.devDomain || 'localhost';
-  const [instances, setInstances] = useState<InstanceWithStatus[]>([]);
+  const [environments, setEnvironments] = useState<DevEnvironment[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [chromeWindows, setChromeWindows] = useState<ChromeWindow[]>([]);
   const [chromeProfile, setChromeProfile] = useState<string | undefined>();
@@ -102,50 +90,82 @@ export default function OpenDevEnvironmentCommand() {
     setIsLoading(true);
 
     try {
-      // Try daemon first (fastest)
+      // Fetch ALL Caddy routes directly from API
+      const caddyConfig = await fetchCaddyConfig();
+      if (!caddyConfig) {
+        await showToast({
+          style: Toast.Style.Failure,
+          title: 'Caddy not running',
+          message: 'Could not connect to Caddy API',
+        });
+        setEnvironments([]);
+        setIsLoading(false);
+        return;
+      }
+
+      const allHosts = extractHosts(caddyConfig);
+      // Build set of all hostnames for lookup
+      const allHostNames = new Set(allHosts.map((h) => h.name));
+      // Filter out API-only hosts - only if they end with -api AND a corresponding non-api host exists
+      // e.g., filter "devctl2-api.localhost" if "devctl2.localhost" exists
+      // but keep "branch-name-api.localhost" if "branch-name.localhost" doesn't exist
+      const caddyHosts = allHosts.filter((host) => {
+        // Check if hostname matches pattern: {name}-api.{domain}
+        const match = host.name.match(/^(.+)-api\.(.+)$/);
+        if (!match) return true; // Not an -api route, keep it
+        const [, baseName, domain] = match;
+        const nonApiHostname = `${baseName}.${domain}`;
+        // Only filter out if the non-api version exists
+        return !allHostNames.has(nonApiHostname);
+      });
+      if (caddyHosts.length === 0) {
+        setEnvironments([]);
+        setIsLoading(false);
+        return;
+      }
+
+      // Try to get VSCode instances to match with Caddy hosts
+      let instances: InstanceWithStatus[] = [];
+
       const daemonCache = await loadFromDaemon();
-      if (daemonCache && daemonCache.instances.length > 0) {
-        // Filter to only instances with Caddy hosts
-        const withCaddy = daemonCache.instances.filter((i) => i.caddyHost);
-        setInstances(sortByUsageHistory(withCaddy));
-        setIsLoading(false);
-        return;
+      if (daemonCache?.instances) {
+        instances = daemonCache.instances;
+      } else {
+        const redisCache = await loadFromRedis();
+        if (redisCache?.instances) {
+          instances = redisCache.instances;
+        }
       }
 
-      // Fallback to direct fetch
-      const basicInstances = await getVSCodeInstances();
-
-      if (basicInstances.length === 0) {
-        setInstances([]);
-        setIsLoading(false);
-        return;
+      // Create instance lookup by path
+      const instanceByPath = new Map<string, InstanceWithStatus>();
+      for (const instance of instances) {
+        const normalizedPath = instance.path.replace(/\/$/, '');
+        instanceByPath.set(normalizedPath, instance);
       }
 
-      // Enrich with git and PR info
-      const enriched = await Promise.all(
-        basicInstances.map(async (instance) => {
-          const enrichedInstance: InstanceWithStatus = { ...instance };
+      // Combine Caddy hosts with matching VSCode instances
+      const envs: DevEnvironment[] = caddyHosts.map((host) => {
+        const normalizedPath = host.worktreePath?.replace(/\/$/, '');
+        const matchingInstance = normalizedPath ? instanceByPath.get(normalizedPath) : undefined;
+        return {
+          caddyHost: host,
+          instance: matchingInstance,
+        };
+      });
 
-          try {
-            if (instance.isGitRepo) {
-              enrichedInstance.gitInfo = (await getGitInfo(instance.path)) || undefined;
+      // Sort by usage history (using worktree path)
+      const usageHistory = getUsageHistory();
+      envs.sort((a, b) => {
+        const aPath = a.caddyHost.worktreePath || a.caddyHost.name;
+        const bPath = b.caddyHost.worktreePath || b.caddyHost.name;
+        const aTime = usageHistory[aPath] || 0;
+        const bTime = usageHistory[bPath] || 0;
+        if (aTime !== bTime) return bTime - aTime;
+        return a.caddyHost.name.localeCompare(b.caddyHost.name);
+      });
 
-              if (enrichedInstance.gitInfo) {
-                enrichedInstance.prStatus =
-                  (await getPRStatus(instance.path, enrichedInstance.gitInfo.branch)) || undefined;
-              }
-            }
-          } catch (error) {
-            enrichedInstance.error = error instanceof Error ? error.message : 'Unknown error';
-          }
-
-          return enrichedInstance;
-        })
-      );
-
-      // Filter to only instances with Caddy hosts (from daemon)
-      const withCaddy = enriched.filter((i) => i.caddyHost);
-      setInstances(sortByUsageHistory(withCaddy));
+      setEnvironments(envs);
       setIsLoading(false);
     } catch (error) {
       await showToast({
@@ -153,19 +173,17 @@ export default function OpenDevEnvironmentCommand() {
         title: 'Failed to load dev environments',
         message: error instanceof Error ? error.message : 'Unknown error',
       });
-      setInstances([]);
+      setEnvironments([]);
       setIsLoading(false);
     }
   }
 
-  async function openInBrowser(instance: InstanceWithStatus) {
-    if (!instance.caddyHost) return;
-
+  async function openInBrowserForEnv(env: DevEnvironment) {
     try {
-      const url = instance.caddyHost.url;
+      const url = env.caddyHost.url;
 
       // Record usage for sorting next time
-      recordUsage(instance.path);
+      recordUsage(env.caddyHost.worktreePath || env.caddyHost.name);
 
       // Check if Chrome tab already exists
       await showToast({
@@ -204,30 +222,28 @@ export default function OpenDevEnvironmentCommand() {
     }
   }
 
-  async function openAndSwitchToVSCode(instance: InstanceWithStatus) {
-    if (!instance.caddyHost) return;
+  async function openAndSwitchToVSCodeForEnv(env: DevEnvironment) {
+    if (!env.instance) {
+      await showToast({
+        style: Toast.Style.Failure,
+        title: 'No VS Code window',
+        message: 'Open this path in VS Code first',
+      });
+      return;
+    }
 
     try {
       // Record usage for sorting next time
-      recordUsage(instance.path);
+      recordUsage(env.caddyHost.worktreePath || env.caddyHost.name);
 
-      // Open in browser first
-      await fetch(instance.caddyHost.url, { method: 'HEAD' }).catch(() => {
-        // Ignore fetch errors, just trying to open the URL
-      });
-
-      // Open browser
-      const url = instance.caddyHost.url;
-      await new Promise((resolve) => {
-        const script = `open "${url}"`;
-        require('child_process').exec(script, resolve);
-      });
+      // Open in browser using Raycast's open function
+      await open(env.caddyHost.url);
 
       // Small delay to let browser start opening
       await new Promise((resolve) => setTimeout(resolve, 500));
 
       // Switch to VS Code
-      await focusVSCodeInstance(instance.path);
+      await focusVSCodeInstance(env.instance.path);
 
       // Close Raycast
       await closeMainWindow();
@@ -240,17 +256,18 @@ export default function OpenDevEnvironmentCommand() {
     }
   }
 
-  function getStatusIcon(instance: InstanceWithStatus): Icon {
+  function getStatusIcon(env: DevEnvironment): Icon {
+    const instance = env.instance;
     // Check PR state first
-    if (instance.prStatus?.state === 'MERGED') {
+    if (instance?.prStatus?.state === 'MERGED') {
       return Icon.CheckCircle;
     }
-    if (instance.prStatus?.state === 'CLOSED') {
+    if (instance?.prStatus?.state === 'CLOSED') {
       return Icon.XMarkCircle;
     }
 
     // Then check CI status for open PRs
-    if (instance.prStatus?.checks) {
+    if (instance?.prStatus?.checks) {
       if (instance.prStatus.checks.conclusion === 'success') {
         return Icon.CheckCircle;
       } else if (instance.prStatus.checks.conclusion === 'failure') {
@@ -263,17 +280,18 @@ export default function OpenDevEnvironmentCommand() {
     return Icon.Globe;
   }
 
-  function getStatusColor(instance: InstanceWithStatus): Color {
+  function getStatusColor(env: DevEnvironment): Color {
+    const instance = env.instance;
     // Check PR state first
-    if (instance.prStatus?.state === 'MERGED') {
+    if (instance?.prStatus?.state === 'MERGED') {
       return Color.Purple;
     }
-    if (instance.prStatus?.state === 'CLOSED') {
+    if (instance?.prStatus?.state === 'CLOSED') {
       return Color.SecondaryText;
     }
 
     // Then check CI status for open PRs
-    if (instance.prStatus?.checks) {
+    if (instance?.prStatus?.checks) {
       if (instance.prStatus.checks.conclusion === 'success') {
         return Color.Green;
       } else if (instance.prStatus.checks.conclusion === 'failure') {
@@ -286,32 +304,30 @@ export default function OpenDevEnvironmentCommand() {
     return Color.Blue;
   }
 
-  function getSubtitle(instance: InstanceWithStatus): string {
+  function getSubtitle(env: DevEnvironment): string {
     const parts: string[] = [];
 
-    if (instance.caddyHost) {
-      parts.push(instance.caddyHost.url);
-    }
+    parts.push(env.caddyHost.url);
 
-    if (instance.gitInfo) {
-      parts.push(`⎇ ${instance.gitInfo.branch}`);
+    if (env.instance?.gitInfo) {
+      parts.push(`⎇ ${env.instance.gitInfo.branch}`);
 
-      if (instance.prStatus) {
-        let prDisplay = `#${instance.prStatus.number}`;
+      if (env.instance.prStatus) {
+        let prDisplay = `#${env.instance.prStatus.number}`;
 
-        if (instance.prStatus.state === 'OPEN') {
-          if (instance.prStatus.checks) {
-            if (instance.prStatus.checks.conclusion === 'success') {
+        if (env.instance.prStatus.state === 'OPEN') {
+          if (env.instance.prStatus.checks) {
+            if (env.instance.prStatus.checks.conclusion === 'success') {
               prDisplay += ' ✅';
-            } else if (instance.prStatus.checks.conclusion === 'failure') {
+            } else if (env.instance.prStatus.checks.conclusion === 'failure') {
               prDisplay += ' ❌';
-            } else if (instance.prStatus.checks.conclusion === 'pending') {
+            } else if (env.instance.prStatus.checks.conclusion === 'pending') {
               prDisplay += ' 🟡';
             }
           }
-        } else if (instance.prStatus.state === 'MERGED') {
+        } else if (env.instance.prStatus.state === 'MERGED') {
           prDisplay += ' ✓';
-        } else if (instance.prStatus.state === 'CLOSED') {
+        } else if (env.instance.prStatus.state === 'CLOSED') {
           prDisplay += ' ✗';
         }
 
@@ -322,14 +338,12 @@ export default function OpenDevEnvironmentCommand() {
     return parts.join(' • ');
   }
 
-  function getSpotlightUrl(instance: InstanceWithStatus): string | null {
-    if (!instance.caddyHost) return null;
-    if (!instance.gitInfo?.branch) return null;
-
-    const branch = instance.gitInfo.branch;
+  function getSpotlightUrl(env: DevEnvironment): string | null {
+    const branch = env.instance?.gitInfo?.branch;
+    if (!branch) return null;
 
     // Caddy routes can be nested - check for subroute handler
-    const routes = (instance.caddyHost.routes || []) as any[];
+    const routes = (env.caddyHost.routes || []) as any[];
 
     // Helper function to search for spotlight route recursively
     const findSpotlightRoute = (routeList: any[]): string | null => {
@@ -363,11 +377,20 @@ export default function OpenDevEnvironmentCommand() {
     return findSpotlightRoute(routes);
   }
 
-  function getAccessories(instance: InstanceWithStatus): List.Item.Accessory[] {
+  function getAccessories(env: DevEnvironment): List.Item.Accessory[] {
     const accessories: List.Item.Accessory[] = [];
+    const instance = env.instance;
+
+    // Show if VSCode is open for this path
+    if (!instance) {
+      accessories.push({
+        icon: { source: Icon.XMarkCircle, tintColor: Color.SecondaryText },
+        tooltip: 'No VS Code window open',
+      });
+    }
 
     // PR status section
-    if (instance.prStatus) {
+    if (instance?.prStatus) {
       // Chrome tab indicator - show if PR is open in Chrome
       if (isPROpenInChrome(instance)) {
         accessories.push({
@@ -427,16 +450,16 @@ export default function OpenDevEnvironmentCommand() {
       }
     }
 
-    if (instance.tmuxStatus?.exists) {
+    if (instance?.tmuxStatus?.exists) {
       accessories.push({
         icon: { source: Icon.Terminal, tintColor: Color.Green },
         tooltip: `tmux: ${instance.tmuxStatus.name}`,
       });
     }
 
-    if (instance.caddyHost?.upstreams && instance.caddyHost.upstreams.length > 0) {
+    if (env.caddyHost.upstreams && env.caddyHost.upstreams.length > 0) {
       accessories.push({
-        text: instance.caddyHost.upstreams[0],
+        text: env.caddyHost.upstreams[0],
         tooltip: 'Backend upstream',
       });
     }
@@ -444,57 +467,73 @@ export default function OpenDevEnvironmentCommand() {
     return accessories;
   }
 
+  // Get display name from Caddy host or worktree path
+  function getDisplayName(env: DevEnvironment): string {
+    if (env.instance?.name) {
+      return env.instance.name;
+    }
+    // Extract name from worktree path or hostname
+    if (env.caddyHost.worktreePath) {
+      return env.caddyHost.worktreePath.split('/').pop() || env.caddyHost.name;
+    }
+    return env.caddyHost.name;
+  }
+
   return (
     <List isLoading={isLoading} searchBarPlaceholder="Search dev environments...">
-      {instances.length === 0 && !isLoading ? (
+      {environments.length === 0 && !isLoading ? (
         <List.EmptyView
           icon={Icon.Globe}
           title="No dev environments found"
-          description="No Caddy routes detected. Make sure Caddy is running and has worktree routes configured."
+          description="No Caddy routes detected. Make sure Caddy is running and has routes configured."
         />
       ) : (
-        instances.map((instance) => (
+        environments.map((env) => (
           <List.Item
-            key={instance.path}
-            icon={{ source: getStatusIcon(instance), tintColor: getStatusColor(instance) }}
-            title={instance.name}
-            subtitle={getSubtitle(instance)}
-            accessories={getAccessories(instance)}
+            key={env.caddyHost.name}
+            icon={{ source: getStatusIcon(env), tintColor: getStatusColor(env) }}
+            title={getDisplayName(env)}
+            subtitle={getSubtitle(env)}
+            accessories={getAccessories(env)}
             actions={
               <ActionPanel>
                 <Action
                   title="Open in Browser"
-                  onAction={() => openInBrowser(instance)}
+                  onAction={() => openInBrowserForEnv(env)}
                   icon={Icon.Globe}
                 />
-                {getSpotlightUrl(instance) && (
+                {getSpotlightUrl(env) && (
                   <Action.OpenInBrowser
                     title="Open Spotlight"
-                    url={getSpotlightUrl(instance)!}
+                    url={getSpotlightUrl(env)!}
                     icon={Icon.Eye}
                     shortcut={{ modifiers: ['cmd', 'shift'], key: 's' }}
                   />
                 )}
-                <Action
-                  title="Open & Switch to VS Code"
-                  onAction={() => openAndSwitchToVSCode(instance)}
-                  icon={Icon.Window}
-                  shortcut={{ modifiers: ['cmd'], key: 'o' }}
-                />
-                <Action
-                  title="Switch to VS Code"
-                  onAction={async () => {
-                    recordUsage(instance.path);
-                    await focusVSCodeInstance(instance.path);
-                    await closeMainWindow();
-                  }}
-                  icon={Icon.Code}
-                  shortcut={{ modifiers: ['cmd'], key: 's' }}
-                />
-                {instance.prStatus && (
+                {env.instance && (
+                  <Action
+                    title="Open & Switch to VS Code"
+                    onAction={() => openAndSwitchToVSCodeForEnv(env)}
+                    icon={Icon.Window}
+                    shortcut={{ modifiers: ['cmd'], key: 'o' }}
+                  />
+                )}
+                {env.instance && (
+                  <Action
+                    title="Switch to VS Code"
+                    onAction={async () => {
+                      recordUsage(env.caddyHost.worktreePath || env.caddyHost.name);
+                      await focusVSCodeInstance(env.instance!.path);
+                      await closeMainWindow();
+                    }}
+                    icon={Icon.Code}
+                    shortcut={{ modifiers: ['cmd'], key: 's' }}
+                  />
+                )}
+                {env.instance?.prStatus && (
                   <Action.OpenInBrowser
                     title="Open PR"
-                    url={instance.prStatus.url}
+                    url={env.instance.prStatus.url}
                     icon={Icon.Link}
                     shortcut={{ modifiers: ['cmd'], key: 'p' }}
                   />
@@ -507,10 +546,12 @@ export default function OpenDevEnvironmentCommand() {
                 />
                 <Action.CopyToClipboard
                   title="Copy URL"
-                  content={instance.caddyHost!.url}
+                  content={env.caddyHost.url}
                   shortcut={{ modifiers: ['cmd'], key: 'c' }}
                 />
-                <Action.ShowInFinder path={instance.path} />
+                {env.caddyHost.worktreePath && (
+                  <Action.ShowInFinder path={env.caddyHost.worktreePath} />
+                )}
               </ActionPanel>
             }
           />

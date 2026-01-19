@@ -41,6 +41,13 @@ function normalizeUrl(url: string): string {
   }
 }
 
+// Helper to safely get timestamp from lastActivityTime (handles both Date and string)
+function getActivityTimestamp(lastActivityTime: Date | string | undefined): number {
+  if (!lastActivityTime) return 0;
+  if (lastActivityTime instanceof Date) return lastActivityTime.getTime();
+  return new Date(lastActivityTime).getTime();
+}
+
 async function getChromeWindows(): Promise<ChromeWindow[]> {
   try {
     const redis = new Redis({
@@ -1088,9 +1095,9 @@ export default function Command() {
                           <List.Item.Detail.Metadata.Label
                             title="Last Activity"
                             text={
-                              Math.floor((Date.now() - instance.claudeStatus.lastActivityTime.getTime()) / 1000) < 60
+                              Math.floor((Date.now() - getActivityTimestamp(instance.claudeStatus.lastActivityTime)) / 1000) < 60
                                 ? 'Just now'
-                                : `${Math.floor((Date.now() - instance.claudeStatus.lastActivityTime.getTime()) / 60000)} min ago`
+                                : `${Math.floor((Date.now() - getActivityTimestamp(instance.claudeStatus.lastActivityTime)) / 60000)} min ago`
                             }
                           />
                         )}
@@ -1546,7 +1553,7 @@ function getDetailMarkdown(instance: InstanceWithStatus): string {
     sections.push(`- **PID:** ${instance.claudeStatus.pid}`);
 
     if (instance.claudeStatus.lastActivityTime) {
-      const ageSeconds = Math.floor((Date.now() - instance.claudeStatus.lastActivityTime.getTime()) / 1000);
+      const ageSeconds = Math.floor((Date.now() - getActivityTimestamp(instance.claudeStatus.lastActivityTime)) / 1000);
       const ageMinutes = Math.floor(ageSeconds / 60);
       const timeStr = ageMinutes > 0 ? `${ageMinutes} minute${ageMinutes > 1 ? 's' : ''} ago` : 'just now';
       sections.push(`- **Last Activity:** ${timeStr}`);

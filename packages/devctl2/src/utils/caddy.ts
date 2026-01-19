@@ -132,7 +132,7 @@ export class CaddyClient {
             match: [{ path: ['/api/*'] }],
             handle: [{
               handler: 'reverse_proxy',
-              upstreams: [{ dial: `127.0.0.1:${ports.api}` }],
+              upstreams: [{ dial: `localhost:${ports.api}` }],
               health_checks: {
                 passive: {
                   unhealthy_request_count: 0
@@ -158,7 +158,7 @@ export class CaddyClient {
               },
               {
                 handler: 'reverse_proxy',
-                upstreams: [{ dial: `127.0.0.1:${ports.spotlight}` }],
+                upstreams: [{ dial: `localhost:${ports.spotlight}` }],
                 health_checks: {
                   passive: {
                     unhealthy_request_count: 0
@@ -178,7 +178,7 @@ export class CaddyClient {
           {
             handle: [{
               handler: 'reverse_proxy',
-              upstreams: [{ dial: `127.0.0.1:${ports.web}` }],
+              upstreams: [{ dial: `localhost:${ports.web}` }],
               health_checks: {
                 passive: {
                   unhealthy_request_count: 0
@@ -218,36 +218,55 @@ export class CaddyClient {
       routes: newRoutes
     };
 
-    // Add/update Spotlight UI server on port 8888 if spotlight is enabled
+    // Add/update Spotlight UI route on port 8888 if spotlight is enabled
+    // Uses a single shared server with host-based routing for all worktrees
     if (ports.spotlight) {
-      const spotlightServerKey = `spotlight-${subdomain}`;
-      const spotlightServer = {
-        listen: [':8888'],
-        routes: [{
-          '@id': `spotlight-ui-${subdomain}`,
-          match: [{ host: [hostname] }],
-          handle: [{
-            handler: 'reverse_proxy',
-            upstreams: [{ dial: `127.0.0.1:${ports.spotlight}` }],
-            health_checks: {
-              passive: {
-                unhealthy_request_count: 0
-              }
-            },
-            headers: {
-              response: {
-                set: {
-                  'X-Worktree-Path': [workdir],
-                  'X-Spotlight-Port': [String(ports.spotlight)]
-                }
+      const spotlightServerKey = 'spotlight-shared';
+      const spotlightRoute = {
+        '@id': `spotlight-ui-${subdomain}`,
+        match: [{ host: [hostname] }],
+        handle: [{
+          handler: 'reverse_proxy',
+          upstreams: [{ dial: `localhost:${ports.spotlight}` }],
+          health_checks: {
+            passive: {
+              unhealthy_request_count: 0
+            }
+          },
+          headers: {
+            response: {
+              set: {
+                'X-Worktree-Path': [workdir],
+                'X-Spotlight-Port': [String(ports.spotlight)]
               }
             }
-          }],
-          terminal: true
-        }]
+          }
+        }],
+        terminal: true
       };
 
-      await this.request('PUT', `/config/apps/http/servers/${spotlightServerKey}`, spotlightServer);
+      try {
+        // Try to get existing spotlight server
+        const existingServer = await this.request('GET', `/config/apps/http/servers/${spotlightServerKey}`);
+
+        // Remove any existing route for this subdomain
+        const filteredRoutes = (existingServer.routes || []).filter(
+          (r: any) => r['@id'] !== `spotlight-ui-${subdomain}`
+        );
+
+        // Add the new/updated route
+        filteredRoutes.push(spotlightRoute);
+        existingServer.routes = filteredRoutes;
+
+        await this.request('PUT', `/config/apps/http/servers/${spotlightServerKey}`, existingServer);
+      } catch {
+        // Server doesn't exist, create it
+        const spotlightServer = {
+          listen: [':8888'],
+          routes: [spotlightRoute]
+        };
+        await this.request('PUT', `/config/apps/http/servers/${spotlightServerKey}`, spotlightServer);
+      }
     }
 
     // Update the server configuration
@@ -279,7 +298,7 @@ export class CaddyClient {
         match: [{ path: ['/api/*'] }],
         handle: [{
           handler: 'reverse_proxy',
-          upstreams: [{ dial: `127.0.0.1:${apiPort}` }],
+          upstreams: [{ dial: `localhost:${apiPort}` }],
           health_checks: {
             passive: {
               unhealthy_request_count: 0
@@ -301,7 +320,7 @@ export class CaddyClient {
     routes.push({
       handle: [{
         handler: 'reverse_proxy',
-        upstreams: [{ dial: `127.0.0.1:${port}` }],
+        upstreams: [{ dial: `localhost:${port}` }],
         health_checks: {
           passive: {
             unhealthy_request_count: 0

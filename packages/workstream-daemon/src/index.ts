@@ -21,6 +21,7 @@ import { BullBoardServer } from './bull-board-server.js';
 import { WebSocketServer } from './websocket-server.js';
 import { getAuthToken } from './auth.js';
 import { createWorktree } from './worktree-utils.js';
+import { getVibeKanbanIntegration, VibeKanbanIntegration } from './vibe-kanban-integration.js';
 
 // Disable verbose output from zx
 $.verbose = false;
@@ -268,6 +269,7 @@ class WorkstreamDaemon {
   private previousPRStates: Map<string, { conclusion: 'success' | 'failure' | 'pending'; mergeable?: string }> = new Map();
   private bullBoard: BullBoardServer;
   private websocketServer?: WebSocketServer;
+  private vibeKanban: VibeKanbanIntegration | null = null;
 
   constructor() {
     this.redis = getRedisClient();
@@ -407,6 +409,15 @@ class WorkstreamDaemon {
         logError('Failed to subscribe to Notion status update channel:', err);
       } else {
         log('Subscribed to Notion status update channel');
+      }
+    });
+
+    // Subscribe to Notion create task request channel
+    this.subscriber.subscribe(REDIS_CHANNELS.NOTION_CREATE_TASK_REQUEST, (err) => {
+      if (err) {
+        logError('Failed to subscribe to Notion create task channel:', err);
+      } else {
+        log('Subscribed to Notion create task channel');
       }
     });
 
@@ -812,6 +823,11 @@ class WorkstreamDaemon {
       this.notionRefreshTimer = setInterval(() => this.refreshNotionTasksCache(), 5 * 60 * 1000);
     }
 
+    // Start Vibe Kanban integration (CI status enrichment)
+    log('📋 Starting Vibe Kanban integration...');
+    this.vibeKanban = getVibeKanbanIntegration();
+    await this.vibeKanban.start();
+
     log('');
     log('✅ Daemon running');
     log(`   Polling interval: ${this.currentPollInterval}ms`);
@@ -865,6 +881,11 @@ class WorkstreamDaemon {
 
     if (this.notionRefreshTimer) {
       clearInterval(this.notionRefreshTimer);
+    }
+
+    // Stop Vibe Kanban integration
+    if (this.vibeKanban) {
+      await this.vibeKanban.stop();
     }
 
     // Stop WebSocket server

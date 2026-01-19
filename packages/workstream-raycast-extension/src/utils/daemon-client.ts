@@ -90,7 +90,12 @@ export async function loadFromRedis(): Promise<DaemonCache | null> {
     for (const [err, result] of results) {
       if (!err && result && typeof result === 'string') {
         try {
-          instances.push(JSON.parse(result));
+          const instance = JSON.parse(result);
+          // Convert lastActivityTime from string back to Date
+          if (instance.claudeStatus?.lastActivityTime) {
+            instance.claudeStatus.lastActivityTime = new Date(instance.claudeStatus.lastActivityTime);
+          }
+          instances.push(instance);
         } catch {
           // Skip invalid JSON
         }

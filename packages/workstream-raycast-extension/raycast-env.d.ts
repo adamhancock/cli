@@ -22,6 +22,8 @@ declare type Preferences = ExtensionPreferences
 declare namespace Preferences {
   /** Preferences accessible in the `index` command */
   export type Index = ExtensionPreferences & {}
+  /** Preferences accessible in the `switch-instance` command */
+  export type SwitchInstance = ExtensionPreferences & {}
   /** Preferences accessible in the `create-worktree` command */
   export type CreateWorktree = ExtensionPreferences & {}
   /** Preferences accessible in the `cleanup-environments` command */
@@ -55,6 +57,8 @@ declare namespace Preferences {
 declare namespace Arguments {
   /** Arguments passed to the `index` command */
   export type Index = {}
+  /** Arguments passed to the `switch-instance` command */
+  export type SwitchInstance = {}
   /** Arguments passed to the `create-worktree` command */
   export type CreateWorktree = {}
   /** Arguments passed to the `cleanup-environments` command */

@@ -57,6 +57,6 @@ export interface ExtensionConfig {
 export const DEFAULT_CONFIG: ExtensionConfig = {
   enabled: true,
   trackedDomains: ['*.localhost'],
-  daemonWsUrl: 'ws://localhost:58234',
+  daemonWsUrl: 'ws://localhost:9995',
   authToken: '',
 };

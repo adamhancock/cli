@@ -154,13 +154,18 @@ program
           const caddyPorts = {
             api: ports.api || 3001,
             web: ports.web || 5173,
-            spotlight: null
+            spotlight: ports.spotlight || null
           };
           await caddy.addRoute(subdomain, caddyPorts, workdir, config.baseDomain, usingRootDomain);
 
           const frontendUrl = usingRootDomain ? `https://${config.baseDomain}` : `https://${subdomain}.${config.baseDomain}`;
           console.log(chalk.green('✅ Added Caddy route'));
           console.log(`   🌐 ${chalk.blue(frontendUrl)}`);
+
+          // Show Spotlight URL if enabled
+          if (caddyPorts.spotlight) {
+            console.log(`   🔍 ${chalk.magenta(`${frontendUrl}:8888`)} (spotlight)`);
+          }
 
           // Add standalone routes for apps with custom hostnames
           for (const [appName, appConfig] of Object.entries(config.apps)) {

@@ -70,6 +70,7 @@ export interface ServerToClientEvents {
   'claude-event': (data: ClaudeEventData) => void;
   notification: (data: NotificationData) => void;
   pong: () => void;
+  navigate: (data: { url: string }) => void;
 }
 
 export interface ClaudeEventData {

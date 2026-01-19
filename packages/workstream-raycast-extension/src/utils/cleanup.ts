@@ -111,7 +111,10 @@ export function findEnvironmentsForCleanup(
 function isOldWorktree(instance: InstanceWithStatus): boolean {
   // Check if there's a Claude session with recent activity
   if (instance.claudeStatus?.active && instance.claudeStatus.lastActivityTime) {
-    const daysSinceActivity = (Date.now() - instance.claudeStatus.lastActivityTime.getTime()) / (1000 * 60 * 60 * 24);
+    const activityTime = instance.claudeStatus.lastActivityTime instanceof Date
+      ? instance.claudeStatus.lastActivityTime
+      : new Date(instance.claudeStatus.lastActivityTime);
+    const daysSinceActivity = (Date.now() - activityTime.getTime()) / (1000 * 60 * 60 * 24);
     if (daysSinceActivity < OLD_WORKTREE_THRESHOLD_DAYS) {
       return false; // Recent activity, not old
     }

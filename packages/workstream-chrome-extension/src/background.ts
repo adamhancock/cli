@@ -86,6 +86,48 @@ function connectToDaemon(): void {
   socket.on('connect_error', (error) => {
     console.error('[Workstream] Connection error:', error.message);
   });
+
+  // Listen for navigation requests from daemon
+  socket.on('navigate', async (data: { url: string }) => {
+    console.log('[Workstream] Navigate request:', data.url);
+    try {
+      const urlObj = new URL(data.url);
+      const origin = urlObj.origin;
+
+      // Extract task ID from URL path: /projects/{projectId}/tasks/{taskId}/...
+      const taskIdMatch = urlObj.pathname.match(/\/tasks\/([^/]+)/);
+      const taskId = taskIdMatch?.[1];
+
+      // Find tabs on this origin
+      const tabs = await chrome.tabs.query({ url: `${origin}/*` });
+      console.log('[Workstream] Task ID:', taskId);
+      console.log('[Workstream] Found tabs:', tabs.map(t => ({ id: t.id, url: t.url })));
+
+      // Try to find a tab already showing this task
+      const targetTab = taskId
+        ? tabs.find((tab) => tab.url?.includes(`/tasks/${taskId}/`))
+        : undefined;
+
+      console.log('[Workstream] Target tab:', targetTab?.id, targetTab?.url);
+
+      if (targetTab?.id) {
+        await chrome.tabs.update(targetTab.id, { url: data.url, active: true });
+        console.log('[Workstream] Navigated existing task tab');
+        if (targetTab.windowId) {
+          await chrome.windows.update(targetTab.windowId, { focused: true });
+        }
+      } else {
+        // No tab for this task, create new one
+        console.log('[Workstream] No matching tab, creating new');
+        const newTab = await chrome.tabs.create({ url: data.url, active: true });
+        if (newTab.windowId) {
+          await chrome.windows.update(newTab.windowId, { focused: true });
+        }
+      }
+    } catch (error) {
+      console.error('[Workstream] Navigation failed:', error);
+    }
+  });
 }
 
 // Disconnect from daemon

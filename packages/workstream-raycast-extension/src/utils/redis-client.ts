@@ -8,6 +8,9 @@ export const REDIS_KEYS = {
   EVENTS_RECENT: 'workstream:events:recent',
   WORKTREE_JOB: (jobId: string) => `workstream:worktree:job:${jobId}`,
   NOTION_TASKS: 'workstream:notion:tasks',
+  // Kanban task instances (from vibe-kanban)
+  KANBAN_TASKS: 'workstream:kanban:tasks',
+  KANBAN_TASK: (id: string) => `workstream:kanban:task:${id}`,
 } as const;
 
 export const REDIS_CHANNELS = {
@@ -24,6 +27,8 @@ export const REDIS_CHANNELS = {
   NOTION_UPDATE_STATUS_RESPONSE: 'workstream:notion:status:response',
   NOTION_CREATE_TASK_REQUEST: 'workstream:notion:task:create:request',
   NOTION_CREATE_TASK_RESPONSE: 'workstream:notion:task:create:response',
+  // Kanban updates from daemon
+  KANBAN_UPDATES: 'workstream:kanban:updates',
 } as const;
 
 let redisClient: Redis | null = null;
