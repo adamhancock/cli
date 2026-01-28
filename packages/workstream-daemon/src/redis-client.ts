@@ -11,9 +11,6 @@ export const REDIS_KEYS = {
   WORKTREE_JOB: (jobId: string) => `workstream:worktree:job:${jobId}`,
   WORKTREE_LOCK: (repoPath: string, worktreeName: string) =>
     `workstream:worktree:lock:${Buffer.from(repoPath).toString('base64')}:${worktreeName}`,
-  // OpenCode uses pattern-based keys for multiple instances:
-  // workstream:opencode:instances:{base64(path)} - Set of PIDs
-  // workstream:opencode:api:{base64(path)}:{pid} - Instance info
 
   // Chrome extension keys (separate keys per domain with 24h TTL)
   CHROME_COOKIES: (domain: string) => `workstream:chrome:cookies:${domain}`,
@@ -25,11 +22,6 @@ export const REDIS_KEYS = {
   // Notion integration keys
   NOTION_TASKS: 'workstream:notion:tasks',             // Cached Notion tasks
   NOTION_CONFIG: 'workstream:notion:config',           // Notion configuration
-
-  // Vibe Kanban integration keys
-  KANBAN_TASKS: 'workstream:kanban:tasks',             // Set of task IDs with open PRs
-  KANBAN_TASK: (taskId: string) => `workstream:kanban:task:${taskId}`,
-  KANBAN_TIMESTAMP: 'workstream:kanban:timestamp',
 } as const;
 
 export const REDIS_CHANNELS = {
@@ -46,7 +38,6 @@ export const REDIS_CHANNELS = {
   EVENTS_NEW: 'workstream:events:new',
   WORKTREE_JOBS: 'workstream:worktree:jobs',
   WORKTREE_UPDATES: 'workstream:worktree:updates',
-  OPENCODE: 'workstream:opencode',
   CHROME_COOKIES: 'workstream:chrome:cookies',
   CHROME_REQUESTS: 'workstream:chrome:requests',
   CHROME_LOCALSTORAGE: 'workstream:chrome:localstorage',
@@ -59,9 +50,6 @@ export const REDIS_CHANNELS = {
   NOTION_UPDATE_STATUS_RESPONSE: 'workstream:notion:status:response',
   NOTION_CREATE_TASK_REQUEST: 'workstream:notion:task:create:request',
   NOTION_CREATE_TASK_RESPONSE: 'workstream:notion:task:create:response',
-
-  // Vibe Kanban integration channels
-  KANBAN_UPDATES: 'workstream:kanban:updates',
 } as const;
 
 // TTL for instance data (30 seconds - auto-expires if daemon stops)

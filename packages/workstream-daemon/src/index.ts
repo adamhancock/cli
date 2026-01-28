@@ -21,7 +21,6 @@ import { BullBoardServer } from './bull-board-server.js';
 import { WebSocketServer } from './websocket-server.js';
 import { getAuthToken } from './auth.js';
 import { createWorktree } from './worktree-utils.js';
-import { getVibeKanbanIntegration, VibeKanbanIntegration } from './vibe-kanban-integration.js';
 
 // Disable verbose output from zx
 $.verbose = false;
@@ -97,40 +96,6 @@ interface ClaudeStatus {
   terminalId?: string;
   terminalPid?: number;
   vscodePid?: number;
-}
-
-interface OpenCodeSessionInfo {
-  pid: number;
-  sessionId: string | null;
-  status: 'working' | 'waiting' | 'idle' | 'error';
-  lastActivity: number;
-  workStartedAt?: number;
-  metrics?: {
-    toolsUsed: Record<string, number>;
-    filesEdited: number;
-    commandsRun: number;
-  };
-}
-
-interface OpenCodeStatus {
-  sessions?: Record<number, OpenCodeSessionInfo>;  // Keyed by PID (optional for backwards compat)
-  primarySession?: number;  // PID of most recently active session
-  
-  // Aggregate/legacy fields for backwards compatibility
-  active: boolean;
-  sessionId?: string;
-  isWorking: boolean;
-  isWaiting?: boolean;
-  isIdle?: boolean;
-  opencodeFinished?: boolean;
-  lastEventTime?: number;
-  workStartedAt?: number;
-  finishedAt?: number;
-  metrics?: {
-    toolsUsed: Record<string, number>;
-    filesEdited: number;
-    commandsRun: number;
-  };
 }
 
 interface TmuxStatus {
@@ -217,7 +182,6 @@ interface InstanceWithMetadata extends VSCodeInstance {
   gitInfo?: GitInfo;
   prStatus?: PRStatus;
   claudeStatus?: ClaudeStatus;
-  opencodeStatus?: OpenCodeStatus;
   tmuxStatus?: TmuxStatus;
   caddyHost?: CaddyHost;
   spotlightStatus?: SpotlightStatus;
@@ -230,13 +194,30 @@ interface InstanceWithMetadata extends VSCodeInstance {
 
 const CACHE_DIR = join(homedir(), '.workstream-daemon');
 const CACHE_FILE = join(CACHE_DIR, 'instances.json');
-const POLL_INTERVAL = 5000; // 5 seconds (git and Claude are local, fast)
+
+// Dynamic polling intervals for battery optimization
+const IDLE_POLL_INTERVAL = 60000;     // 60s when idle (no user activity)
+const ACTIVE_POLL_INTERVAL = 10000;   // 10s when user is active
+const ACTIVITY_TIMEOUT = 120000;      // Consider idle after 2min of no activity
+
+// Separate poll intervals for expensive operations
+const CHROME_POLL_INTERVAL = 120000;  // 2 minutes for Chrome tab enumeration
+const SLOW_POLL_INTERVAL = 120000;    // 2 minutes for expensive process detection
+
+// Legacy constants (kept for rate limiting logic)
+const POLL_INTERVAL = 5000; // 5 seconds (git and Claude are local, fast) - replaced by dynamic polling
 const MIN_POLL_INTERVAL = 120000; // 2 minutes (when rate limited)
-const RATE_LIMIT_THRESHOLD = 100; // Start slowing down when remaining < 100
+// Rate limit protection tiers
+const RATE_LIMIT_CRITICAL = 50;    // Stop all PR updates below this
+const RATE_LIMIT_LOW = 200;        // Reduce PR frequency (5 min intervals)
+const RATE_LIMIT_CAUTION = 500;    // Start being careful (2 min intervals)
+const RATE_LIMIT_THRESHOLD = 100;  // Legacy threshold (kept for compatibility)
+
+// Cache optimization
+const CACHE_WRITE_DEBOUNCE = 30000;   // Write cache at most every 30 seconds
+
 const CLAUDE_WORK_TIMEOUT = 5 * 60 * 1000; // 5 minutes - reset working state if no events
 const CLAUDE_WAIT_TIMEOUT = 30 * 60 * 1000; // 30 minutes - reset waiting state if no events
-const OPENCODE_WORK_TIMEOUT = 5 * 60 * 1000; // 5 minutes - reset OpenCode working state if no events
-const OPENCODE_WAIT_TIMEOUT = 30 * 60 * 1000; // 30 minutes - reset OpenCode waiting state if no events
 
 function log(...args: any[]) {
   const timestamp = new Date().toISOString();
@@ -263,13 +244,28 @@ class WorkstreamDaemon {
   private subscriber: Redis;
   private pollTimer?: NodeJS.Timeout;
   private notionRefreshTimer?: NodeJS.Timeout;
-  private currentPollInterval: number = POLL_INTERVAL;
+  private currentPollInterval: number = ACTIVE_POLL_INTERVAL;
   private ghRateLimit?: GitHubRateLimit;
   private lastRateLimitCheck: number = 0;
   private previousPRStates: Map<string, { conclusion: 'success' | 'failure' | 'pending'; mergeable?: string }> = new Map();
   private bullBoard: BullBoardServer;
   private websocketServer?: WebSocketServer;
-  private vibeKanban: VibeKanbanIntegration | null = null;
+
+  // Activity tracking for dynamic polling
+  private lastActivityTime: number = Date.now();
+  private isUserActive: boolean = true;
+
+  // Separate timers for expensive operations
+  private chromeTimer?: NodeJS.Timeout;
+  private slowPollTimer?: NodeJS.Timeout;
+
+  // Cache write optimization
+  private lastCacheWrite: number = 0;
+  private lastCacheHash: string = '';
+
+  // Rate limit protection - PR polling interval adjusts based on remaining rate limit
+  private prPollInterval: number = 30000; // Default 30s between PR checks per instance
+  private rateLimitPaused: boolean = false; // True when rate limit is critical
 
   constructor() {
     this.redis = getRedisClient();
@@ -283,6 +279,51 @@ class WorkstreamDaemon {
     // Initialize Bull Board server
     const bullBoardPort = parseInt(process.env.BULL_BOARD_PORT || '9999');
     this.bullBoard = new BullBoardServer(bullBoardPort);
+  }
+
+  /**
+   * Mark user activity to adjust polling interval.
+   * Called when clients connect, request data, or send events.
+   */
+  public markActivity() {
+    this.lastActivityTime = Date.now();
+    const wasIdle = !this.isUserActive;
+    this.isUserActive = true;
+
+    if (wasIdle) {
+      log('🔄 User activity detected - switching to active polling');
+      this.adjustPollInterval();
+    }
+  }
+
+  /**
+   * Calculate the current poll interval based on user activity.
+   */
+  private getDynamicPollInterval(): number {
+    const timeSinceActivity = Date.now() - this.lastActivityTime;
+    if (timeSinceActivity > ACTIVITY_TIMEOUT) {
+      this.isUserActive = false;
+      return IDLE_POLL_INTERVAL;
+    }
+    return ACTIVE_POLL_INTERVAL;
+  }
+
+  /**
+   * Adjust the poll interval based on activity state.
+   * Called when activity state changes.
+   */
+  private adjustPollInterval() {
+    const newInterval = this.getDynamicPollInterval();
+    if (newInterval !== this.currentPollInterval) {
+      log(`⏱️  Poll interval changed: ${this.currentPollInterval}ms → ${newInterval}ms`);
+      this.currentPollInterval = newInterval;
+
+      // Reschedule the next poll with the new interval
+      if (this.pollTimer) {
+        clearTimeout(this.pollTimer);
+        this.scheduleNextPoll();
+      }
+    }
   }
 
   private setupSubscriber() {
@@ -385,15 +426,6 @@ class WorkstreamDaemon {
       }
     });
 
-    // Subscribe to OpenCode channel
-    this.subscriber.subscribe(REDIS_CHANNELS.OPENCODE, (err) => {
-      if (err) {
-        logError('Failed to subscribe to OpenCode channel:', err);
-      } else {
-        log('Subscribed to OpenCode channel');
-      }
-    });
-
     // Subscribe to Notion tasks request channel
     this.subscriber.subscribe(REDIS_CHANNELS.NOTION_TASKS_REQUEST, (err) => {
       if (err) {
@@ -430,6 +462,20 @@ class WorkstreamDaemon {
 
         // Store all events in the database
         await this.storeEvent(channel, message, data);
+
+        // Mark activity on user-initiated events to switch to active polling
+        // These channels indicate user/client interaction
+        const activityChannels: string[] = [
+          REDIS_CHANNELS.REFRESH,
+          REDIS_CHANNELS.VSCODE_HEARTBEAT,
+          REDIS_CHANNELS.VSCODE_FILE,
+          REDIS_CHANNELS.VSCODE_GIT,
+          REDIS_CHANNELS.NOTION_TASKS_REQUEST,
+          REDIS_CHANNELS.WORKTREE_JOBS,
+        ];
+        if (activityChannels.includes(channel)) {
+          this.markActivity();
+        }
 
         if (channel === REDIS_CHANNELS.REFRESH) {
           // Handle general refresh requests
@@ -481,77 +527,6 @@ class WorkstreamDaemon {
             this.handleWorktreeJob(data).catch((error) => {
               logError('Error handling worktree job:', error);
             });
-          }
-        } else if (channel === REDIS_CHANNELS.OPENCODE) {
-          const projectName = data.path?.split('/').pop() || 'unknown';
-          
-          // Events that indicate a status change - trigger immediate API poll
-          const statusChangeEvents = [
-            'opencode_session_created',
-            'opencode_session_active',
-            'opencode_session_idle',
-            'opencode_session_compacting',
-            'opencode_session_error',
-            'opencode_work_started',
-            'opencode_waiting_for_input',
-            'opencode_work_stopped',
-            'opencode_status_changed',
-          ];
-          
-          // Log events for debugging
-          if (data.type === 'opencode_session_created') {
-            log(`  🤖 OpenCode session created in ${projectName} (session: ${data.sessionId})`);
-          } else if (data.type === 'opencode_work_started') {
-            log(`  ▶️  OpenCode started working in ${projectName}`);
-          } else if (data.type === 'opencode_waiting_for_input') {
-            log(`  ⏸️  OpenCode waiting for input in ${projectName}`);
-          } else if (data.type === 'opencode_work_stopped') {
-            log(`  ⏹️  OpenCode finished in ${projectName}`);
-          } else if (data.type === 'opencode_session_active') {
-            log(`  🟢 OpenCode active in ${projectName}`);
-          } else if (data.type === 'opencode_session_idle') {
-            log(`  💤 OpenCode idle in ${projectName}`);
-          } else if (data.type === 'opencode_session_compacting') {
-            log(`  🔄 OpenCode compacting in ${projectName}`);
-          } else if (data.type === 'opencode_status_changed') {
-            log(`  ⚡ OpenCode status changed to ${data.newStatus} in ${projectName}`);
-          } else if (data.type === 'opencode_tool_bash') {
-            log(`  💻 OpenCode ran bash command in ${projectName}`);
-          } else if (data.type === 'opencode_tool_read') {
-            log(`  📖 OpenCode read file in ${projectName}`);
-          } else if (data.type === 'opencode_tool_write') {
-            log(`  ✏️  OpenCode wrote file in ${projectName}`);
-          } else if (data.type === 'opencode_tool_edit') {
-            log(`  ✂️  OpenCode edited file in ${projectName}`);
-          } else if (data.type === 'opencode_file_edited') {
-            log(`  📝 OpenCode edited ${data.filePath} in ${projectName}`);
-          } else if (data.type === 'opencode_safety_warning') {
-            log(`  ⚠️  OpenCode safety warning in ${projectName}: ${data.message}`);
-          } else if (data.type === 'opencode_safety_blocked') {
-            log(`  🛑 OpenCode blocked operation in ${projectName}: ${data.message}`);
-          } else if (data.type === 'opencode_session_error') {
-            log(`  ❌ OpenCode error in ${projectName}`);
-          } else if (data.type === 'opencode_session_status') {
-            log(`  📊 OpenCode status: ${data.status} in ${projectName}`);
-          } else if (data.type === 'opencode_heartbeat') {
-            // Process heartbeat to update status (but don't log)
-            if (data.path) {
-              await this.handleOpenCodeHeartbeat(
-                data.path,
-                data.sessionId,
-                data.isWorking,
-                data.lastActivityTime,
-                data.isWaiting,
-                data.isIdle
-              );
-            }
-          } else {
-            log(`  📊 OpenCode event: ${data.type} in ${projectName}`);
-          }
-          
-          // For status change events, immediately poll the API for updated status
-          if (statusChangeEvents.includes(data.type) && data.path) {
-            await this.handleOpenCodeStatusChange(data.path, data.type, projectName);
           }
         } else if (channel === REDIS_CHANNELS.NOTIFICATIONS) {
           // Handle incoming notifications - send as system notification
@@ -799,6 +774,12 @@ class WorkstreamDaemon {
     // Start polling with dynamic interval
     this.scheduleNextPoll();
 
+    // Start slow poll timer for expensive operations (Chrome, Claude processes)
+    this.startSlowPoll();
+
+    // Start Chrome tab polling on separate timer
+    this.startChromePoll();
+
     // Start Bull Board HTTP server
     log('📊 Starting Bull Board...');
     await this.bullBoard.start();
@@ -810,7 +791,8 @@ class WorkstreamDaemon {
     this.websocketServer = new WebSocketServer({
       port: websocketPort,
       redis: this.redis,
-      token
+      token,
+      onActivity: () => this.markActivity()
     });
     await this.websocketServer.start();
 
@@ -823,14 +805,11 @@ class WorkstreamDaemon {
       this.notionRefreshTimer = setInterval(() => this.refreshNotionTasksCache(), 5 * 60 * 1000);
     }
 
-    // Start Vibe Kanban integration (CI status enrichment)
-    log('📋 Starting Vibe Kanban integration...');
-    this.vibeKanban = getVibeKanbanIntegration();
-    await this.vibeKanban.start();
-
     log('');
     log('✅ Daemon running');
-    log(`   Polling interval: ${this.currentPollInterval}ms`);
+    log(`   Main poll interval: ${ACTIVE_POLL_INTERVAL}ms (active) / ${IDLE_POLL_INTERVAL}ms (idle)`);
+    log(`   Chrome poll interval: ${CHROME_POLL_INTERVAL}ms`);
+    log(`   Slow poll interval: ${SLOW_POLL_INTERVAL}ms`);
     log(`   Cache file: ${CACHE_FILE}`);
     log(`   Auth Token: ${token}`);
     log(`   Redis channels:`);
@@ -842,6 +821,9 @@ class WorkstreamDaemon {
   }
 
   private scheduleNextPoll() {
+    // Check if we should switch to idle mode
+    this.adjustPollInterval();
+
     this.pollTimer = setTimeout(() => {
       this.pollInstances()
         .catch(logError)
@@ -849,6 +831,76 @@ class WorkstreamDaemon {
           this.scheduleNextPoll();
         });
     }, this.currentPollInterval);
+  }
+
+  /**
+   * Start the Chrome tab polling on a separate timer.
+   * Chrome enumeration is expensive (AppleScript), so we do it less frequently.
+   */
+  private startChromePoll() {
+    // Run initial Chrome poll
+    this.pollChromeWindows().catch(logError);
+
+    // Schedule recurring Chrome polls
+    this.chromeTimer = setInterval(() => {
+      this.pollChromeWindows().catch(logError);
+    }, CHROME_POLL_INTERVAL);
+  }
+
+  /**
+   * Poll Chrome windows separately from main poll.
+   */
+  private async pollChromeWindows() {
+    try {
+      const chromeWindows = await this.getChromeWindows();
+      this.chromeWindows = chromeWindows;
+      const tabCount = chromeWindows.reduce((sum, w) => sum + w.tabs.length, 0);
+      log(`🌐 [Chrome Poll] Found ${chromeWindows.length} windows with ${tabCount} tabs`);
+
+      // Publish Chrome update
+      await this.publishChromeUpdate();
+    } catch (error) {
+      logError('[Chrome Poll] Error:', error);
+    }
+  }
+
+  /**
+   * Start the slow poll timer for expensive operations.
+   * This handles Claude process detection and lsof scans.
+   */
+  private startSlowPoll() {
+    // Run initial slow poll
+    this.slowPoll().catch(logError);
+
+    // Schedule recurring slow polls
+    this.slowPollTimer = setInterval(() => {
+      this.slowPoll().catch(logError);
+    }, SLOW_POLL_INTERVAL);
+  }
+
+  /**
+   * Perform expensive operations that don't need to run every 10 seconds.
+   * - Claude process detection (ps + lsof)
+   * - Full VS Code instance enumeration via lsof
+   */
+  private async slowPoll() {
+    try {
+      log('🐢 [Slow Poll] Running expensive operations...');
+
+      // Update Claude status for all instances
+      for (const [path, instance] of this.instances) {
+        if (instance.isGitRepo) {
+          const claudeStatus = await this.getClaudeStatus(path);
+          if (claudeStatus) {
+            instance.claudeStatus = claudeStatus;
+          }
+        }
+      }
+
+      log('🐢 [Slow Poll] Complete');
+    } catch (error) {
+      logError('[Slow Poll] Error:', error);
+    }
   }
 
   /**
@@ -879,13 +931,16 @@ class WorkstreamDaemon {
       clearTimeout(this.pollTimer);
     }
 
-    if (this.notionRefreshTimer) {
-      clearInterval(this.notionRefreshTimer);
+    if (this.chromeTimer) {
+      clearInterval(this.chromeTimer);
     }
 
-    // Stop Vibe Kanban integration
-    if (this.vibeKanban) {
-      await this.vibeKanban.stop();
+    if (this.slowPollTimer) {
+      clearInterval(this.slowPollTimer);
+    }
+
+    if (this.notionRefreshTimer) {
+      clearInterval(this.notionRefreshTimer);
     }
 
     // Stop WebSocket server
@@ -1021,25 +1076,43 @@ class WorkstreamDaemon {
       this.ghRateLimit = effectiveLimit;
       this.lastRateLimitCheck = Date.now();
 
-      // Adjust polling interval based on rate limit (but don't log unless it's low)
-      if (this.ghRateLimit!.remaining < RATE_LIMIT_THRESHOLD) {
-        this.currentPollInterval = MIN_POLL_INTERVAL;
+      const remaining = this.ghRateLimit!.remaining;
+      const coreMinutesUntilReset = this.getMinutesUntilReset(coreLimit.reset);
+      const graphqlMinutesUntilReset = this.getMinutesUntilReset(graphqlLimit.reset);
+      const corePercent = Math.round((coreLimit.remaining / coreLimit.limit) * 100);
+      const graphqlPercent = Math.round((graphqlLimit.remaining / graphqlLimit.limit) * 100);
 
-        // Calculate time until reset
-        const coreMinutesUntilReset = this.getMinutesUntilReset(coreLimit.reset);
-        const graphqlMinutesUntilReset = this.getMinutesUntilReset(graphqlLimit.reset);
-
-        // Only log when rate limit is low
-        const corePercent = Math.round((coreLimit.remaining / coreLimit.limit) * 100);
-        const graphqlPercent = Math.round((graphqlLimit.remaining / graphqlLimit.limit) * 100);
-        log(`⚠️  GitHub Rate Limit Low - Core: ${corePercent}% remaining (${coreLimit.remaining}/${coreLimit.limit}), resets in ${coreMinutesUntilReset}m, GraphQL: ${graphqlPercent}% remaining (${graphqlLimit.remaining}/${graphqlLimit.limit}), resets in ${graphqlMinutesUntilReset}m`);
-        log(`⚠️  Increasing poll interval to ${MIN_POLL_INTERVAL}ms to preserve rate limit`);
+      // Tiered rate limit protection
+      if (remaining <= RATE_LIMIT_CRITICAL) {
+        // CRITICAL: Stop all PR updates until reset
+        this.rateLimitPaused = true;
+        this.prPollInterval = Infinity; // Effectively disable PR polling
+        log(`🛑 GitHub Rate Limit CRITICAL (${remaining} remaining) - PR updates PAUSED until reset`);
+        log(`   Core: ${corePercent}% (${coreLimit.remaining}/${coreLimit.limit}), resets in ${coreMinutesUntilReset}m`);
+        log(`   GraphQL: ${graphqlPercent}% (${graphqlLimit.remaining}/${graphqlLimit.limit}), resets in ${graphqlMinutesUntilReset}m`);
+      } else if (remaining <= RATE_LIMIT_LOW) {
+        // LOW: Very conservative - 5 minute PR intervals
+        this.rateLimitPaused = false;
+        this.prPollInterval = 5 * 60 * 1000; // 5 minutes
+        log(`⚠️  GitHub Rate Limit LOW (${remaining} remaining) - PR updates every 5 minutes`);
+        log(`   Core: ${corePercent}% (${coreLimit.remaining}/${coreLimit.limit}), resets in ${coreMinutesUntilReset}m`);
+      } else if (remaining <= RATE_LIMIT_CAUTION) {
+        // CAUTION: Moderate - 2 minute PR intervals
+        this.rateLimitPaused = false;
+        this.prPollInterval = 2 * 60 * 1000; // 2 minutes
+        log(`⚡ GitHub Rate Limit CAUTION (${remaining} remaining) - PR updates every 2 minutes`);
       } else {
-        this.currentPollInterval = POLL_INTERVAL;
+        // NORMAL: Standard 30 second PR intervals
+        this.rateLimitPaused = false;
+        this.prPollInterval = 30 * 1000; // 30 seconds
+        // Don't log when normal
       }
     } catch (error) {
       // GitHub CLI not available or not authenticated
       log('Unable to check GitHub rate limit (gh CLI may not be available)');
+      // Be conservative when we can't check
+      this.rateLimitPaused = false;
+      this.prPollInterval = 2 * 60 * 1000; // Default to 2 minutes when unknown
     }
   }
 
@@ -1074,8 +1147,8 @@ class WorkstreamDaemon {
       }
 
       // Log if we're skipping PR status due to rate limiting
-      if (this.ghRateLimit && this.ghRateLimit.remaining === 0) {
-        log('⚠️  Skipping PR status updates due to rate limit exhaustion');
+      if (this.rateLimitPaused) {
+        log('🛑 PR status updates PAUSED - rate limit below critical threshold');
       }
 
       // Update or add instances (in parallel for speed)
@@ -1121,10 +1194,18 @@ class WorkstreamDaemon {
         const existing = this.instances.get(instance.path);
         const projectName = instance.path.split('/').pop() || instance.path;
 
-        // Always update git and Claude (local, no rate limits)
-        // Only refresh PR status if we have rate limit and it's been 30+ seconds (or forced)
+        // Always update git (local, no rate limits)
         const shouldUpdateLocal = !existing || (Date.now() - existing.lastUpdated) > 5000; // 5 seconds
-        const shouldUpdatePR = forcePR || !existing || (Date.now() - (existing.prLastUpdated || 0)) > 30000; // 30 seconds
+
+        // PR updates respect rate limit protection
+        // - Paused when rate limit is critical
+        // - Uses dynamic prPollInterval based on remaining rate limit
+        const timeSinceLastPR = Date.now() - (existing?.prLastUpdated || 0);
+        const shouldUpdatePR = !this.rateLimitPaused && (
+          forcePR ||
+          !existing ||
+          timeSinceLastPR > this.prPollInterval
+        );
 
         if (shouldUpdateLocal) {
           enrichmentTasks.push({ instance, shouldUpdatePR, projectName });
@@ -1206,23 +1287,18 @@ class WorkstreamDaemon {
         }
       }
 
-      // Get Chrome windows (in parallel with other operations)
-      const chromeWindows = await this.getChromeWindows();
-      this.chromeWindows = chromeWindows;
-      const tabCount = chromeWindows.reduce((sum, w) => sum + w.tabs.length, 0);
-      log(`🌐 Found ${chromeWindows.length} Chrome windows with ${tabCount} tabs`);
+      // Chrome windows are now polled separately on a 2-minute timer
+      // (see startChromePoll method)
 
-      // Write to cache file (for compatibility)
-      await this.writeCache();
-      log(`💾 Wrote cache file`);
+      // Write to cache file with debouncing (for compatibility)
+      const cacheWritten = await this.writeCacheDebounced();
+      if (cacheWritten) {
+        log(`💾 Wrote cache file`);
+      }
 
       // Publish to Redis
       await this.publishUpdate();
       log(`📡 Published ${this.instances.size} instances to Redis`);
-
-      // Publish Chrome update
-      await this.publishChromeUpdate();
-      log(`🌐 Published ${chromeWindows.length} Chrome windows to Redis`);
 
       log(`✅ Poll complete: ${updatedCount} updated, ${skippedCount} skipped, ${removedCount} removed`);
     } catch (error) {
@@ -1230,12 +1306,60 @@ class WorkstreamDaemon {
     }
   }
 
+  /**
+   * Write cache with debouncing and hash-based change detection.
+   * Only writes if data has changed and enough time has passed since last write.
+   * @returns true if cache was written, false if skipped
+   */
+  private async writeCacheDebounced(): Promise<boolean> {
+    const now = Date.now();
+    const timeSinceLastWrite = now - this.lastCacheWrite;
+
+    // Skip if we wrote too recently
+    if (timeSinceLastWrite < CACHE_WRITE_DEBOUNCE) {
+      return false;
+    }
+
+    const data = {
+      instances: Array.from(this.instances.values()),
+      timestamp: now,
+    };
+
+    // Create a hash of the data (excluding timestamp) to detect changes
+    const dataForHash = {
+      instances: data.instances.map(i => ({
+        path: i.path,
+        name: i.name,
+        branch: i.gitInfo?.branch,
+        isDirty: i.gitInfo?.isDirty,
+        prNumber: i.prStatus?.number,
+        prState: i.prStatus?.state,
+        claudeActive: i.claudeStatus?.active,
+      })),
+    };
+    const hash = JSON.stringify(dataForHash);
+
+    // Skip if data hasn't changed
+    if (hash === this.lastCacheHash) {
+      return false;
+    }
+
+    await writeFile(CACHE_FILE, JSON.stringify(data, null, 2));
+    this.lastCacheWrite = now;
+    this.lastCacheHash = hash;
+    return true;
+  }
+
+  /**
+   * Force write cache immediately (for shutdown or critical updates)
+   */
   private async writeCache() {
     const data = {
       instances: Array.from(this.instances.values()),
       timestamp: Date.now(),
     };
     await writeFile(CACHE_FILE, JSON.stringify(data, null, 2));
+    this.lastCacheWrite = Date.now();
   }
 
   private async getVSCodeInstances(): Promise<VSCodeInstance[]> {
@@ -1320,8 +1444,8 @@ class WorkstreamDaemon {
       }
     }
 
-    // Get PR status only if requested and we have rate limit remaining
-    if (updatePR && enriched.gitInfo && this.ghRateLimit && this.ghRateLimit.remaining > 0) {
+    // Get PR status only if requested, not paused, and we have rate limit above critical threshold
+    if (updatePR && enriched.gitInfo && !this.rateLimitPaused && this.ghRateLimit && this.ghRateLimit.remaining > RATE_LIMIT_CRITICAL) {
       enriched.prStatus = await this.getPRStatus(instance.path, enriched.gitInfo.branch);
       enriched.prLastUpdated = Date.now(); // Track when PR was last fetched
 
@@ -1396,52 +1520,16 @@ class WorkstreamDaemon {
       }
     }
 
-    // Get Claude status (local, fast)
-    const newClaudeStatus = await this.getClaudeStatus(instance.path);
-
     // Get existing instance to check for preserved state
     const existingInstance = this.instances.get(instance.path);
 
-    // If Claude process not found, check if we should preserve finished status
-    if (!newClaudeStatus && existingInstance?.claudeStatus) {
-      // Preserve finished status for 10 minutes to show "Claude finished X ago"
-      if (existingInstance.claudeStatus.finishedAt) {
-        const elapsed = Date.now() - existingInstance.claudeStatus.finishedAt;
-        if (elapsed < 10 * 60 * 1000) { // 10 minutes
-          // Keep the finished status with terminal context
-          enriched.claudeStatus = {
-            ...existingInstance.claudeStatus,
-            active: false, // Process no longer running
-          };
-        } else {
-          // Finished status too old, clear it
-          enriched.claudeStatus = undefined;
-        }
-      } else {
-        // No finished status, clear Claude status
-        enriched.claudeStatus = undefined;
-      }
-    } else {
-      enriched.claudeStatus = newClaudeStatus;
-    }
+    // Claude/OpenCode status is now handled by slow poll (every 2 minutes)
+    // Preserve existing status from slow poll or hook-based updates
+    if (existingInstance?.claudeStatus) {
+      enriched.claudeStatus = existingInstance.claudeStatus;
 
-    // Check for timeout and reset stale working/waiting states
-    if (enriched.claudeStatus) {
+      // Check for timeout and reset stale working/waiting states
       enriched.claudeStatus = this.checkClaudeTimeout(enriched.claudeStatus);
-    }
-
-    // Get OpenCode status by polling the API server
-    const openCodeStatus = await this.getOpenCodeStatus(instance.path);
-    if (openCodeStatus) {
-      enriched.opencodeStatus = openCodeStatus;
-    } else if (existingInstance?.opencodeStatus) {
-      // Fallback: preserve existing OpenCode status if API not available
-      enriched.opencodeStatus = existingInstance.opencodeStatus;
-    }
-    
-    // Check for timeout and reset stale OpenCode working/waiting states
-    if (enriched.opencodeStatus) {
-      enriched.opencodeStatus = this.checkOpenCodeTimeout(enriched.opencodeStatus);
     }
 
     // Apply intelligent status based on PR checks
@@ -1639,8 +1727,9 @@ class WorkstreamDaemon {
 
   private async getClaudeStatus(repoPath: string): Promise<ClaudeStatus | undefined> {
     try {
-      const psResult = await $`/bin/ps aux | grep -E "^\\S+\\s+\\d+.*claude\\s*$" | awk '{print $2}'`;
-      const pids = psResult.stdout.trim().split('\n').filter(Boolean);
+      // Use pgrep instead of ps aux | grep for better performance
+      const pgrepResult = await $`/usr/bin/pgrep -f "claude" 2>/dev/null || true`;
+      const pids = pgrepResult.stdout.trim().split('\n').filter(Boolean);
 
       // Get existing status if available to preserve hook-based state
       const existing = this.instances.get(repoPath);
@@ -1743,170 +1832,6 @@ class WorkstreamDaemon {
   }
 
   /**
-   * Get OpenCode status by polling all registered API servers for this workspace.
-   * Supports multiple OpenCode instances per workspace.
-   * Also supports legacy single-instance format for backwards compatibility.
-   */
-  private async getOpenCodeStatus(repoPath: string): Promise<OpenCodeStatus | undefined> {
-    const projectName = repoPath.split('/').pop() || 'unknown';
-    const workspaceKey = Buffer.from(repoPath).toString('base64');
-    const instancesSetKey = `workstream:opencode:instances:${workspaceKey}`;
-    const legacyKey = `workstream:opencode:api:${workspaceKey}`;
-    
-    try {
-      // Get all registered instance PIDs for this workspace (new format)
-      let pids = await this.redis.smembers(instancesSetKey);
-      
-      // Also check for legacy single-instance format
-      const legacyInfo = await this.redis.get(legacyKey);
-      if (legacyInfo) {
-        const { pid } = JSON.parse(legacyInfo);
-        if (pid && !pids.includes(String(pid))) {
-          // Add legacy instance to the list
-          pids = [...pids, `legacy:${pid}`];
-        }
-      }
-      
-      if (pids.length === 0) {
-        return undefined;
-      }
-      
-      log(`[OpenCode] Found ${pids.length} registered instance(s) for ${projectName}`);
-      
-      const sessions: Record<number, OpenCodeSessionInfo> = {};
-      let primarySession: number | undefined;
-      let mostRecentActivity = 0;
-      
-      // Poll each instance
-      for (const pidStr of pids) {
-        // Handle legacy format (legacy:pid) vs new format (just pid)
-        const isLegacy = pidStr.startsWith('legacy:');
-        const pid = isLegacy ? parseInt(pidStr.replace('legacy:', ''), 10) : parseInt(pidStr, 10);
-        
-        // Get instance info from appropriate key
-        const instanceKey = isLegacy 
-          ? legacyKey  // Legacy format: workstream:opencode:api:{base64}
-          : `workstream:opencode:api:${workspaceKey}:${pid}`;  // New format: workstream:opencode:api:{base64}:{pid}
-        
-        const instanceInfo = await this.redis.get(instanceKey);
-        
-        if (!instanceInfo) {
-          // Instance registration expired, remove from set if not legacy
-          if (!isLegacy) {
-            await this.redis.srem(instancesSetKey, pidStr);
-          }
-          continue;
-        }
-        
-        const { port, workspacePath } = JSON.parse(instanceInfo);
-        
-        if (workspacePath !== repoPath) {
-          continue;
-        }
-        
-        // Poll the API server
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 1000);
-        
-        try {
-          const response = await fetch(`http://127.0.0.1:${port}/status`, {
-            signal: controller.signal,
-          });
-          
-          clearTimeout(timeoutId);
-          
-          if (!response.ok) {
-            // Remove stale instance
-            await this.redis.del(instanceKey);
-            if (!isLegacy) {
-              await this.redis.srem(instancesSetKey, pidStr);
-            }
-            continue;
-          }
-          
-          const status = await response.json() as {
-            sessionId: string | null;
-            workspacePath: string;
-            projectName: string;
-            pid?: number;
-            status: 'working' | 'waiting' | 'idle' | 'finished' | 'error';
-            isWorking: boolean;
-            isWaiting: boolean;
-            isIdle: boolean;
-            lastActivityTime: number;
-            workStartedAt: number | null;
-            metrics: {
-              toolsUsed: Record<string, number>;
-              filesEdited: number;
-              commandsRun: number;
-            };
-          };
-          
-          // Use PID from status response if available, otherwise from key
-          const actualPid = status.pid || pid;
-          
-          log(`[OpenCode] ${projectName} (PID ${actualPid}): status=${status.status}, working=${status.isWorking}, waiting=${status.isWaiting}, idle=${status.isIdle}`);
-          
-          // Add to sessions
-          sessions[actualPid] = {
-            pid: actualPid,
-            sessionId: status.sessionId,
-            status: status.status === 'finished' ? 'idle' : status.status,
-            lastActivity: status.lastActivityTime,
-            workStartedAt: status.workStartedAt || undefined,
-            metrics: status.metrics,
-          };
-          
-          // Track most recently active session as primary
-          if (status.lastActivityTime > mostRecentActivity) {
-            mostRecentActivity = status.lastActivityTime;
-            primarySession = pid;
-          }
-        } catch (fetchError) {
-          clearTimeout(timeoutId);
-          // API server not responding, remove stale registration
-          log(`[OpenCode] API server not responding for ${projectName} PID ${pid}, removing`);
-          await this.redis.del(instanceKey);
-          await this.redis.srem(instancesSetKey, pidStr);
-        }
-      }
-      
-      // If no valid sessions found, return undefined
-      if (Object.keys(sessions).length === 0) {
-        return undefined;
-      }
-      
-      // Compute aggregate status from all sessions
-      // If ANY session is working, overall is working
-      // Else if ANY session is waiting, overall is waiting
-      // Else all are idle
-      const isWorking = Object.values(sessions).some(s => s.status === 'working');
-      const isWaiting = !isWorking && Object.values(sessions).some(s => s.status === 'waiting');
-      const isIdle = !isWorking && !isWaiting;
-      
-      // Get primary session for legacy fields
-      const primary = primarySession ? sessions[primarySession] : Object.values(sessions)[0];
-      
-      return {
-        sessions,
-        primarySession,
-        active: true,
-        sessionId: primary?.sessionId || undefined,
-        isWorking,
-        isWaiting,
-        isIdle,
-        opencodeFinished: false,
-        lastEventTime: mostRecentActivity,
-        workStartedAt: primary?.workStartedAt,
-        metrics: primary?.metrics,
-      };
-    } catch (error) {
-      logError(`[OpenCode] Error polling API for ${projectName}:`, error);
-      return undefined;
-    }
-  }
-
-  /**
    * Check if Claude status has timed out and reset if necessary.
    * This prevents the "Working" state from getting stuck when a task is interrupted.
    * Also cleans up old finished sessions.
@@ -1998,46 +1923,6 @@ class WorkstreamDaemon {
     }
 
     return claudeStatus;
-  }
-
-  /**
-   * Check if OpenCode status has timed out and reset if necessary.
-   * This prevents the "Working" state from getting stuck when a task is interrupted.
-   */
-  private checkOpenCodeTimeout(opencodeStatus: OpenCodeStatus): OpenCodeStatus {
-    const now = Date.now();
-    
-    // Check if working state has timed out
-    if (opencodeStatus.isWorking && opencodeStatus.workStartedAt) {
-      const elapsed = now - opencodeStatus.workStartedAt;
-      if (elapsed > OPENCODE_WORK_TIMEOUT) {
-        const projectName = opencodeStatus.sessionId || 'unknown';
-        log(`⏱️  OpenCode work timeout detected (${Math.round(elapsed / 1000)}s), resetting to idle`);
-        return {
-          ...opencodeStatus,
-          isWorking: false,
-          isWaiting: false,
-          isIdle: true,
-          workStartedAt: undefined,
-        };
-      }
-    }
-    
-    // Check if waiting state has timed out
-    if (opencodeStatus.isWaiting && opencodeStatus.lastEventTime) {
-      const elapsed = now - opencodeStatus.lastEventTime;
-      if (elapsed > OPENCODE_WAIT_TIMEOUT) {
-        log(`⏱️  OpenCode wait timeout detected (${Math.round(elapsed / 1000)}s), resetting to idle`);
-        return {
-          ...opencodeStatus,
-          isWorking: false,
-          isWaiting: false,
-          isIdle: true,
-        };
-      }
-    }
-    
-    return opencodeStatus;
   }
 
   private async getTmuxStatus(repoPath: string, branch?: string): Promise<TmuxStatus | undefined> {
@@ -2269,40 +2154,6 @@ class WorkstreamDaemon {
     } catch (error) {
       logError(`Failed to fetch terminal context for Claude PID ${claudePid}:`, error);
       return null;
-    }
-  }
-
-  /**
-   * Handle OpenCode status change events by immediately polling the API
-   * This provides near real-time status updates instead of waiting for the next poll cycle
-   */
-  private async handleOpenCodeStatusChange(repoPath: string, eventType: string, projectName: string) {
-    try {
-      // Poll the OpenCode API for updated status
-      const updatedStatus = await this.getOpenCodeStatus(repoPath);
-      
-      if (updatedStatus) {
-        // Get or create instance entry
-        let instance = this.instances.get(repoPath);
-        
-        if (instance) {
-          // Update the existing instance with new OpenCode status
-          instance.opencodeStatus = updatedStatus;
-          instance.lastUpdated = Date.now();
-          this.instances.set(repoPath, instance);
-          
-          // Publish the update immediately
-          await this.publishUpdate();
-          
-          log(`  ⚡ [OpenCode] Immediate status update for ${projectName}: ${updatedStatus.isWorking ? 'working' : updatedStatus.isWaiting ? 'waiting' : 'idle'}`);
-        } else {
-          // Instance not in our map yet - this might happen if OpenCode starts before VSCode is detected
-          // Store the status in Redis for when the instance is discovered
-          log(`  ⚡ [OpenCode] Status update for ${projectName} (instance not yet tracked)`);
-        }
-      }
-    } catch (error) {
-      logError(`[OpenCode] Error handling status change for ${projectName}:`, error);
     }
   }
 
@@ -2684,435 +2535,6 @@ class WorkstreamDaemon {
     }
   }
 
-  // ============================================================================
-  // OpenCode Event Handlers
-  // ============================================================================
-
-  private async handleOpenCodeSessionCreated(repoPath: string, sessionId: string) {
-    try {
-      const instance = this.instances.get(repoPath);
-      if (!instance) {
-        // Instance might not be tracked yet, that's okay
-        log(`  ℹ️  OpenCode session created for untracked path: ${repoPath}`);
-        return;
-      }
-
-      const now = Date.now();
-      instance.opencodeStatus = {
-        active: true,
-        sessionId,
-        isWorking: false,
-        isWaiting: false,
-        isIdle: true, // New session starts idle
-        lastEventTime: now,
-        workStartedAt: now,
-        metrics: {
-          toolsUsed: {},
-          filesEdited: 0,
-          commandsRun: 0,
-        },
-      };
-
-      await this.writeCache();
-      await this.publishUpdate();
-
-      const projectName = repoPath.split('/').pop() || 'project';
-      log(`OpenCode session created in ${projectName}`);
-    } catch (error) {
-      logError('Error handling OpenCode session created:', error);
-    }
-  }
-
-  private async handleOpenCodeActive(repoPath: string, sessionId?: string, metrics?: any) {
-    try {
-      const instance = this.instances.get(repoPath);
-      if (!instance) return;
-
-      const now = Date.now();
-      
-      // Initialize status if not present
-      if (!instance.opencodeStatus) {
-        instance.opencodeStatus = {
-          active: true,
-          sessionId,
-          isWorking: true,
-          isWaiting: false,
-          isIdle: false,
-          lastEventTime: now,
-          workStartedAt: now,
-          metrics: {
-            toolsUsed: {},
-            filesEdited: 0,
-            commandsRun: 0,
-          },
-        };
-      } else {
-        instance.opencodeStatus.active = true;
-        instance.opencodeStatus.isWorking = true;
-        instance.opencodeStatus.isWaiting = false;
-        instance.opencodeStatus.isIdle = false;
-        instance.opencodeStatus.lastEventTime = now;
-        if (!instance.opencodeStatus.workStartedAt) {
-          instance.opencodeStatus.workStartedAt = now;
-        }
-        if (metrics) {
-          instance.opencodeStatus.metrics = metrics;
-        }
-      }
-
-      await this.writeCache();
-      await this.publishUpdate();
-
-      const projectName = repoPath.split('/').pop() || 'project';
-      log(`OpenCode active in ${projectName}`);
-    } catch (error) {
-      logError('Error handling OpenCode active:', error);
-    }
-  }
-
-  private async handleOpenCodeIdle(repoPath: string, sessionId?: string) {
-    try {
-      const instance = this.instances.get(repoPath);
-      if (!instance || !instance.opencodeStatus) return;
-
-      const now = Date.now();
-      instance.opencodeStatus.isWorking = false;
-      instance.opencodeStatus.isIdle = true;
-      // Don't set isWaiting here - idle is different from waiting for input
-      instance.opencodeStatus.lastEventTime = now;
-
-      await this.writeCache();
-      await this.publishUpdate();
-
-      const projectName = repoPath.split('/').pop() || 'project';
-      log(`OpenCode idle in ${projectName}`);
-    } catch (error) {
-      logError('Error handling OpenCode idle:', error);
-    }
-  }
-
-  private async handleOpenCodeToolUsed(repoPath: string, sessionId?: string, tool?: string) {
-    try {
-      const instance = this.instances.get(repoPath);
-      if (!instance) return;
-
-      const now = Date.now();
-      
-      // Initialize status if not present
-      if (!instance.opencodeStatus) {
-        instance.opencodeStatus = {
-          active: true,
-          sessionId,
-          isWorking: true,
-          isWaiting: false,
-          isIdle: false,
-          lastEventTime: now,
-          workStartedAt: now,
-          metrics: {
-            toolsUsed: {},
-            filesEdited: 0,
-            commandsRun: 0,
-          },
-        };
-      }
-
-      // Update working state - tool use means actively working
-      instance.opencodeStatus.isWorking = true;
-      instance.opencodeStatus.isWaiting = false;
-      instance.opencodeStatus.isIdle = false;
-      instance.opencodeStatus.lastEventTime = now;
-
-      // Update metrics
-      if (tool && instance.opencodeStatus.metrics) {
-        instance.opencodeStatus.metrics.toolsUsed[tool] = 
-          (instance.opencodeStatus.metrics.toolsUsed[tool] || 0) + 1;
-        
-        if (tool === 'bash') {
-          instance.opencodeStatus.metrics.commandsRun++;
-        } else if (tool === 'write' || tool === 'edit') {
-          instance.opencodeStatus.metrics.filesEdited++;
-        }
-      }
-
-      await this.writeCache();
-      await this.publishUpdate();
-    } catch (error) {
-      logError('Error handling OpenCode tool used:', error);
-    }
-  }
-
-  private async handleOpenCodeError(repoPath: string, sessionId?: string) {
-    try {
-      const instance = this.instances.get(repoPath);
-      if (!instance || !instance.opencodeStatus) return;
-
-      const now = Date.now();
-      instance.opencodeStatus.isWorking = false;
-      instance.opencodeStatus.isIdle = true;
-      instance.opencodeStatus.lastEventTime = now;
-
-      await this.writeCache();
-      await this.publishUpdate();
-
-      const projectName = repoPath.split('/').pop() || 'project';
-      log(`OpenCode error in ${projectName}`);
-    } catch (error) {
-      logError('Error handling OpenCode error:', error);
-    }
-  }
-
-  private async handleOpenCodeStatus(repoPath: string, sessionId?: string, status?: string) {
-    try {
-      const instance = this.instances.get(repoPath);
-      if (!instance) return;
-
-      const now = Date.now();
-      
-      // Initialize status if not present
-      if (!instance.opencodeStatus) {
-        instance.opencodeStatus = {
-          active: true,
-          sessionId,
-          isWorking: false,
-          isWaiting: false,
-          isIdle: true,
-          lastEventTime: now,
-          metrics: {
-            toolsUsed: {},
-            filesEdited: 0,
-            commandsRun: 0,
-          },
-        };
-      }
-
-      // Update based on status string
-      instance.opencodeStatus.lastEventTime = now;
-      
-      if (status === 'running' || status === 'working') {
-        instance.opencodeStatus.isWorking = true;
-        instance.opencodeStatus.isWaiting = false;
-        instance.opencodeStatus.isIdle = false;
-        instance.opencodeStatus.active = true;
-        if (!instance.opencodeStatus.workStartedAt) {
-          instance.opencodeStatus.workStartedAt = now;
-        }
-      } else if (status === 'waiting') {
-        // Explicit waiting status - waiting for user input
-        instance.opencodeStatus.isWorking = false;
-        instance.opencodeStatus.isWaiting = true;
-        instance.opencodeStatus.isIdle = false;
-      } else if (status === 'idle') {
-        // Idle status - not working but not waiting for input either
-        instance.opencodeStatus.isWorking = false;
-        instance.opencodeStatus.isWaiting = false;
-        instance.opencodeStatus.isIdle = true;
-      }
-
-      await this.writeCache();
-      await this.publishUpdate();
-
-      const projectName = repoPath.split('/').pop() || 'project';
-      log(`OpenCode status updated to ${status} in ${projectName}`);
-    } catch (error) {
-      logError('Error handling OpenCode status:', error);
-    }
-  }
-
-  /**
-   * Handle OpenCode heartbeat - silent status update without notifications
-   * Now accepts full state from the plugin for accurate status reporting.
-   */
-  private async handleOpenCodeHeartbeat(
-    repoPath: string,
-    sessionId?: string,
-    isWorking?: boolean,
-    lastActivityTime?: number,
-    isWaiting?: boolean,
-    isIdle?: boolean
-  ) {
-    try {
-      const instance = this.instances.get(repoPath);
-      if (!instance) return;
-
-      const now = Date.now();
-      
-      // Initialize status if not present
-      if (!instance.opencodeStatus) {
-        instance.opencodeStatus = {
-          active: true,
-          sessionId,
-          isWorking: isWorking || false,
-          isWaiting: isWaiting || false,
-          isIdle: isIdle !== undefined ? isIdle : (!isWorking && !isWaiting),
-          lastEventTime: now,
-          metrics: {
-            toolsUsed: {},
-            filesEdited: 0,
-            commandsRun: 0,
-          },
-        };
-      } else {
-        // Update status from heartbeat - trust the plugin's state
-        instance.opencodeStatus.active = true;
-        instance.opencodeStatus.isWorking = isWorking || false;
-        instance.opencodeStatus.isWaiting = isWaiting || false;
-        instance.opencodeStatus.isIdle = isIdle !== undefined ? isIdle : (!isWorking && !isWaiting);
-        instance.opencodeStatus.lastEventTime = now;
-        if (isWorking && !instance.opencodeStatus.workStartedAt) {
-          instance.opencodeStatus.workStartedAt = lastActivityTime || now;
-        }
-        // Clear workStartedAt when not working
-        if (!isWorking) {
-          instance.opencodeStatus.workStartedAt = undefined;
-        }
-      }
-
-      await this.writeCache();
-      await this.publishUpdate();
-    } catch (error) {
-      // Silent fail for heartbeat
-    }
-  }
-
-  /**
-   * Handle OpenCode work_started event (like Claude's work_started)
-   */
-  private async handleOpenCodeWorkStarted(repoPath: string, sessionId?: string) {
-    try {
-      const instance = this.instances.get(repoPath);
-      if (!instance) {
-        log(`  ℹ️  OpenCode work_started for untracked path: ${repoPath}`);
-        return;
-      }
-
-      const now = Date.now();
-      
-      // Initialize or update status
-      if (!instance.opencodeStatus) {
-        instance.opencodeStatus = {
-          active: true,
-          sessionId,
-          isWorking: true,
-          isWaiting: false,
-          isIdle: false,
-          lastEventTime: now,
-          workStartedAt: now,
-          metrics: {
-            toolsUsed: {},
-            filesEdited: 0,
-            commandsRun: 0,
-          },
-        };
-      } else {
-        instance.opencodeStatus.active = true;
-        instance.opencodeStatus.isWorking = true;
-        instance.opencodeStatus.isWaiting = false;
-        instance.opencodeStatus.isIdle = false;
-        instance.opencodeStatus.opencodeFinished = false;
-        instance.opencodeStatus.lastEventTime = now;
-        if (!instance.opencodeStatus.workStartedAt) {
-          instance.opencodeStatus.workStartedAt = now;
-        }
-      }
-
-      await this.writeCache();
-      await this.publishUpdate();
-
-      const projectName = repoPath.split('/').pop() || 'project';
-      log(`OpenCode started working in ${projectName}`);
-    } catch (error) {
-      logError('Error handling OpenCode work started:', error);
-    }
-  }
-
-  /**
-   * Handle OpenCode waiting_for_input event (like Claude's waiting_for_input)
-   * This is the ONLY event that should set isWaiting to true
-   */
-  private async handleOpenCodeWaiting(repoPath: string, sessionId?: string) {
-    try {
-      const instance = this.instances.get(repoPath);
-      if (!instance) return;
-
-      const now = Date.now();
-      
-      if (!instance.opencodeStatus) {
-        instance.opencodeStatus = {
-          active: true,
-          sessionId,
-          isWorking: false,
-          isWaiting: true,
-          isIdle: false,
-          lastEventTime: now,
-          metrics: {
-            toolsUsed: {},
-            filesEdited: 0,
-            commandsRun: 0,
-          },
-        };
-      } else {
-        instance.opencodeStatus.isWorking = false;
-        instance.opencodeStatus.isWaiting = true;
-        instance.opencodeStatus.isIdle = false;
-        instance.opencodeStatus.lastEventTime = now;
-      }
-
-      await this.writeCache();
-      await this.publishUpdate();
-
-      const projectName = repoPath.split('/').pop() || 'project';
-      log(`OpenCode waiting for input in ${projectName}`);
-    } catch (error) {
-      logError('Error handling OpenCode waiting:', error);
-    }
-  }
-
-  /**
-   * Handle OpenCode work_stopped event (like Claude's work_stopped/finished)
-   */
-  private async handleOpenCodeFinished(repoPath: string, sessionId?: string) {
-    try {
-      const instance = this.instances.get(repoPath);
-      if (!instance) return;
-
-      const now = Date.now();
-      
-      if (!instance.opencodeStatus) {
-        instance.opencodeStatus = {
-          active: false,
-          sessionId,
-          isWorking: false,
-          isWaiting: false,
-          isIdle: false,
-          opencodeFinished: true,
-          finishedAt: now,
-          lastEventTime: now,
-          metrics: {
-            toolsUsed: {},
-            filesEdited: 0,
-            commandsRun: 0,
-          },
-        };
-      } else {
-        instance.opencodeStatus.active = false;
-        instance.opencodeStatus.isWorking = false;
-        instance.opencodeStatus.isWaiting = false;
-        instance.opencodeStatus.isIdle = false;
-        instance.opencodeStatus.opencodeFinished = true;
-        instance.opencodeStatus.finishedAt = now;
-        instance.opencodeStatus.lastEventTime = now;
-      }
-
-      await this.writeCache();
-      await this.publishUpdate();
-
-      const projectName = repoPath.split('/').pop() || 'project';
-      log(`OpenCode finished in ${projectName}`);
-    } catch (error) {
-      logError('Error handling OpenCode finished:', error);
-    }
-  }
-
   private async handleVSCodeHeartbeat(workspacePath: string) {
     try {
       // Get the instance
@@ -3362,7 +2784,7 @@ class WorkstreamDaemon {
   private async sendNotification(
     title: string,
     message: string,
-    type: 'claude_started' | 'claude_waiting' | 'claude_finished' | 'pr_check_failed' | 'pr_check_success' | 'pr_merge_blocked' | 'opencode_session_started' | 'opencode_waiting' | 'opencode_error' | 'notification' = 'notification',
+    type: 'claude_started' | 'claude_waiting' | 'claude_finished' | 'pr_check_failed' | 'pr_check_success' | 'pr_merge_blocked' | 'notification' = 'notification',
     style: 'success' | 'failure' | 'info' = 'info',
     projectPath?: string
   ) {

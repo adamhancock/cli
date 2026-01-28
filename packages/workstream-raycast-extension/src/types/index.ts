@@ -53,40 +53,6 @@ export interface ClaudeSession {
   finishedAt?: number;
 }
 
-export interface OpenCodeSessionInfo {
-  pid: number;
-  sessionId: string | null;
-  status: 'working' | 'waiting' | 'idle' | 'error';
-  lastActivity: number;
-  workStartedAt?: number;
-  metrics?: {
-    toolsUsed: Record<string, number>;
-    filesEdited: number;
-    commandsRun: number;
-  };
-}
-
-export interface OpenCodeStatus {
-  sessions?: Record<number, OpenCodeSessionInfo>;  // Keyed by PID
-  primarySession?: number;  // PID of most recently active session
-  
-  // Aggregate/legacy fields
-  active: boolean;
-  sessionId?: string;
-  isWorking: boolean;
-  isWaiting?: boolean;
-  isIdle?: boolean;
-  opencodeFinished?: boolean;
-  lastEventTime?: number;
-  workStartedAt?: number;
-  finishedAt?: number;
-  metrics?: {
-    toolsUsed: Record<string, number>;
-    filesEdited: number;
-    commandsRun: number;
-  };
-}
-
 export interface ClaudeStatus {
   active: boolean;
   pid: number;
@@ -165,7 +131,6 @@ export interface InstanceWithStatus extends VSCodeInstance {
   gitInfo?: GitInfo;
   prStatus?: PRStatus;
   claudeStatus?: ClaudeStatus;
-  opencodeStatus?: OpenCodeStatus;
   tmuxStatus?: TmuxStatus;
   caddyHost?: CaddyHost;
   spotlightStatus?: SpotlightStatus;
@@ -271,56 +236,3 @@ export interface CreateNotionTaskResponse {
   requestId: string;
 }
 
-/**
- * CI check status from the daemon
- */
-export interface KanbanCiChecks {
-  passing: number;
-  failing: number;
-  pending: number;
-  conclusion: 'success' | 'failure' | 'pending';
-  runs: Array<{
-    name: string;
-    state: string;
-    bucket: 'pass' | 'fail' | 'pending' | 'cancel' | 'skipping';
-  }>;
-}
-
-/**
- * PR info from vibe-kanban
- */
-export interface KanbanPrInfo {
-  number: number;
-  url: string;
-  status: 'open' | 'merged' | 'closed' | 'unknown';
-}
-
-/**
- * PR status enriched by daemon with CI status
- */
-export interface KanbanPrStatus {
-  number: number;
-  state: string;
-  mergeable?: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN';
-  checks?: KanbanCiChecks;
-}
-
-/**
- * Kanban task instance from vibe-kanban via Redis
- */
-export interface KanbanTaskInstance {
-  sourceType: 'vibe-kanban';
-  taskId: string;
-  projectId: string;
-  title: string;
-  status: string;
-  projectName: string;
-  branch?: string;
-  repoPath?: string;
-  prInfo?: KanbanPrInfo;
-  prStatus?: KanbanPrStatus;
-  directLink?: string;  // vibe-kanban URL path to open task
-  baseUrl?: string;     // Base URL of the vibe-kanban instance (e.g., "http://localhost:3456")
-  devctl2Url?: string;  // Caddy subdomain URL for dev server (e.g., "https://feature-auth.dev.localhost")
-  updatedAt: string;
-}

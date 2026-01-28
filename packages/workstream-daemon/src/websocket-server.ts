@@ -18,6 +18,7 @@ interface WebSocketServerOptions {
   port?: number;
   redis: Redis;
   token?: string;
+  onActivity?: () => void; // Called when client connects or sends events
 }
 
 /**
@@ -32,11 +33,13 @@ export class WebSocketServer {
   private port: number;
   private token?: string;
   private connectedClients = 0;
+  private onActivity?: () => void;
 
   constructor(options: WebSocketServerOptions) {
     this.redis = options.redis;
     this.port = options.port ?? parseInt(process.env.WEBSOCKET_PORT || '9995');
     this.token = options.token;
+    this.onActivity = options.onActivity;
 
     // Create HTTP server for Socket.IO with request handling
     this.httpServer = createServer((req, res) => {
@@ -110,8 +113,13 @@ export class WebSocketServer {
       this.connectedClients++;
       console.log(`[WebSocket] Client connected (${this.connectedClients} total)`);
 
+      // Mark activity when client connects
+      this.onActivity?.();
+
       // Handle subscribe request
       socket.on('subscribe', async () => {
+        // Mark activity when client subscribes
+        this.onActivity?.();
         console.log('[WebSocket] Client subscribed to updates');
         // Send current instances immediately
         try {
