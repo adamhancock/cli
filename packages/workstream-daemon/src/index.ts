@@ -1146,9 +1146,22 @@ class WorkstreamDaemon {
         }
       }
 
-      // Log if we're skipping PR status due to rate limiting
+      // When rate limited, periodically re-check to detect recovery
+      // This is crucial because when paused, no PR updates are attempted,
+      // so the normal rate limit check (which requires prUpdateCount > 0) never runs
       if (this.rateLimitPaused) {
-        log('🛑 PR status updates PAUSED - rate limit below critical threshold');
+        const timeSinceLastCheck = Date.now() - this.lastRateLimitCheck;
+        if (timeSinceLastCheck > 60000) { // Check every 60 seconds when paused
+          log('🔄 Re-checking rate limit to see if we can resume...');
+          await this.checkGitHubRateLimit();
+          if (!this.rateLimitPaused) {
+            log('✅ Rate limit recovered - resuming PR status updates');
+          } else {
+            // Only log paused message after each re-check (once per minute) to reduce noise
+            log('🛑 PR status updates still PAUSED - rate limit below critical threshold');
+          }
+        }
+        // Between checks, don't spam the log
       }
 
       // Update or add instances (in parallel for speed)
