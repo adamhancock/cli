@@ -1,6 +1,6 @@
 {
   "name": "@adamhancock/devctl2",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Generic development environment manager for multi-worktree projects with configurable apps, Caddy, database isolation, and port management",
   "type": "module",
   "bin": {
@@ -9,10 +9,8 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    }
+    "import": "./dist/index.js",
+    "types": "./dist/index.d.ts"
   },
   "scripts": {
     "build": "tsc",
@@ -55,7 +53,7 @@
     "config.example.json",
     "README.md"
   ],
-    "repository": {
+  "repository": {
     "type": "git",
     "url": "https://github.com/adamhancock/cli.git",
     "directory": "packages/devctl2"
