@@ -23,28 +23,33 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      packages: write
       id-token: write
+
     steps:
-      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - uses: pnpm/action-setup@a3252b78c470c02df07e9d59298aecedc3ccdd6d # v3.0.0
-        with:
-          version: 10.13.1
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
 
-      - uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4.0.2
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
         with:
-          node-version: 22
-          cache: 'pnpm'
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Configure Git
+      - name: Get pnpm store directory
+        shell: bash
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -67,8 +72,7 @@ jobs:
           PACKAGE_NAME=$(node -p "require('./package.json').name")
           VERSION=$(node -p "require('./package.json').version")
 
-          # Publish to NPM with provenance
-          pnpm publish --no-git-checks --access public --provenance
+          pnpm publish --no-git-checks --access public
 
           # Create git tag
           TAG="${PACKAGE_NAME}@${VERSION}"
@@ -108,8 +112,7 @@ jobs:
               PUBLISHED_VERSION=$(npm view "$PACKAGE_NAME" version 2>/dev/null || echo "0.0.0")
 
               if [ "$CURRENT_VERSION" != "$PUBLISHED_VERSION" ]; then
-                # Publish to NPM with provenance
-                pnpm publish --no-git-checks --access public --provenance
+                pnpm publish --no-git-checks --access public
 
                 # Create git tag
                 TAG="${PACKAGE_NAME}@${CURRENT_VERSION}"
@@ -149,8 +152,7 @@ jobs:
               if [ "$CURRENT_VERSION" != "$PUBLISHED_VERSION" ]; then
                 echo "Publishing $PACKAGE_NAME v$CURRENT_VERSION"
 
-                # Publish to NPM with provenance
-                pnpm publish --no-git-checks --access public --provenance
+                pnpm publish --no-git-checks --access public
 
                 # Create git tag
                 TAG="${PACKAGE_NAME}@${CURRENT_VERSION}"
