@@ -131,9 +131,9 @@ program
 
         await updateAllAppEnvFiles(config, workdir, context);
 
-        // Update MCP config if database was created
-        if (databaseCreated) {
-          await updateMcpConfig(workdir, context.databaseUrl);
+        // Update MCP config if database was created or spotlight is enabled
+        if (databaseCreated || ports.spotlight) {
+          await updateMcpConfig(workdir, context.databaseUrl, ports.spotlight || null);
         }
 
         // Run migrations if database was created

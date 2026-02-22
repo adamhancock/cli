@@ -189,7 +189,8 @@ async function updateDatabaseUrlInAllEnvFiles(
  */
 export async function updateMcpConfig(
   workdir: string,
-  databaseUrl: string
+  databaseUrl: string,
+  spotlightPort?: number | null
 ): Promise<void> {
   const mcpConfigPath = path.join(workdir, '.mcp.json');
 
@@ -218,6 +219,15 @@ export async function updateMcpConfig(
       // Mask password in log output
       const maskedUrl = databaseUrl.replace(/:[^:@]+@/, ':****@');
       console.log(chalk.gray(`   Updated .mcp.json with Postgres database: ${maskedUrl}`));
+    }
+
+    // Set spotlight server configuration if port is provided
+    if (spotlightPort) {
+      mcpConfig.mcpServers.spotlight = {
+        type: 'http',
+        url: `http://localhost:${spotlightPort}/mcp`
+      };
+      console.log(chalk.gray(`   Updated .mcp.json with Spotlight MCP server on port ${spotlightPort}`));
     }
 
     // Write the config file
