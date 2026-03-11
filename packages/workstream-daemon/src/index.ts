@@ -14,7 +14,7 @@ import {
   INSTANCE_TTL,
   NOTION_TASKS_TTL
 } from './redis-client.js';
-import { fetchNotionTasks, isNotionConfigured, updateNotionTaskStatus, createNotionTask } from './notion-client.js';
+import { fetchNotionTasks, isNotionConfigured, updateNotionTaskStatus, createNotionTask, fetchNotionPageById } from './notion-client.js';
 import { spotlightMonitor } from './spotlight-monitor.js';
 import { getEventStore, closeEventStore } from './event-store.js';
 import { BullBoardServer } from './bull-board-server.js';
@@ -56,6 +56,8 @@ interface PRStatus {
   url: string;
   state: 'OPEN' | 'MERGED' | 'CLOSED';
   mergeable?: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN';
+  unresolvedComments?: number;
+  copilotReviewStatus?: 'clean' | 'comments' | 'pending';
   checks?: {
     passing: number;
     failing: number;
@@ -263,9 +265,14 @@ class WorkstreamDaemon {
   private lastCacheWrite: number = 0;
   private lastCacheHash: string = '';
 
-  // Rate limit protection - PR polling interval adjusts based on remaining rate limit
-  private prPollInterval: number = 30000; // Default 30s between PR checks per instance
+  // Rate limit protection
   private rateLimitPaused: boolean = false; // True when rate limit is critical
+
+  // GitHub Notifications-driven PR refresh
+  private pendingPRRefresh: Set<string> = new Set(); // Instance paths needing PR refresh
+  private lastNotificationPoll: number = 0;
+  private notificationPollInterval: number = 60000; // Default 60s, updated from X-Poll-Interval header
+  private lastModifiedHeader: string = ''; // For If-Modified-Since optimization
 
   constructor() {
     this.redis = getRedisClient();
@@ -453,6 +460,15 @@ class WorkstreamDaemon {
       }
     });
 
+    // Subscribe to Notion fetch page request channel
+    this.subscriber.subscribe(REDIS_CHANNELS.NOTION_FETCH_PAGE_REQUEST, (err) => {
+      if (err) {
+        logError('Failed to subscribe to Notion fetch page channel:', err);
+      } else {
+        log('Subscribed to Notion fetch page channel');
+      }
+    });
+
     this.subscriber.on('message', async (channel, message) => {
       try {
         const data = JSON.parse(message);
@@ -471,6 +487,7 @@ class WorkstreamDaemon {
           REDIS_CHANNELS.VSCODE_FILE,
           REDIS_CHANNELS.VSCODE_GIT,
           REDIS_CHANNELS.NOTION_TASKS_REQUEST,
+          REDIS_CHANNELS.NOTION_FETCH_PAGE_REQUEST,
           REDIS_CHANNELS.WORKTREE_JOBS,
         ];
         if (activityChannels.includes(channel)) {
@@ -620,6 +637,32 @@ class WorkstreamDaemon {
               log(`  ✅ Notion task created: ${result.task?.taskId || result.task?.id}`);
               // Clear the tasks cache so next fetch includes the new task
               await this.redis.del(REDIS_KEYS.NOTION_TASKS);
+            }
+          }
+        } else if (channel === REDIS_CHANNELS.NOTION_FETCH_PAGE_REQUEST) {
+          // Handle Notion fetch page request
+          const { pageId, requestId } = data;
+          log(`  📝 Notion fetch page request: ${pageId}`);
+
+          if (!isNotionConfigured()) {
+            log('  ⚠️ Notion not configured - missing env vars');
+            await this.publisher.publish(
+              REDIS_CHANNELS.NOTION_FETCH_PAGE_RESPONSE,
+              JSON.stringify({ success: false, error: 'Notion not configured', requestId })
+            );
+          } else if (!pageId) {
+            await this.publisher.publish(
+              REDIS_CHANNELS.NOTION_FETCH_PAGE_RESPONSE,
+              JSON.stringify({ success: false, error: 'Missing pageId', requestId })
+            );
+          } else {
+            const result = await fetchNotionPageById(pageId);
+            await this.publisher.publish(
+              REDIS_CHANNELS.NOTION_FETCH_PAGE_RESPONSE,
+              JSON.stringify({ ...result, requestId })
+            );
+            if (result.success) {
+              log(`  ✅ Notion page fetched: ${result.task?.taskId || result.task?.id}`);
             }
           }
         }
@@ -808,6 +851,7 @@ class WorkstreamDaemon {
     log('');
     log('✅ Daemon running');
     log(`   Main poll interval: ${ACTIVE_POLL_INTERVAL}ms (active) / ${IDLE_POLL_INTERVAL}ms (idle)`);
+    log(`   PR updates: notification-driven (${this.notificationPollInterval / 1000}s poll) + 5min fallback`);
     log(`   Chrome poll interval: ${CHROME_POLL_INTERVAL}ms`);
     log(`   Slow poll interval: ${SLOW_POLL_INTERVAL}ms`);
     log(`   Cache file: ${CACHE_FILE}`);
@@ -1062,6 +1106,120 @@ class WorkstreamDaemon {
     return Math.ceil(secondsUntilReset / 60); // Convert to minutes, round up
   }
 
+  /**
+   * Poll GitHub Notifications API for PR-related activity.
+   * Uses If-Modified-Since / Last-Modified headers for efficient 304 responses.
+   * Maps notifications to tracked instances and marks them for PR refresh.
+   */
+  private async pollNotifications(): Promise<void> {
+    const now = Date.now();
+    if (now - this.lastNotificationPoll < this.notificationPollInterval) {
+      return; // Not time to poll yet
+    }
+    this.lastNotificationPoll = now;
+
+    try {
+      // Build gh api command with If-Modified-Since header if we have a previous Last-Modified
+      const headers = this.lastModifiedHeader
+        ? `-H "If-Modified-Since: ${this.lastModifiedHeader}"`
+        : '';
+
+      const result = await $`/opt/homebrew/bin/gh api /notifications --include ${headers} 2>/dev/null || echo ""`.quiet();
+
+      const output = result.stdout.trim();
+      if (!output) return;
+
+      // Parse the response - gh api --include puts headers before body separated by blank line
+      const blankLineIdx = output.indexOf('\n\n');
+      if (blankLineIdx === -1) return;
+
+      const headerSection = output.substring(0, blankLineIdx);
+      const bodySection = output.substring(blankLineIdx + 2).trim();
+
+      // Check for 304 Not Modified
+      if (headerSection.includes('304') || headerSection.includes('HTTP/2 304')) {
+        log('🔔 Notifications: 304 Not Modified - no changes');
+        return;
+      }
+
+      // Extract Last-Modified header for next poll
+      const lastModifiedMatch = headerSection.match(/Last-Modified:\s*(.+)/i);
+      if (lastModifiedMatch) {
+        this.lastModifiedHeader = lastModifiedMatch[1].trim();
+      }
+
+      // Extract X-Poll-Interval header
+      const pollIntervalMatch = headerSection.match(/X-Poll-Interval:\s*(\d+)/i);
+      if (pollIntervalMatch) {
+        this.notificationPollInterval = parseInt(pollIntervalMatch[1]) * 1000;
+      }
+
+      // Parse notification body
+      if (!bodySection || bodySection === '[]') return;
+
+      let notifications: any[];
+      try {
+        notifications = JSON.parse(bodySection);
+      } catch {
+        return;
+      }
+
+      if (!Array.isArray(notifications) || notifications.length === 0) return;
+
+      // Filter for PR-related notifications
+      const prNotifications = notifications.filter(n =>
+        n.subject?.type === 'PullRequest' &&
+        ['state_change', 'ci_activity', 'review_requested', 'comment', 'mention', 'subscribed', 'author'].includes(n.reason)
+      );
+
+      if (prNotifications.length === 0) return;
+
+      // Extract PR URLs and map to tracked instances
+      const notificationThreadIds: string[] = [];
+
+      for (const notification of prNotifications) {
+        const prApiUrl = notification.subject?.url; // e.g., https://api.github.com/repos/owner/repo/pulls/123
+        if (!prApiUrl) continue;
+
+        // Parse owner/repo/number from API URL
+        const match = prApiUrl.match(/repos\/([^/]+)\/([^/]+)\/pulls\/(\d+)/);
+        if (!match) continue;
+
+        const [, owner, repo, prNumber] = match;
+        const prNum = parseInt(prNumber);
+
+        // Find tracked instances matching this PR
+        for (const [path, instance] of this.instances) {
+          if (!instance.prStatus || instance.prStatus.number !== prNum) continue;
+
+          // Verify repo matches by checking remote URL
+          const instanceUrl = instance.prStatus.url || '';
+          if (instanceUrl.includes(`${owner}/${repo}`)) {
+            this.pendingPRRefresh.add(path);
+            log(`🔔 Notification: PR #${prNum} activity (${notification.reason}) → ${path.split('/').pop()}`);
+          }
+        }
+
+        // Collect thread IDs for marking as read
+        if (notification.id) {
+          notificationThreadIds.push(notification.id);
+        }
+      }
+
+      if (this.pendingPRRefresh.size > 0) {
+        log(`🔔 ${this.pendingPRRefresh.size} instance(s) queued for PR refresh from notifications`);
+      }
+
+      // Mark notifications as read in the background (best-effort)
+      for (const threadId of notificationThreadIds) {
+        $`/opt/homebrew/bin/gh api -X PATCH /notifications/threads/${threadId} 2>/dev/null`.quiet().catch(() => {});
+      }
+    } catch (error) {
+      // Non-fatal - notifications are supplementary
+      log('⚠️  Failed to poll GitHub notifications (will retry next cycle)');
+    }
+  }
+
   private async checkGitHubRateLimit(): Promise<void> {
     try {
       const result = await $`/opt/homebrew/bin/gh api rate_limit`;
@@ -1086,25 +1244,18 @@ class WorkstreamDaemon {
       if (remaining <= RATE_LIMIT_CRITICAL) {
         // CRITICAL: Stop all PR updates until reset
         this.rateLimitPaused = true;
-        this.prPollInterval = Infinity; // Effectively disable PR polling
         log(`🛑 GitHub Rate Limit CRITICAL (${remaining} remaining) - PR updates PAUSED until reset`);
         log(`   Core: ${corePercent}% (${coreLimit.remaining}/${coreLimit.limit}), resets in ${coreMinutesUntilReset}m`);
         log(`   GraphQL: ${graphqlPercent}% (${graphqlLimit.remaining}/${graphqlLimit.limit}), resets in ${graphqlMinutesUntilReset}m`);
       } else if (remaining <= RATE_LIMIT_LOW) {
-        // LOW: Very conservative - 5 minute PR intervals
         this.rateLimitPaused = false;
-        this.prPollInterval = 5 * 60 * 1000; // 5 minutes
-        log(`⚠️  GitHub Rate Limit LOW (${remaining} remaining) - PR updates every 5 minutes`);
+        log(`⚠️  GitHub Rate Limit LOW (${remaining} remaining) - PR updates notification-driven + 5min fallback`);
         log(`   Core: ${corePercent}% (${coreLimit.remaining}/${coreLimit.limit}), resets in ${coreMinutesUntilReset}m`);
       } else if (remaining <= RATE_LIMIT_CAUTION) {
-        // CAUTION: Moderate - 2 minute PR intervals
         this.rateLimitPaused = false;
-        this.prPollInterval = 2 * 60 * 1000; // 2 minutes
-        log(`⚡ GitHub Rate Limit CAUTION (${remaining} remaining) - PR updates every 2 minutes`);
+        log(`⚡ GitHub Rate Limit CAUTION (${remaining} remaining) - PR updates notification-driven + 5min fallback`);
       } else {
-        // NORMAL: Standard 30 second PR intervals
         this.rateLimitPaused = false;
-        this.prPollInterval = 30 * 1000; // 30 seconds
         // Don't log when normal
       }
     } catch (error) {
@@ -1112,7 +1263,6 @@ class WorkstreamDaemon {
       log('Unable to check GitHub rate limit (gh CLI may not be available)');
       // Be conservative when we can't check
       this.rateLimitPaused = false;
-      this.prPollInterval = 2 * 60 * 1000; // Default to 2 minutes when unknown
     }
   }
 
@@ -1122,6 +1272,9 @@ class WorkstreamDaemon {
 
       // Refresh the daemon lock to prevent expiration
       await this.refreshLock();
+
+      // Poll GitHub notifications to trigger PR refreshes for affected instances
+      await this.pollNotifications();
 
       const instances = await this.getVSCodeInstances();
       log(`📁 Found ${instances.length} VS Code instances`);
@@ -1210,14 +1363,19 @@ class WorkstreamDaemon {
         // Always update git (local, no rate limits)
         const shouldUpdateLocal = !existing || (Date.now() - existing.lastUpdated) > 5000; // 5 seconds
 
-        // PR updates respect rate limit protection
-        // - Paused when rate limit is critical
-        // - Uses dynamic prPollInterval based on remaining rate limit
+        // PR updates are notification-driven with a fallback interval
+        // - Primary: refresh when GitHub notification indicates PR activity
+        // - Fallback: refresh every 5 minutes as a safety net
+        // - Forced: manual refresh via Raycast Cmd+R
+        // - New instance: first time seeing this instance
         const timeSinceLastPR = Date.now() - (existing?.prLastUpdated || 0);
+        const FALLBACK_PR_INTERVAL = 5 * 60 * 1000; // 5 minute safety net
+        const hasNotification = this.pendingPRRefresh.has(instance.path);
         const shouldUpdatePR = !this.rateLimitPaused && (
           forcePR ||
           !existing ||
-          timeSinceLastPR > this.prPollInterval
+          hasNotification ||
+          timeSinceLastPR > FALLBACK_PR_INTERVAL
         );
 
         if (shouldUpdateLocal) {
@@ -1461,6 +1619,7 @@ class WorkstreamDaemon {
     if (updatePR && enriched.gitInfo && !this.rateLimitPaused && this.ghRateLimit && this.ghRateLimit.remaining > RATE_LIMIT_CRITICAL) {
       enriched.prStatus = await this.getPRStatus(instance.path, enriched.gitInfo.branch);
       enriched.prLastUpdated = Date.now(); // Track when PR was last fetched
+      this.pendingPRRefresh.delete(instance.path); // Clear notification-triggered refresh
 
       // Check for PR state changes and send notifications
       if (enriched.prStatus) {
@@ -1725,12 +1884,86 @@ class WorkstreamDaemon {
         }
       }
 
+      // Fetch unresolved review comments and Copilot review status via GraphQL
+      let unresolvedComments: number | undefined;
+      let copilotReviewStatus: 'clean' | 'comments' | 'pending' | undefined;
+      try {
+        const remoteUrl = remoteUrlResult.stdout.trim();
+        const match = remoteUrl.match(/github\.com[:/]([^/]+)\/([^/.]+)/);
+        if (match && pr.number) {
+          const [, owner, name] = match;
+          const graphqlQuery = "query($number:Int!,$owner:String!,$name:String!){repository(owner:$owner,name:$name){pullRequest(number:$number){databaseId reviewThreads(first:100){nodes{isResolved}}reviews(last:20){nodes{author{login}body state}}}}}";
+          const graphqlResult = await $`/opt/homebrew/bin/gh api graphql -f query=${graphqlQuery} -F number=${pr.number} -F owner=${owner} -F name=${name} 2>/dev/null || echo ""`.quiet();
+          if (graphqlResult.stdout.trim()) {
+            const graphqlData = JSON.parse(graphqlResult.stdout);
+            const prData = graphqlData?.data?.repository?.pullRequest;
+
+            // Unresolved comment threads
+            const threads = prData?.reviewThreads?.nodes || [];
+            const unresolved = threads.filter((t: any) => !t.isResolved).length;
+            if (unresolved > 0) {
+              unresolvedComments = unresolved;
+            }
+
+            // Check completed Copilot reviews from GraphQL
+            const reviews = prData?.reviews?.nodes || [];
+            const copilotReview = [...reviews].reverse().find((r: any) =>
+              r.author?.login?.toLowerCase().includes('copilot')
+            );
+            if (copilotReview) {
+              if (copilotReview.body?.includes('generated no new comments')) {
+                copilotReviewStatus = 'clean';
+              } else {
+                copilotReviewStatus = 'comments';
+              }
+            }
+
+            // Check Copilot Business API for in-progress review task
+            const prDatabaseId = prData?.databaseId;
+            if (prDatabaseId && !copilotReviewStatus) {
+              try {
+                const ghTokenResult = await $`/opt/homebrew/bin/gh auth token 2>/dev/null`.quiet();
+                const ghToken = ghTokenResult.stdout.trim();
+                if (ghToken) {
+                  const tasksResult = await $`curl -s -H ${'Authorization: Bearer ' + ghToken} -H "Accept: application/json" ${'https://api.business.githubcopilot.com/agents/repos/' + owner + '/' + name + '/tasks'} 2>/dev/null || echo ""`.quiet();
+                  if (tasksResult.stdout.trim()) {
+                    const tasksData = JSON.parse(tasksResult.stdout);
+                    const tasks = tasksData?.tasks || [];
+                    // Find the most recent review task for this PR
+                    const prTask = [...tasks].reverse().find((t: any) =>
+                      t.name?.toLowerCase().includes('review') &&
+                      t.artifacts?.some((a: any) => a.data?.id === prDatabaseId && a.data?.type === 'pull')
+                    );
+                    if (prTask) {
+                      if (prTask.state === 'completed') {
+                        // Task completed but no review found in GraphQL yet — still pending propagation
+                        if (!copilotReviewStatus) {
+                          copilotReviewStatus = 'clean';
+                        }
+                      } else if (prTask.state === 'in_progress' || prTask.state === 'queued') {
+                        copilotReviewStatus = 'pending';
+                      }
+                    }
+                  }
+                }
+              } catch {
+                // Copilot Business API failed, skip
+              }
+            }
+          }
+        }
+      } catch {
+        // GraphQL query failed, skip
+      }
+
       return {
         number: pr.number,
         title: pr.title,
         url: pr.url,
         state: pr.state,
         mergeable: pr.mergeable,
+        unresolvedComments,
+        copilotReviewStatus,
         checks,
       };
     } catch {
@@ -1978,7 +2211,17 @@ class WorkstreamDaemon {
       const normalizedPath = repoPath.replace(/\/$/, ''); // Remove trailing slash
 
       if (config.apps?.http?.servers) {
-        for (const [serverName, server] of Object.entries<any>(config.apps.http.servers)) {
+        // Sort servers so HTTPS/main servers (srv0, srv1, etc.) are processed before
+        // auxiliary servers (like spotlight-shared) to ensure correct URL resolution
+        const sortedServers = Object.entries<any>(config.apps.http.servers).sort(([a], [b]) => {
+          const aIsMain = a.startsWith('srv') || a.includes('https');
+          const bIsMain = b.startsWith('srv') || b.includes('https');
+          if (aIsMain && !bIsMain) return -1;
+          if (!aIsMain && bIsMain) return 1;
+          return a.localeCompare(b);
+        });
+
+        for (const [serverName, server] of sortedServers) {
           if (server.routes) {
             for (const route of server.routes) {
               if (route.match) {
@@ -2021,8 +2264,12 @@ class WorkstreamDaemon {
                       }
 
                       // Check if this host matches the worktree path
-                      if (worktreePath && worktreePath.replace(/\/$/, '') === normalizedPath) {
-                        const protocol = serverName.includes('https') || serverName === 'srv1' ? 'https' : 'http';
+                      // Skip API-only hostnames (ending with -api.domain) - prefer the main app host
+                      if (worktreePath && worktreePath.replace(/\/$/, '') === normalizedPath
+                          && !hostName.match(/^.+-api\.[^.]+\./)) {
+                        const protocol = serverName.includes('https') || serverName === 'srv1'
+                          || server.automatic_https != null || server.listen?.some((l: string) => l.includes(':443'))
+                          ? 'https' : 'http';
                         return {
                           name: hostName,
                           url: `${protocol}://${hostName}`,
@@ -2587,6 +2834,7 @@ class WorkstreamDaemon {
     baseBranch?: string;
     force?: boolean;
     createOwnUpstream?: boolean;
+    hasNotionTask?: boolean;
     timestamp: number;
   }) {
     const { jobId, worktreeName, repoPath, baseBranch, force, createOwnUpstream } = data;
@@ -2712,6 +2960,22 @@ class WorkstreamDaemon {
           outputBuffer += 'VS Code opened successfully!\n';
         } catch (err) {
           outputBuffer += `Warning: Could not open VS Code: ${err}\n`;
+        }
+
+        // Set autolaunch key for the VS Code extension to pick up
+        if (result.worktreePath) {
+          try {
+            const workspace = Buffer.from(result.worktreePath).toString('base64');
+            const autolaunchKey = `workstream:terminal:autolaunch:${workspace}`;
+            const payload: { command: string; terminalName: string; initialInput?: string } = { command: 'clauded', terminalName: 'Claude' };
+            if (data.hasNotionTask) {
+              payload.initialInput = '/brief';
+            }
+            await this.redis.set(autolaunchKey, JSON.stringify(payload), 'EX', 60);
+            outputBuffer += 'Set autolaunch key for Claude terminal\n';
+          } catch (err) {
+            outputBuffer += `Warning: Could not set autolaunch key: ${err}\n`;
+          }
         }
 
         // Store final success status

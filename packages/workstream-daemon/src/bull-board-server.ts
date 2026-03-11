@@ -449,13 +449,23 @@ export class BullBoardServer {
           await this.createInstanceBoard(instancePath, instanceKey);
           instance = this.activeInstances.get(instanceKey)!;
         } catch (error) {
-          logError('Error setting up board for instance:', error);
-          return res.status(500).send(`
+          const isNotFound = error instanceof Error && error.message.includes('Instance not found');
+          if (isNotFound) {
+            log(`Instance not found: ${instanceKey} - may not be registered yet`);
+          } else {
+            logError('Error setting up board for instance:', error);
+          }
+          const statusCode = isNotFound ? 404 : 500;
+          return res.status(statusCode).send(`
             <html>
-              <head><title>Error</title></head>
+              <head>
+                <title>${isNotFound ? 'Not Found' : 'Error'}</title>
+                ${isNotFound ? '<meta http-equiv="refresh" content="5">' : ''}
+              </head>
               <body style="font-family: system-ui; max-width: 800px; margin: 50px auto; padding: 20px;">
-                <h1>❌ Error Loading Instance</h1>
+                <h1>${isNotFound ? '⏳ Instance Not Ready' : '❌ Error Loading Instance'}</h1>
                 <p>${error instanceof Error ? error.message : 'Unknown error'}</p>
+                ${isNotFound ? '<p style="color: #666;">This instance may still be starting up. This page will auto-refresh in 5 seconds...</p>' : ''}
                 <a href="/">← Back to home</a>
               </body>
             </html>

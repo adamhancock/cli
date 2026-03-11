@@ -258,6 +258,7 @@ export interface WorktreeJobData {
   baseBranch?: string;
   force?: boolean;
   createOwnUpstream?: boolean;
+  hasNotionTask?: boolean;
   timestamp: number;
   status?: 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
   output?: string;
@@ -288,7 +289,8 @@ export async function publishWorktreeJob(
   repoPath: string,
   baseBranch?: string,
   force?: boolean,
-  createOwnUpstream?: boolean
+  createOwnUpstream?: boolean,
+  hasNotionTask?: boolean
 ): Promise<string | null> {
   try {
     if (!(await isRedisAvailable())) {
@@ -307,6 +309,7 @@ export async function publishWorktreeJob(
       baseBranch,
       force,
       createOwnUpstream,
+      hasNotionTask,
       timestamp: Date.now(),
     };
 

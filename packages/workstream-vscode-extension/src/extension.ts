@@ -88,6 +88,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       },
     });
 
+    // Check for autolaunch key (set by worktree creation)
+    try {
+      const workspacePath = vscode.workspace.workspaceFolders![0].uri.fsPath;
+      const workspaceBase64 = Buffer.from(workspacePath).toString('base64');
+      const autolaunchKey = `workstream:terminal:autolaunch:${workspaceBase64}`;
+      const raw = await publisher.getKey(autolaunchKey);
+      if (raw) {
+        const { command, terminalName, initialInput } = JSON.parse(raw) as { command: string; terminalName?: string; initialInput?: string };
+        console.log(`[Workstream] Autolaunch found: ${command}`);
+        await createAndRunTerminal(command, terminalName, workspacePath, initialInput);
+        await publisher.deleteKey(autolaunchKey);
+      }
+    } catch (err) {
+      console.error('[Workstream] Failed to check autolaunch:', err);
+    }
+
     console.log('[Workstream] Extension activated successfully');
   } catch (error) {
     console.error('[Workstream] Failed to activate extension:', error);
@@ -127,9 +143,9 @@ async function setupTerminalFocusListener(context: vscode.ExtensionContext): Pro
         }
       } else if (receivedChannel === createChannel) {
         try {
-          const { command, terminalName } = JSON.parse(message) as { command: string; terminalName?: string };
+          const { command, terminalName, initialInput } = JSON.parse(message) as { command: string; terminalName?: string; initialInput?: string };
           console.log(`[Workstream] Received terminal creation request: ${command}`);
-          await createAndRunTerminal(command, terminalName, workspacePath);
+          await createAndRunTerminal(command, terminalName, workspacePath, initialInput);
         } catch (error) {
           console.error('[Workstream] Failed to parse terminal creation message:', error);
         }
@@ -157,7 +173,7 @@ async function focusTerminalByPid(pid: number): Promise<void> {
   }
 }
 
-async function createAndRunTerminal(command: string, terminalName: string | undefined, cwd: string): Promise<void> {
+async function createAndRunTerminal(command: string, terminalName: string | undefined, cwd: string, initialInput?: string): Promise<void> {
   try {
     // Create a new terminal with the specified name and working directory
     // If terminalName is undefined, default to 'Claude' (for backward compatibility)
@@ -173,6 +189,11 @@ async function createAndRunTerminal(command: string, terminalName: string | unde
 
     // Show and focus the terminal
     terminal.show(false); // false = focus the terminal
+
+    // Send initial input after a delay to allow the command to start
+    if (initialInput) {
+      setTimeout(() => terminal.sendText(initialInput), 3000);
+    }
 
     console.log(`[Workstream] Created terminal "${terminalName || 'Claude'}" and executed: ${command}`);
   } catch (error) {

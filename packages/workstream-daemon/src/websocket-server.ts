@@ -70,6 +70,102 @@ export class WebSocketServer {
         return;
       }
 
+      // Handle POST /api/claude-hook for Claude HTTP hooks
+      // Claude sends JSON with: session_id, cwd, hook_event_name, tool_name,
+      // tool_input, notification_type, permission_mode, transcript_path, etc.
+      if (req.method === 'POST' && req.url === '/api/claude-hook') {
+        let body = '';
+        req.on('data', (chunk) => {
+          body += chunk.toString();
+        });
+        req.on('end', async () => {
+          try {
+            const context = JSON.parse(body);
+            const hookEvent = context.hook_event_name;
+            const toolName = context.tool_name;
+            const notificationType = context.notification_type;
+            const projectDir = context.cwd || '';
+            const sessionId = context.session_id;
+
+            // Map hook event to daemon event type
+            let eventType: string;
+            switch (hookEvent) {
+              case 'UserPromptSubmit':
+                eventType = 'work_started';
+                break;
+              case 'PreToolUse':
+                eventType = (toolName === 'AskUserQuestion' || toolName === 'ExitPlanMode')
+                  ? 'waiting_for_input'
+                  : 'work_started';
+                break;
+              case 'Notification':
+                eventType = (notificationType === 'permission_prompt' || notificationType === 'idle_prompt')
+                  ? 'waiting_for_input'
+                  : 'work_started';
+                break;
+              case 'PreCompact':
+                eventType = 'compacting_started';
+                break;
+              case 'Stop':
+                eventType = 'work_stopped';
+                break;
+              default:
+                eventType = 'work_started';
+                break;
+            }
+
+            // Use session_id as a stable identifier (PID may not be available via HTTP hooks)
+            // The daemon handler accepts claudePid for session tracking — use session_id hash as a stable numeric ID
+            const claudePid = sessionId ? Math.abs(this.hashString(sessionId)) : undefined;
+
+            // Look up terminal context from Redis
+            let terminalId = '';
+            let terminalName = '';
+            let terminalPid: number | undefined;
+            let vscodePid: number | undefined;
+
+            if (claudePid) {
+              try {
+                const terminalContext = await this.redis.get(`claude:terminal:${claudePid}`);
+                if (terminalContext) {
+                  const tc = JSON.parse(terminalContext);
+                  terminalId = tc.terminalId || '';
+                  terminalName = tc.terminalName || '';
+                  terminalPid = tc.terminalPid;
+                  vscodePid = tc.vscodePid;
+                }
+              } catch {
+                // Terminal context not available
+              }
+            }
+
+            // Publish to Redis channel (same format as notify-daemon.sh)
+            const message: Record<string, unknown> = {
+              type: eventType,
+              path: projectDir,
+              claudePid,
+              sessionId,
+            };
+            if (terminalId) message.terminalId = terminalId;
+            if (terminalName) message.terminalName = terminalName;
+            if (terminalPid) message.terminalPid = terminalPid;
+            if (vscodePid) message.vscodePid = vscodePid;
+
+            await this.redis.publish(REDIS_CHANNELS.CLAUDE, JSON.stringify(message));
+
+            console.log(`[WebSocket] Claude hook: ${hookEvent} -> ${eventType} in ${projectDir.split('/').pop() || 'unknown'}`);
+
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, event: eventType }));
+          } catch (error) {
+            console.error('[WebSocket] Claude hook error:', error);
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Invalid request' }));
+          }
+        });
+        return;
+      }
+
       // For other requests, let Socket.IO handle or return 404
       res.writeHead(404);
       res.end();
@@ -378,6 +474,19 @@ export class WebSocketServer {
       console.error('[WebSocket] Error loading instances:', error);
       return [];
     }
+  }
+
+  /**
+   * Simple string hash to convert session_id to a stable numeric ID
+   */
+  private hashString(str: string): number {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+      const char = str.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash |= 0; // Convert to 32bit integer
+    }
+    return hash;
   }
 
   /**

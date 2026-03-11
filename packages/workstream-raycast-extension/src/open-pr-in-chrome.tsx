@@ -196,6 +196,11 @@ export default function OpenPRInChromeCommand() {
   }
 
   function getStatusIcon(instance: InstanceWithStatus): Icon {
+    // Copilot has comments — prioritize showing that
+    if (instance.prStatus?.copilotReviewStatus === 'comments') {
+      return Icon.SpeechBubble;
+    }
+
     // Check PR state first
     if (instance.prStatus?.state === 'MERGED') {
       return Icon.CheckCircle;
@@ -219,6 +224,11 @@ export default function OpenPRInChromeCommand() {
   }
 
   function getStatusColor(instance: InstanceWithStatus): Color {
+    // Copilot has comments
+    if (instance.prStatus?.copilotReviewStatus === 'comments') {
+      return Color.Orange;
+    }
+
     // Check PR state first
     if (instance.prStatus?.state === 'MERGED') {
       return Color.Purple;
@@ -242,9 +252,12 @@ export default function OpenPRInChromeCommand() {
   }
 
   function getSubtitle(instance: InstanceWithStatus): string {
-    // Show PR title as subtitle
     if (instance.prStatus) {
-      return instance.prStatus.title;
+      let sub = `#${instance.prStatus.number} ${instance.prStatus.title}`;
+      if (instance.prStatus.unresolvedComments && instance.prStatus.unresolvedComments > 0) {
+        sub = `#${instance.prStatus.number} · 💬 ${instance.prStatus.unresolvedComments} — ${instance.prStatus.title}`;
+      }
+      return sub;
     }
     return '';
   }
@@ -301,6 +314,19 @@ export default function OpenPRInChromeCommand() {
           text: `${passing}/${total}`,
           icon: { source: checkIcon, tintColor: checkColor },
           tooltip: `Checks: ${passing} passing${failing > 0 ? `, ${failing} failing` : ''}${pending > 0 ? `, ${pending} pending` : ''}`,
+        });
+      }
+
+      // Copilot review status (comments shown as left icon; show clean/pending as accessory)
+      if (instance.prStatus.copilotReviewStatus === 'clean') {
+        accessories.push({
+          icon: { source: Icon.Check, tintColor: Color.Green },
+          tooltip: 'Copilot: No new comments',
+        });
+      } else if (instance.prStatus.copilotReviewStatus === 'pending') {
+        accessories.push({
+          icon: { source: Icon.Clock, tintColor: Color.SecondaryText },
+          tooltip: 'Copilot: Review in progress',
         });
       }
 

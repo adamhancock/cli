@@ -30,7 +30,17 @@ export function extractHosts(config: CaddyConfig): CaddyHost[] {
   const seenHosts = new Set<string>();
 
   if (config.apps?.http?.servers) {
-    for (const [serverName, server] of Object.entries(config.apps.http.servers)) {
+    // Sort servers so HTTPS/main servers (srv0, srv1, etc.) are processed before
+    // auxiliary servers (like spotlight-shared) to ensure correct URL resolution
+    const sortedServers = Object.entries(config.apps.http.servers).sort(([a], [b]) => {
+      const aIsMain = a.startsWith('srv') || a.includes('https');
+      const bIsMain = b.startsWith('srv') || b.includes('https');
+      if (aIsMain && !bIsMain) return -1;
+      if (!aIsMain && bIsMain) return 1;
+      return a.localeCompare(b);
+    });
+
+    for (const [serverName, server] of sortedServers) {
       if (server.routes) {
         for (const route of server.routes) {
           if (route.match) {
@@ -40,8 +50,10 @@ export function extractHosts(config: CaddyConfig): CaddyHost[] {
                   if (!seenHosts.has(host)) {
                     seenHosts.add(host);
 
-                    // Determine protocol
-                    const protocol = serverName.includes('https') || serverName === 'srv1' ? 'https' : 'http';
+                    // Determine protocol - check server name, automatic_https, or listen port
+                    const protocol = serverName.includes('https') || serverName === 'srv1'
+                      || server.automatic_https != null || server.listen?.some((l) => l.includes(':443'))
+                      ? 'https' : 'http';
 
                     // Extract upstreams and worktree path from route handlers
                     const upstreams: Set<string> = new Set();

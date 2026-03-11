@@ -320,6 +320,48 @@ export async function updateNotionTaskStatus(
  * Create a new task in the Notion database
  * Returns the created task if successful
  */
+/**
+ * Fetch a single Notion page by its ID
+ * Returns a NotionTask or null if not found
+ */
+export async function fetchNotionPageById(
+  pageId: string
+): Promise<{ success: boolean; task?: NotionTask; error?: string }> {
+  const config = getNotionConfig();
+  if (!config) {
+    return { success: false, error: 'Notion not configured' };
+  }
+
+  const client = getNotionClient(config.apiKey);
+  const markdownConverter = new NotionToMarkdown({ notionClient: client });
+  const { propertyMapping } = config;
+
+  try {
+    console.log(`[Notion] Fetching page ${pageId}...`);
+    const page = await client.pages.retrieve({ page_id: pageId });
+
+    if (page.object !== 'page' || !('properties' in page)) {
+      return { success: false, error: 'Invalid page response' };
+    }
+
+    const task = parseNotionPage(page, propertyMapping);
+    if (!task) {
+      return { success: false, error: 'Failed to parse page' };
+    }
+
+    task.contentMarkdown = await convertPageToMarkdown(task.id, markdownConverter);
+    console.log(`[Notion] Fetched page: ${task.taskId || task.id} - ${task.title}`);
+    return { success: true, task };
+  } catch (error) {
+    console.error('[Notion] Failed to fetch page:', error);
+    return { success: false, error: String(error) };
+  }
+}
+
+/**
+ * Create a new task in the Notion database
+ * Returns the created task if successful
+ */
 export async function createNotionTask(
   title: string
 ): Promise<{ success: boolean; task?: NotionTask; error?: string }> {

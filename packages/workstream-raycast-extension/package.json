@@ -142,6 +142,13 @@
       "mode": "view"
     },
     {
+      "name": "kill-tmux-sessions",
+      "title": "Kill Tmux Sessions",
+      "subtitle": "Workstream",
+      "description": "List and kill running tmux dev server sessions",
+      "mode": "view"
+    },
+    {
       "name": "event-viewer",
       "title": "View Workstream Events",
       "subtitle": "Workstream",

@@ -36,6 +36,8 @@ export interface PRStatus {
   author: string;
   mergeable?: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN';
   labels?: string[];
+  unresolvedComments?: number;
+  copilotReviewStatus?: 'clean' | 'comments' | 'pending';
   checks?: {
     total: number;
     passing: number;
@@ -155,6 +157,8 @@ export interface CaddyConfig {
     http?: {
       servers?: {
         [key: string]: {
+          listen?: string[];
+          automatic_https?: unknown;
           routes?: Array<{
             match?: Array<{
               host?: string[];

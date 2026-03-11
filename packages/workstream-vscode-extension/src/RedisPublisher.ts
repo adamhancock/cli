@@ -163,6 +163,22 @@ export class RedisPublisher {
   }
 
   /**
+   * Get a key from Redis
+   */
+  async getKey(key: string): Promise<string | null> {
+    if (!this.isConnected || !this.redis) {
+      return null;
+    }
+
+    try {
+      return await this.redis.get(key);
+    } catch (error) {
+      console.error(`[Workstream] Failed to get key ${key}:`, error);
+      return null;
+    }
+  }
+
+  /**
    * Delete a key from Redis
    */
   async deleteKey(key: string): Promise<void> {

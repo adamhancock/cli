@@ -12,6 +12,162 @@ import type { NotionTask, NotionTasksResponse, NotionTasksResult, CreateNotionTa
 let pendingTasksRequest: Promise<NotionTasksResult> | null = null;
 
 /**
+ * Extract a Notion page ID from a URL
+ * Handles formats:
+ *   https://notion.so/<id>
+ *   https://www.notion.so/workspace/Page-Title-<id>
+ *   https://notion.so/<id>?v=...
+ *   https://www.notion.so/workspace/Page-Title-<32-char-hex>?...
+ */
+export function extractNotionPageId(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    if (!parsed.hostname.endsWith('notion.so') && !parsed.hostname.endsWith('notion.site')) {
+      return null;
+    }
+
+    // The page ID is the last 32 hex characters in the URL path
+    // It may appear as a bare ID or appended to a slug with a hyphen
+    const pathSegments = parsed.pathname.split('/').filter(Boolean);
+    if (pathSegments.length === 0) return null;
+
+    const lastSegment = pathSegments[pathSegments.length - 1];
+
+    // Try to extract a 32-char hex ID (with or without hyphens)
+    // Notion IDs are 32 hex chars, sometimes with hyphens (UUID format)
+    const hexMatch = lastSegment.match(/([a-f0-9]{32})$/i)
+      || lastSegment.match(/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$/i);
+
+    if (hexMatch) {
+      // Return as UUID format
+      const hex = hexMatch[1].replace(/-/g, '');
+      return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Extract a branch-name-friendly slug from a Notion URL path
+ * e.g. "Email-data-metric-import-for-unsupported-integration-3190556a8a6c80838fcff08369b21720"
+ * -> "email-data-metric-import-for-unsupported-integration"
+ */
+export function extractSlugFromNotionUrl(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    const pathSegments = parsed.pathname.split('/').filter(Boolean);
+    if (pathSegments.length === 0) return null;
+
+    const lastSegment = pathSegments[pathSegments.length - 1];
+    // Remove the trailing 32-char hex ID
+    const withoutId = lastSegment.replace(/-?[a-f0-9]{32}$/i, '');
+    if (!withoutId) return null;
+
+    return withoutId
+      .toLowerCase()
+      .replace(/[^a-z0-9-]/g, '')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '')
+      .substring(0, 50) || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetch a single Notion page by URL via the daemon
+ */
+export async function fetchNotionPageByUrl(
+  url: string,
+  timeoutMs = 15000
+): Promise<{ success: boolean; task?: NotionTask; error?: string }> {
+  const pageId = extractNotionPageId(url);
+  if (!pageId) {
+    return { success: false, error: 'Invalid Notion URL' };
+  }
+
+  return new Promise(async (resolve) => {
+    let subscriber: Redis | null = null;
+    let timeoutId: NodeJS.Timeout | null = null;
+    let resolved = false;
+    const requestId = `page-${Date.now()}-${Math.random().toString(36).substring(7)}`;
+
+    const cleanup = () => {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
+      if (subscriber) {
+        subscriber.unsubscribe().catch(() => {});
+        subscriber.quit().catch(() => {});
+        subscriber = null;
+      }
+    };
+
+    const resolveOnce = (result: { success: boolean; task?: NotionTask; error?: string }) => {
+      if (!resolved) {
+        resolved = true;
+        cleanup();
+        resolve(result);
+      }
+    };
+
+    try {
+      if (!(await isRedisAvailable())) {
+        resolveOnce({ success: false, error: 'Redis not available' });
+        return;
+      }
+
+      subscriber = new Redis({
+        host: 'localhost',
+        port: 6379,
+        lazyConnect: false,
+        retryStrategy: () => null,
+        connectTimeout: 2000,
+      });
+
+      subscriber.on('error', (error) => {
+        resolveOnce({ success: false, error: error.message });
+      });
+
+      subscriber.on('message', (channel, message) => {
+        if (channel === REDIS_CHANNELS.NOTION_FETCH_PAGE_RESPONSE) {
+          try {
+            const response = JSON.parse(message);
+            if (response.requestId === requestId) {
+              if (response.success && response.task) {
+                resolveOnce({ success: true, task: response.task });
+              } else {
+                resolveOnce({ success: false, error: response.error || 'Failed to fetch page' });
+              }
+            }
+          } catch (error) {
+            resolveOnce({ success: false, error: 'Failed to parse response' });
+          }
+        }
+      });
+
+      await subscriber.subscribe(REDIS_CHANNELS.NOTION_FETCH_PAGE_RESPONSE);
+
+      const publisher = getPublisherClient();
+      await publisher.publish(
+        REDIS_CHANNELS.NOTION_FETCH_PAGE_REQUEST,
+        JSON.stringify({ pageId, requestId, timestamp: Date.now() })
+      );
+
+      timeoutId = setTimeout(() => {
+        resolveOnce({ success: false, error: 'Request timed out' });
+      }, timeoutMs);
+    } catch (error) {
+      resolveOnce({ success: false, error: String(error) });
+    }
+  });
+}
+
+/**
  * Get cached Notion tasks directly from Redis
  * Returns null if no cached data or Redis unavailable
  */

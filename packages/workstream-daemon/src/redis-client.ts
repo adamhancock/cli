@@ -50,6 +50,8 @@ export const REDIS_CHANNELS = {
   NOTION_UPDATE_STATUS_RESPONSE: 'workstream:notion:status:response',
   NOTION_CREATE_TASK_REQUEST: 'workstream:notion:task:create:request',
   NOTION_CREATE_TASK_RESPONSE: 'workstream:notion:task:create:response',
+  NOTION_FETCH_PAGE_REQUEST: 'workstream:notion:page:request',
+  NOTION_FETCH_PAGE_RESPONSE: 'workstream:notion:page:response',
 } as const;
 
 // TTL for instance data (30 seconds - auto-expires if daemon stops)

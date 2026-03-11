@@ -139,6 +139,9 @@ EOF
     echo "Warning: redis-cli not found. Terminal tracking will not work." >&2
   fi
 
+  # Cap V8 heap to prevent unbounded memory growth (see: anthropics/claude-code#4953)
+  export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=4096"
+
   # Execute the real Claude binary (replaces this process)
   exec "$real_claude" "$@"
 }

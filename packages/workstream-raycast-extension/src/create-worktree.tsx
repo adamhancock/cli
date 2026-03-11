@@ -13,8 +13,8 @@ import { useEffect, useState, useCallback } from 'react';
 import { createWorktreeStreaming } from './utils/worktree';
 import { triggerDaemonRefresh, publishWorktreeJob, subscribeToWorktreeUpdates, getWorktreeJobStatus, type WorktreeUpdate } from './utils/daemon-client';
 import { getUnmergedBranches, branchExists as checkBranchExists, getLocalBranches, getRemoteBranches } from './utils/git';
-import { requestNotionTasks, refreshNotionTasks, updateNotionTaskStatus, createNotionTask } from './utils/notion-client';
-import type { NotionTask, NotionTasksResult } from './types';
+import { updateNotionTaskStatus, createNotionTask, fetchNotionPageByUrl, extractNotionPageId, extractSlugFromNotionUrl } from './utils/notion-client';
+import type { NotionTask } from './types';
 import { homedir } from 'os';
 import { join, dirname, basename } from 'path';
 import { writeFile } from 'fs/promises';
@@ -29,19 +29,6 @@ interface FormValues {
   repoPath: string;
   baseBranch?: string;
   createOwnUpstream?: boolean;
-}
-
-/**
- * Get an icon based on the task type (Bug, Feature, Check, etc.)
- */
-function getTaskTypeIcon(type?: string): Icon {
-  const lowerType = type?.toLowerCase() || '';
-  if (lowerType.includes('bug')) return Icon.Bug;
-  if (lowerType.includes('feature')) return Icon.Star;
-  if (lowerType.includes('check')) return Icon.Checkmark;
-  if (lowerType.includes('improvement')) return Icon.ArrowUp;
-  if (lowerType.includes('task')) return Icon.Dot;
-  return Icon.Circle;
 }
 
 /**
@@ -170,7 +157,7 @@ async function startWorktreeCreation(
   };
 
   // Try to use daemon-based worktree creation
-  const jobId = await publishWorktreeJob(worktreeName, repoPath, baseBranch, force, createOwnUpstream);
+  const jobId = await publishWorktreeJob(worktreeName, repoPath, baseBranch, force, createOwnUpstream, !!notionTask);
 
   if (!jobId) {
     // Fallback to direct worktree creation if daemon is unavailable
@@ -194,6 +181,25 @@ async function startWorktreeCreation(
     // Handle final result if we haven't handed off yet
     if (!handedOff) {
       if (result.success) {
+        // Set autolaunch key for fallback path
+        if (result.worktreePath) {
+          try {
+            const { isRedisAvailable: checkRedis, getPublisherClient: getPub } = await import('./utils/redis-client');
+            if (await checkRedis()) {
+              const pub = getPub();
+              const workspace = Buffer.from(result.worktreePath).toString('base64');
+              const autolaunchKey = `workstream:terminal:autolaunch:${workspace}`;
+              const payload: { command: string; terminalName: string; initialInput?: string } = { command: 'clauded', terminalName: 'Claude' };
+              if (notionTask) {
+                payload.initialInput = '/brief';
+              }
+              await pub.set(autolaunchKey, JSON.stringify(payload), 'EX', 60);
+            }
+          } catch (err) {
+            console.error('Failed to set autolaunch key:', err);
+          }
+        }
+
         toast.style = Toast.Style.Success;
         toast.title = 'Worktree created successfully';
         toast.message = worktreeName;
@@ -420,56 +426,10 @@ export default function CreateWorktreeCommand() {
   const [repoPath, setRepoPath] = useState(defaultPath);
   const [showBaseBranchSelector, setShowBaseBranchSelector] = useState(false);
   const [isCheckingBranch, setIsCheckingBranch] = useState(false);
-  const [notionTasks, setNotionTasks] = useState<NotionTask[]>([]);
-  const [isLoadingNotionTasks, setIsLoadingNotionTasks] = useState(false);
+  const [notionUrl, setNotionUrl] = useState('');
+  const [isLoadingNotionPage, setIsLoadingNotionPage] = useState(false);
   const [selectedNotionTask, setSelectedNotionTask] = useState<NotionTask | null>(null);
-  const [notionTasksError, setNotionTasksError] = useState<string | null>(null);
-
-  // Load Notion tasks on mount
-  useEffect(() => {
-    loadNotionTasks();
-  }, []);
-
-  async function loadNotionTasks(retryAttempt = 0) {
-    const maxRetries = 2;
-    setIsLoadingNotionTasks(true);
-    setNotionTasksError(null);
-
-    try {
-      const result = await requestNotionTasks();
-
-      if (result.error) {
-        // Error returned from request
-        setNotionTasksError(result.error);
-
-        // Auto-retry for transient errors (timeout, Redis unavailable)
-        if (retryAttempt < maxRetries && (result.source === 'timeout' || result.source === 'error')) {
-          console.log(`Retrying Notion tasks (attempt ${retryAttempt + 1}/${maxRetries})...`);
-          setTimeout(() => {
-            loadNotionTasks(retryAttempt + 1);
-          }, 2000 * (retryAttempt + 1)); // Exponential backoff
-          return;
-        }
-      } else if (result.tasks.length === 0 && retryAttempt === 0 && result.source === 'daemon') {
-        // Empty result from daemon on first try - might be timing issue, retry once
-        console.log('Got empty result from daemon, retrying once...');
-        setTimeout(() => {
-          loadNotionTasks(1);
-        }, 1500);
-        return;
-      }
-
-      setNotionTasks(result.tasks);
-      if (result.tasks.length > 0) {
-        console.log(`Loaded ${result.tasks.length} Notion tasks from ${result.source}`);
-      }
-    } catch (error) {
-      console.error('Failed to load Notion tasks:', error);
-      setNotionTasksError(error instanceof Error ? error.message : 'Unknown error');
-    } finally {
-      setIsLoadingNotionTasks(false);
-    }
-  }
+  const [notionPageError, setNotionPageError] = useState<string | null>(null);
 
   // Load unmerged branches on mount
   useEffect(() => {
@@ -526,6 +486,57 @@ export default function CreateWorktreeCommand() {
     return () => clearTimeout(timer);
   }, [branchName, checkBranchExistence]);
 
+  // Debounced Notion URL fetcher
+  useEffect(() => {
+    if (!notionUrl.trim()) {
+      setSelectedNotionTask(null);
+      setNotionPageError(null);
+      setIsLoadingNotionPage(false);
+      return;
+    }
+
+    const pageId = extractNotionPageId(notionUrl);
+    if (!pageId) {
+      // Don't show error while user is still typing
+      if (notionUrl.includes('notion.so') || notionUrl.includes('notion.site')) {
+        setNotionPageError('Invalid Notion URL format');
+      }
+      setSelectedNotionTask(null);
+      setIsLoadingNotionPage(false);
+      return;
+    }
+
+    // Immediately set branch name from URL slug (instant feedback)
+    const slug = extractSlugFromNotionUrl(notionUrl);
+    if (slug) {
+      setBranchName(slug);
+    }
+
+    setIsLoadingNotionPage(true);
+    setNotionPageError(null);
+
+    const timer = setTimeout(async () => {
+      try {
+        const result = await fetchNotionPageByUrl(notionUrl);
+        if (result.success && result.task) {
+          setSelectedNotionTask(result.task);
+          setBranchName(result.task.branchName);
+          setNotionPageError(null);
+        } else {
+          setSelectedNotionTask(null);
+          setNotionPageError(result.error || 'Failed to fetch page');
+        }
+      } catch (error) {
+        setSelectedNotionTask(null);
+        setNotionPageError(error instanceof Error ? error.message : 'Unknown error');
+      } finally {
+        setIsLoadingNotionPage(false);
+      }
+    }, 500);
+
+    return () => clearTimeout(timer);
+  }, [notionUrl]);
+
   async function handleSubmit(values: FormValues) {
     if (!values.worktreeName.trim()) {
       await showToast({
@@ -545,6 +556,20 @@ export default function CreateWorktreeCommand() {
       return;
     }
 
+    // If user provided a Notion URL but fetch failed/hasn't completed, retry now
+    let notionTask = selectedNotionTask;
+    if (!notionTask && notionUrl.trim() && extractNotionPageId(notionUrl)) {
+      try {
+        const result = await fetchNotionPageByUrl(notionUrl);
+        if (result.success && result.task) {
+          notionTask = result.task;
+          setSelectedNotionTask(result.task);
+        }
+      } catch (error) {
+        console.error('Failed to fetch Notion page at submit:', error);
+      }
+    }
+
     // Start worktree creation with toast-based progress updates
     // This runs in the background and shows progress via animated toast
     startWorktreeCreation(
@@ -553,7 +578,7 @@ export default function CreateWorktreeCommand() {
       values.baseBranch,
       false,
       values.createOwnUpstream,
-      selectedNotionTask
+      notionTask
     );
   }
 
@@ -600,54 +625,13 @@ export default function CreateWorktreeCommand() {
             target={
               <CreateNotionTaskForm
                 onTaskCreated={(task) => {
-                  // Add the new task to the list and select it
-                  setNotionTasks((prev) => [task, ...prev]);
+                  // Set the URL field to the created task's URL
+                  setNotionUrl(task.url);
                   setBranchName(task.branchName);
                   setSelectedNotionTask(task);
                 }}
               />
             }
-          />
-          <Action
-            title="Refresh Notion Tasks"
-            icon={Icon.ArrowClockwise}
-            shortcut={{ modifiers: ['cmd', 'shift'], key: 'r' }}
-            onAction={async () => {
-              await showToast({
-                style: Toast.Style.Animated,
-                title: 'Fetching Notion tasks...',
-              });
-              setIsLoadingNotionTasks(true);
-              setNotionTasksError(null);
-              try {
-                const result = await refreshNotionTasks();
-                setNotionTasks(result.tasks);
-                if (result.error) {
-                  setNotionTasksError(result.error);
-                  await showToast({
-                    style: Toast.Style.Failure,
-                    title: 'Failed to refresh Notion tasks',
-                    message: result.error,
-                  });
-                } else {
-                  await showToast({
-                    style: Toast.Style.Success,
-                    title: result.tasks.length > 0 ? `${result.tasks.length} tasks loaded` : 'No tasks found',
-                    message: result.tasks.length === 0 ? 'Check daemon Notion config' : undefined,
-                  });
-                }
-              } catch (error) {
-                const errorMsg = error instanceof Error ? error.message : 'Unknown error';
-                setNotionTasksError(errorMsg);
-                await showToast({
-                  style: Toast.Style.Failure,
-                  title: 'Failed to refresh Notion tasks',
-                  message: errorMsg,
-                });
-              } finally {
-                setIsLoadingNotionTasks(false);
-              }
-            }}
           />
         </ActionPanel>
       }
@@ -663,98 +647,29 @@ export default function CreateWorktreeCommand() {
         }}
       />
 
-      <Form.Dropdown
-        id="notionTask"
-        title="Notion Task"
-        info={
-          notionTasksError
-            ? `Error: ${notionTasksError}`
-            : notionTasks.length === 0 && !isLoadingNotionTasks
-              ? 'No tasks loaded. Cmd+Shift+R to refresh'
-              : 'Select a task to use its branch name'
-        }
-        value=""
-        onChange={async (taskId) => {
-          // Handle special refresh action
-          if (taskId === '__refresh__') {
-            await showToast({ style: Toast.Style.Animated, title: 'Refreshing tasks...' });
-            setIsLoadingNotionTasks(true);
-            setNotionTasksError(null);
-            const result = await refreshNotionTasks();
-            setNotionTasks(result.tasks);
-            if (result.error) {
-              setNotionTasksError(result.error);
-              await showToast({ style: Toast.Style.Failure, title: 'Failed', message: result.error });
-            } else {
-              await showToast({ style: Toast.Style.Success, title: `${result.tasks.length} tasks loaded` });
-            }
-            setIsLoadingNotionTasks(false);
-            return;
-          }
+      <Form.TextField
+        id="notionUrl"
+        title="Notion Task URL"
+        placeholder="https://notion.so/..."
+        info="Paste a Notion task URL to auto-populate branch name and create a brief"
+        value={notionUrl}
+        onChange={setNotionUrl}
+      />
 
-          const task = notionTasks.find((t) => t.id === taskId);
-          if (task) {
-            setBranchName(task.branchName);
-            setSelectedNotionTask(task);
-          } else {
-            setSelectedNotionTask(null);
-          }
-        }}
-      >
-        {/* Only show "None" option when we have tasks to choose from */}
-        {notionTasks.length > 0 && (
-          <Form.Dropdown.Item value="" title="None (enter branch manually)" />
-        )}
-        {/* Show status/error as placeholder when no tasks */}
-        {notionTasks.length === 0 && (
-          <Form.Dropdown.Item
-            value=""
-            title={
-              isLoadingNotionTasks
-                ? 'Loading...'
-                : notionTasksError
-                  ? 'Error loading tasks'
-                  : 'No tasks found'
-            }
-          />
-        )}
-        {/* Refresh action - always available */}
-        <Form.Dropdown.Section title={notionTasksError ? '⚠️ Action Required' : 'Actions'}>
-          <Form.Dropdown.Item
-            value="__refresh__"
-            title={notionTasksError ? '↻ Retry - Load Tasks' : '↻ Refresh Tasks'}
-            icon={Icon.ArrowClockwise}
-          />
-        </Form.Dropdown.Section>
-        {notionTasks.filter((task) => task.statusGroup === 'in_progress').length > 0 && (
-          <Form.Dropdown.Section title="In Progress">
-            {notionTasks
-              .filter((task) => task.statusGroup === 'in_progress')
-              .map((task) => (
-                <Form.Dropdown.Item
-                  key={task.id}
-                  value={task.id}
-                  title={`${task.taskId} - ${task.title}`}
-                  icon={getTaskTypeIcon(task.type)}
-                />
-              ))}
-          </Form.Dropdown.Section>
-        )}
-        {notionTasks.filter((task) => task.statusGroup === 'to_do').length > 0 && (
-          <Form.Dropdown.Section title="To Do">
-            {notionTasks
-              .filter((task) => task.statusGroup === 'to_do')
-              .map((task) => (
-                <Form.Dropdown.Item
-                  key={task.id}
-                  value={task.id}
-                  title={`${task.taskId} - ${task.title}`}
-                  icon={getTaskTypeIcon(task.type)}
-                />
-              ))}
-          </Form.Dropdown.Section>
-        )}
-      </Form.Dropdown>
+      {isLoadingNotionPage && (
+        <Form.Description text="Loading Notion task..." />
+      )}
+
+      {notionPageError && (
+        <Form.Description text={`Error: ${notionPageError}`} />
+      )}
+
+      {selectedNotionTask && !isLoadingNotionPage && (
+        <Form.Description
+          title="Notion Task"
+          text={`${selectedNotionTask.taskId ? selectedNotionTask.taskId + ': ' : ''}${selectedNotionTask.title} [${selectedNotionTask.status}]`}
+        />
+      )}
 
       {branchSuggestions.length > 0 && (
         <Form.Dropdown

@@ -36,6 +36,42 @@ async function getTmuxPath(): Promise<string> {
   }
 }
 
+export interface TmuxSession {
+  name: string;
+  created: Date;
+  lastActivity: Date;
+}
+
+/**
+ * List all running tmux sessions
+ */
+export async function listTmuxSessions(): Promise<TmuxSession[]> {
+  try {
+    const tmuxPath = await getTmuxPath();
+    const { stdout } = await execAsync(
+      `"${tmuxPath}" list-sessions -F '#{session_name}|||#{session_created}|||#{session_activity}'`,
+      { shell: '/bin/bash' }
+    );
+
+    if (!stdout.trim()) return [];
+
+    return stdout
+      .trim()
+      .split('\n')
+      .map((line) => {
+        const [name, created, activity] = line.split('|||');
+        return {
+          name,
+          created: new Date(parseInt(created, 10) * 1000),
+          lastActivity: new Date(parseInt(activity, 10) * 1000),
+        };
+      });
+  } catch {
+    // No tmux server running or tmux not available
+    return [];
+  }
+}
+
 export interface TmuxSessionInfo {
   name: string;
   exists: boolean;
@@ -150,7 +186,8 @@ export async function attachToTmuxSession(sessionName: string): Promise<void> {
  */
 export async function killTmuxSession(sessionName: string): Promise<void> {
   try {
-    await execAsync(`tmux kill-session -t "${sessionName}"`);
+    const tmuxPath = await getTmuxPath();
+    await execAsync(`"${tmuxPath}" kill-session -t "${sessionName}"`, { shell: '/bin/bash' });
   } catch (error) {
     throw new Error(`Failed to kill tmux session: ${error instanceof Error ? error.message : 'Unknown error'}`);
   }

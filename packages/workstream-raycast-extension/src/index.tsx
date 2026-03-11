@@ -442,6 +442,11 @@ export default function Command() {
       return Icon.ExclamationMark;
     }
 
+    // Copilot has review comments - actionable (but not when Claude is active)
+    if (instance.prStatus?.copilotReviewStatus === 'comments' && !instance.claudeStatus?.active) {
+      return Icon.SpeechBubble;
+    }
+
     // Check PR state
     if (instance.prStatus?.state === 'MERGED') {
       return Icon.CheckCircle;
@@ -482,6 +487,11 @@ export default function Command() {
     // Check for merge conflicts - red for blocking issue
     if (instance.prStatus?.mergeable === 'CONFLICTING') {
       return Color.Red;
+    }
+
+    // Copilot has review comments (but not when Claude is active)
+    if (instance.prStatus?.copilotReviewStatus === 'comments' && !instance.claudeStatus?.active) {
+      return Color.Orange;
     }
 
     // Check PR state
@@ -526,6 +536,11 @@ export default function Command() {
       return `PR #${instance.prStatus.number}: Has merge conflicts`;
     }
 
+    // Copilot has review comments (but not when Claude is active)
+    if (instance.prStatus?.copilotReviewStatus === 'comments' && !instance.claudeStatus?.active) {
+      return `PR #${instance.prStatus.number}: Copilot has review comments`;
+    }
+
     // Check PR state
     if (instance.prStatus?.state === 'MERGED') {
       return `PR #${instance.prStatus.number}: Merged`;
@@ -553,65 +568,31 @@ export default function Command() {
   }
 
   function getSubtitle(instance: InstanceWithStatus): string {
-    const parts: string[] = [];
+    if (instance.prStatus) {
+      let sub = `PR #${instance.prStatus.number}`;
+      if (instance.prStatus.unresolvedComments && instance.prStatus.unresolvedComments > 0) {
+        sub += ` · 💬 ${instance.prStatus.unresolvedComments}`;
+      }
+      return sub;
+    }
 
-    // Branch name with icon
+    // Compact git status for non-PR instances
     if (instance.gitInfo) {
-      parts.push(`⎇ ${instance.gitInfo.branch}`);
-
-      // PR info (compact) - show PR number with status emoji
-      if (instance.prStatus) {
-        let prDisplay = `#${instance.prStatus.number}`;
-
-        if (instance.prStatus.state === 'OPEN') {
-          // Add check status for open PRs
-          if (instance.prStatus.checks) {
-            if (instance.prStatus.checks.conclusion === 'success') {
-              prDisplay += ' ✅';
-            } else if (instance.prStatus.checks.conclusion === 'failure') {
-              prDisplay += ' ❌';
-            } else if (instance.prStatus.checks.conclusion === 'pending') {
-              prDisplay += ' 🟡';
-            }
-          }
-          // Add merge conflict warning
-          if (instance.prStatus.mergeable === 'CONFLICTING') {
-            prDisplay += ' ⚠️';
-          }
-        } else if (instance.prStatus.state === 'MERGED') {
-          prDisplay += ' ✓';
-        } else if (instance.prStatus.state === 'CLOSED') {
-          prDisplay += ' ✗';
-        }
-
-        parts.push(prDisplay);
-      }
-
-      // Working directory status - compact format
+      const parts: string[] = [`⎇ ${instance.gitInfo.branch}`];
       if (instance.gitInfo.isDirty) {
-        if (instance.gitInfo.modified > 0) {
-          parts.push(`±${instance.gitInfo.modified}`);
-        }
-        if (instance.gitInfo.staged > 0) {
-          parts.push(`●${instance.gitInfo.staged}`);
-        }
-        if (instance.gitInfo.untracked > 0) {
-          parts.push(`?${instance.gitInfo.untracked}`);
-        }
-      } else {
-        parts.push('✓');
+        const changes = instance.gitInfo.modified + instance.gitInfo.staged + instance.gitInfo.untracked;
+        parts.push(`±${changes}`);
       }
-
-      // Ahead/behind
       if (instance.gitInfo.ahead && instance.gitInfo.ahead > 0) {
         parts.push(`↑${instance.gitInfo.ahead}`);
       }
       if (instance.gitInfo.behind && instance.gitInfo.behind > 0) {
         parts.push(`↓${instance.gitInfo.behind}`);
       }
+      return `[${parts.join(' ')}]`;
     }
 
-    return parts.length > 0 ? `[${parts.join(' ')}]` : '';
+    return '';
   }
 
   function getAccessories(instance: InstanceWithStatus): List.Item.Accessory[] {
@@ -706,6 +687,19 @@ export default function Command() {
           text: `${passing}/${total}`,
           icon: { source: checkIcon, tintColor: checkColor },
           tooltip: `Checks: ${passing} passing${failing > 0 ? `, ${failing} failing` : ''}${pending > 0 ? `, ${pending} pending` : ''}`,
+        });
+      }
+
+      // Copilot review status (comments shown as left icon; show clean/pending as accessory)
+      if (instance.prStatus.copilotReviewStatus === 'clean') {
+        accessories.push({
+          icon: { source: Icon.Check, tintColor: Color.Green },
+          tooltip: 'Copilot: No new comments',
+        });
+      } else if (instance.prStatus.copilotReviewStatus === 'pending') {
+        accessories.push({
+          icon: { source: Icon.Clock, tintColor: Color.SecondaryText },
+          tooltip: 'Copilot: Review in progress',
         });
       }
 

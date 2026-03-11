@@ -89,21 +89,31 @@ export default function SwitchInstanceCommand() {
     }
   }
 
+  function getSubtitle(instance: InstanceWithStatus): string {
+    if (instance.prStatus) {
+      let sub = `PR #${instance.prStatus.number}`;
+      if (instance.prStatus.unresolvedComments && instance.prStatus.unresolvedComments > 0) {
+        sub += ` · 💬 ${instance.prStatus.unresolvedComments} unresolved`;
+      }
+      return sub;
+    }
+    return instance.path;
+  }
+
   function getVSCodeAccessories(
     instance: InstanceWithStatus,
   ): List.Item.Accessory[] {
     const accessories: List.Item.Accessory[] = [];
 
-    // Branch
+    // Branch icon with tooltip (no text to save space)
     if (instance.branch) {
       accessories.push({
         icon: Icon.ArrowNe,
-        text: instance.branch,
         tooltip: `Branch: ${instance.branch}`,
       });
     }
 
-    // PR status
+    // PR state icon (no text — number is in subtitle now)
     if (instance.prStatus) {
       const prIcon =
         instance.prStatus.state === "MERGED"
@@ -114,7 +124,6 @@ export default function SwitchInstanceCommand() {
 
       accessories.push({
         icon: prIcon,
-        text: `#${instance.prStatus.number}`,
         tooltip: `PR: ${instance.prStatus.title}`,
       });
 
@@ -173,7 +182,7 @@ export default function SwitchInstanceCommand() {
           key={instance.path}
           icon={{ source: Icon.Window, tintColor: Color.Blue }}
           title={instance.name}
-          subtitle={instance.path}
+          subtitle={getSubtitle(instance)}
           accessories={getVSCodeAccessories(instance)}
           actions={
             <ActionPanel>
