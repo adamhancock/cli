@@ -19,6 +19,7 @@ import { spotlightMonitor } from './spotlight-monitor.js';
 import { getEventStore, closeEventStore } from './event-store.js';
 import { BullBoardServer } from './bull-board-server.js';
 import { WebSocketServer } from './websocket-server.js';
+import { GitHubAliveClient } from './github-alive.js';
 import { getAuthToken } from './auth.js';
 import { createWorktree } from './worktree-utils.js';
 
@@ -252,6 +253,7 @@ class WorkstreamDaemon {
   private previousPRStates: Map<string, { conclusion: 'success' | 'failure' | 'pending'; mergeable?: string }> = new Map();
   private bullBoard: BullBoardServer;
   private websocketServer?: WebSocketServer;
+  private aliveClient?: GitHubAliveClient;
 
   // Activity tracking for dynamic polling
   private lastActivityTime: number = Date.now();
@@ -839,6 +841,30 @@ class WorkstreamDaemon {
     });
     await this.websocketServer.start();
 
+    // Start GitHub Alive WebSocket for instant PR notifications
+    log('🔔 Starting GitHub Alive client...');
+    this.aliveClient = new GitHubAliveClient({
+      onNotification: (channel, data) => {
+        log(`🔔 GitHub Alive: ${JSON.stringify(data)}`);
+        // Publish to Redis for debugging/consumers
+        this.publisher.publish(REDIS_CHANNELS.GITHUB_ALIVE, JSON.stringify({ channel, data, timestamp: Date.now() }));
+
+        // Send notification through the full pipeline (Redis + macOS system notification)
+        this.sendNotification(
+          'GitHub Activity',
+          JSON.stringify(data).substring(0, 200),
+          'notification',
+          'info'
+        );
+
+        // Mark all instances for PR refresh (we'll refine filtering later)
+        for (const path of this.instances.keys()) {
+          this.pendingPRRefresh.add(path);
+        }
+      },
+    });
+    await this.aliveClient.start();
+
     // Start background Notion task fetching (every 5 minutes)
     if (isNotionConfigured()) {
       log('📝 Starting background Notion task fetching...');
@@ -861,6 +887,7 @@ class WorkstreamDaemon {
     log(`     - Refresh: ${REDIS_CHANNELS.REFRESH}`);
     log(`     - Claude: ${REDIS_CHANNELS.CLAUDE}`);
     log(`     - Chrome Updates: ${REDIS_CHANNELS.CHROME_UPDATES}`);
+    log(`     - GitHub Alive: ${REDIS_CHANNELS.GITHUB_ALIVE}`);
     log('');
   }
 
@@ -985,6 +1012,11 @@ class WorkstreamDaemon {
 
     if (this.notionRefreshTimer) {
       clearInterval(this.notionRefreshTimer);
+    }
+
+    // Stop GitHub Alive client
+    if (this.aliveClient) {
+      await this.aliveClient.stop();
     }
 
     // Stop WebSocket server
@@ -1471,7 +1503,15 @@ class WorkstreamDaemon {
       await this.publishUpdate();
       log(`📡 Published ${this.instances.size} instances to Redis`);
 
-      log(`✅ Poll complete: ${updatedCount} updated, ${skippedCount} skipped, ${removedCount} removed`);
+      const aliveStatus = this.aliveClient?.getStatus();
+      const aliveInfo = aliveStatus
+        ? aliveStatus.disabled
+          ? '(disabled)'
+          : aliveStatus.connected
+            ? `✅ connected, ${aliveStatus.messagesReceived} msgs${aliveStatus.lastMessageAt ? `, last ${Math.round((Date.now() - aliveStatus.lastMessageAt) / 1000)}s ago` : ''}`
+            : `❌ disconnected (reconnect #${aliveStatus.reconnectAttempts})`
+        : '(not started)';
+      log(`✅ Poll complete: ${updatedCount} updated, ${skippedCount} skipped, ${removedCount} removed | Alive: ${aliveInfo}`);
     } catch (error) {
       logError('Error polling instances:', error);
     }

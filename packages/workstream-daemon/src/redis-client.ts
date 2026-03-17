@@ -43,6 +43,9 @@ export const REDIS_CHANNELS = {
   CHROME_LOCALSTORAGE: 'workstream:chrome:localstorage',
   CHROME_CONSOLE: 'workstream:chrome:console',
 
+  // GitHub Alive WebSocket
+  GITHUB_ALIVE: 'workstream:github:alive',
+
   // Notion integration channels
   NOTION_TASKS_REQUEST: 'workstream:notion:tasks:request',
   NOTION_TASKS_RESPONSE: 'workstream:notion:tasks:response',

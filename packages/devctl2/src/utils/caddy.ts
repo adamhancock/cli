@@ -1,5 +1,5 @@
 import chalk from 'chalk';
-import type { RouteInfo } from '../types.js';
+import type { RouteInfo, ProxyRoute } from '../types.js';
 
 // Internal interface for Caddy port configuration
 interface CaddyPorts {
@@ -115,7 +115,8 @@ export class CaddyClient {
     ports: CaddyPorts,
     workdir: string,
     baseDomain: string,
-    isRootDomain: boolean = false
+    isRootDomain: boolean = false,
+    proxyRoutes: ProxyRoute[] = []
   ): Promise<boolean> {
     // Ensure server is configured
     await this.checkServer();
@@ -149,6 +150,26 @@ export class CaddyClient {
               }
             }]
           },
+          ...proxyRoutes.map(pr => ({
+            match: [{ path: [pr.path] }],
+            handle: [{
+              handler: 'reverse_proxy',
+              upstreams: [{ dial: `${pr.upstream}:443` }],
+              transport: {
+                protocol: 'http',
+                tls: {
+                  server_name: pr.upstream
+                }
+              },
+              headers: {
+                request: {
+                  set: {
+                    Host: [pr.upstream]
+                  }
+                }
+              }
+            }]
+          })),
           ...(ports.spotlight ? [{
             match: [{ path: ['/_spotlight', '/_spotlight/*'] }],
             handle: [

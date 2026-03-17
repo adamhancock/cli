@@ -156,7 +156,7 @@ program
             web: ports.web || 5173,
             spotlight: ports.spotlight || null
           };
-          await caddy.addRoute(subdomain, caddyPorts, workdir, config.baseDomain, usingRootDomain);
+          await caddy.addRoute(subdomain, caddyPorts, workdir, config.baseDomain, usingRootDomain, config.proxyRoutes);
 
           const frontendUrl = usingRootDomain ? `https://${config.baseDomain}` : `https://${subdomain}.${config.baseDomain}`;
           console.log(chalk.green('✅ Added Caddy route'));

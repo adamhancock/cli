@@ -1,3 +1,8 @@
+export interface ProxyRoute {
+  path: string;       // e.g. "/assets/*"
+  upstream: string;    // e.g. "assurixdev.blob.core.windows.net"
+}
+
 export interface DevCtl2Config {
   projectName: string;
   baseDomain: string;
@@ -15,6 +20,7 @@ export interface DevCtl2Config {
     caddy: boolean;
     queuePrefix: boolean;
   };
+  proxyRoutes?: ProxyRoute[];
   hooks?: {
     preSetup?: string[];
     postSetup?: string[];
