@@ -9,6 +9,7 @@ export interface NotionTask {
   status: string;                // Current status text
   statusGroup: 'to_do' | 'in_progress' | 'complete' | 'unknown';
   type?: string;                 // Task type (Bug, Feature, Check, etc.)
+  assignee?: { id: string; name: string; avatarUrl?: string };
   url: string;                   // Notion page URL
   contentMarkdown?: string;      // Full page content as markdown
 }

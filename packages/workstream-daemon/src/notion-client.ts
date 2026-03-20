@@ -18,7 +18,7 @@ export function getNotionConfig(): NotionConfig | null {
   // Comma-separated list of statuses to exclude (completed tasks)
   const excludeStatuses = process.env.NOTION_EXCLUDE_STATUSES
     ? process.env.NOTION_EXCLUDE_STATUSES.split(',').map(s => s.trim())
-    : ['Done', "Won't fix", 'Out of scope'];
+    : ['Done', "Won't fix", 'Out of Scope'];
 
   return {
     apiKey,
@@ -92,7 +92,7 @@ export async function fetchNotionTasks(): Promise<NotionTask[]> {
 
       // Double-check status group (in case of other completion statuses)
       if (task && task.statusGroup !== 'complete') {
-        task.contentMarkdown = await convertPageToMarkdown(task.id, markdownConverter);
+        // Skip markdown conversion here — fetch on demand via fetchNotionPageById
         tasks.push(task);
       }
     }
@@ -205,6 +205,18 @@ function parseNotionPage(
       }
     }
 
+    // Extract assignee
+    const assigneeProp = properties['Assignee'];
+    let assignee: { id: string; name: string; avatarUrl?: string } | undefined;
+    if (assigneeProp && assigneeProp.type === 'people' && assigneeProp.people?.length > 0) {
+      const person = assigneeProp.people[0];
+      assignee = {
+        id: person.id,
+        name: person.name || 'Unknown',
+        avatarUrl: person.avatar_url || undefined,
+      };
+    }
+
     // Generate branch name: {taskId}-{branchSuffix}
     const branchName = generateBranchName(taskId, branchNameSuffix, title);
 
@@ -219,6 +231,7 @@ function parseNotionPage(
       status,
       statusGroup,
       type,
+      assignee,
       url,
     };
   } catch (error) {

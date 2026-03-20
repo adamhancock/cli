@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import {
   RefreshCw,
   ExternalLink,
@@ -6,6 +6,8 @@ import {
   X,
   CheckCircle,
   Loader2,
+  ChevronDown,
+  User,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useInstances } from "@/hooks/use-instances";
@@ -18,31 +20,44 @@ interface NotionTask {
   status: string;
   statusGroup: "to_do" | "in_progress" | "complete" | "unknown";
   type?: string;
+  assignee?: { id: string; name: string; avatarUrl?: string };
   url: string;
   contentMarkdown?: string;
 }
 
-type FilterTab = "all" | "to_do" | "in_progress";
-
-function StatusBadge({ statusGroup, status }: { statusGroup: string; status: string }) {
-  const styles: Record<string, string> = {
-    to_do: "bg-zinc-500/20 text-zinc-400 border-zinc-500/30",
-    in_progress: "bg-blue-500/20 text-blue-400 border-blue-500/30",
-    complete: "bg-green-500/20 text-green-400 border-green-500/30",
-    unknown: "bg-yellow-500/20 text-yellow-400 border-yellow-500/30",
-  };
-
-  return (
-    <span
-      className={cn(
-        "inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium",
-        styles[statusGroup] ?? styles.unknown
-      )}
-    >
-      {status || statusGroup}
-    </span>
-  );
+// Column definition: each status gets its own column, grouped visually
+interface ColumnDef {
+  status: string;
+  statusGroup: "to_do" | "in_progress" | "complete" | "unknown";
 }
+
+const STATUS_GROUP_ORDER: Record<string, number> = {
+  to_do: 0,
+  in_progress: 1,
+  complete: 2,
+  unknown: 3,
+};
+
+const STATUS_GROUP_LABELS: Record<string, string> = {
+  to_do: "To Do",
+  in_progress: "In Progress",
+  complete: "Complete",
+  unknown: "Other",
+};
+
+const STATUS_GROUP_HEADER_COLORS: Record<string, string> = {
+  to_do: "border-zinc-500/40 bg-zinc-800/60",
+  in_progress: "border-blue-500/40 bg-blue-900/20",
+  complete: "border-green-500/40 bg-green-900/20",
+  unknown: "border-yellow-500/40 bg-yellow-900/20",
+};
+
+const STATUS_GROUP_DOT_COLORS: Record<string, string> = {
+  to_do: "bg-zinc-400",
+  in_progress: "bg-blue-400",
+  complete: "bg-green-400",
+  unknown: "bg-yellow-400",
+};
 
 function TypeBadge({ type }: { type?: string }) {
   if (!type) return null;
@@ -57,12 +72,67 @@ function TypeBadge({ type }: { type?: string }) {
   return (
     <span
       className={cn(
-        "inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium",
+        "inline-flex items-center rounded-full border px-1.5 py-0 text-[10px] font-medium leading-4",
         styles[type] ?? "bg-violet-500/20 text-violet-400 border-violet-500/30"
       )}
     >
       {type}
     </span>
+  );
+}
+
+function AssigneeAvatar({
+  assignee,
+  size = "sm",
+}: {
+  assignee?: { id: string; name: string; avatarUrl?: string };
+  size?: "sm" | "md";
+}) {
+  const dims = size === "sm" ? "h-5 w-5" : "h-6 w-6";
+  const textSize = size === "sm" ? "text-[9px]" : "text-[10px]";
+
+  if (!assignee) {
+    return (
+      <div
+        className={cn(
+          dims,
+          "rounded-full bg-zinc-700 flex items-center justify-center"
+        )}
+      >
+        <User className="h-3 w-3 text-zinc-500" />
+      </div>
+    );
+  }
+
+  if (assignee.avatarUrl) {
+    return (
+      <img
+        src={assignee.avatarUrl}
+        alt={assignee.name}
+        title={assignee.name}
+        className={cn(dims, "rounded-full object-cover")}
+      />
+    );
+  }
+
+  const initials = assignee.name
+    .split(" ")
+    .map((n) => n[0])
+    .join("")
+    .toUpperCase()
+    .slice(0, 2);
+
+  return (
+    <div
+      className={cn(
+        dims,
+        textSize,
+        "rounded-full bg-blue-600 flex items-center justify-center font-medium text-white"
+      )}
+      title={assignee.name}
+    >
+      {initials}
+    </div>
   );
 }
 
@@ -77,8 +147,24 @@ function StartWorkModal({
 }) {
   const [repoPath, setRepoPath] = useState("/Users/adamhancock/Code/assurix");
   const [isStarting, setIsStarting] = useState(false);
-  const defaultPrompt = `Work on task ${task.taskId}: ${task.title}\n\n${task.contentMarkdown || ""}`;
-  const [prompt, setPrompt] = useState(defaultPrompt);
+  const [loadingDetails, setLoadingDetails] = useState(true);
+  const [prompt, setPrompt] = useState(
+    `Work on task ${task.taskId}: ${task.title}`
+  );
+
+  useEffect(() => {
+    fetch(`/api/notion/tasks/${task.id}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((detail) => {
+        if (detail?.contentMarkdown) {
+          setPrompt(
+            `Work on task ${task.taskId}: ${task.title}\n\n${detail.contentMarkdown}`
+          );
+        }
+      })
+      .catch(() => {})
+      .finally(() => setLoadingDetails(false));
+  }, [task.id, task.taskId, task.title]);
 
   const handleStart = async () => {
     setIsStarting(true);
@@ -108,7 +194,9 @@ function StartWorkModal({
 
           <div>
             <p className="text-sm text-muted-foreground">Branch</p>
-            <p className="font-mono text-sm text-foreground">{task.branchName}</p>
+            <p className="font-mono text-sm text-foreground">
+              {task.branchName}
+            </p>
           </div>
 
           <div>
@@ -124,8 +212,9 @@ function StartWorkModal({
           </div>
 
           <div>
-            <label className="mb-1 block text-sm text-muted-foreground">
+            <label className="mb-1 flex items-center gap-2 text-sm text-muted-foreground">
               Prompt Preview
+              {loadingDetails && <Loader2 className="h-3 w-3 animate-spin" />}
             </label>
             <textarea
               value={prompt}
@@ -169,17 +258,127 @@ function StartWorkModal({
   );
 }
 
+function UserFilterDropdown({
+  assignees,
+  selectedUserId,
+  onChange,
+}: {
+  assignees: { id: string; name: string; avatarUrl?: string }[];
+  selectedUserId: string;
+  onChange: (userId: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+
+  const selectedUser = assignees.find((a) => a.id === selectedUserId);
+
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setOpen(!open)}
+        className="inline-flex items-center gap-2 rounded border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm text-muted-foreground hover:bg-zinc-800 hover:text-foreground"
+      >
+        {selectedUser ? (
+          <>
+            <AssigneeAvatar assignee={selectedUser} size="sm" />
+            <span>{selectedUser.name}</span>
+          </>
+        ) : (
+          <>
+            <User className="h-4 w-4" />
+            <span>All Users</span>
+          </>
+        )}
+        <ChevronDown className="h-3 w-3" />
+      </button>
+
+      {open && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div className="absolute left-0 top-full z-50 mt-1 w-56 rounded-lg border border-zinc-700 bg-zinc-900 py-1 shadow-xl">
+            <button
+              onClick={() => {
+                onChange("");
+                setOpen(false);
+              }}
+              className={cn(
+                "flex w-full items-center gap-2 px-3 py-2 text-sm hover:bg-zinc-800",
+                !selectedUserId
+                  ? "text-foreground bg-zinc-800"
+                  : "text-muted-foreground"
+              )}
+            >
+              <User className="h-4 w-4" />
+              All Users
+            </button>
+            {assignees.map((user) => (
+              <button
+                key={user.id}
+                onClick={() => {
+                  onChange(user.id);
+                  setOpen(false);
+                }}
+                className={cn(
+                  "flex w-full items-center gap-2 px-3 py-2 text-sm hover:bg-zinc-800",
+                  selectedUserId === user.id
+                    ? "text-foreground bg-zinc-800"
+                    : "text-muted-foreground"
+                )}
+              >
+                <AssigneeAvatar assignee={user} size="sm" />
+                {user.name}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 export function NotionTrackerPage() {
   const [tasks, setTasks] = useState<NotionTask[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [filter, setFilter] = useState<FilterTab>("all");
   const [startWorkTask, setStartWorkTask] = useState<NotionTask | null>(null);
   const [startWorkResult, setStartWorkResult] = useState<{
     success: boolean;
     message: string;
   } | null>(null);
   const { instances } = useInstances();
+
+  // Persisted filters
+  const [userFilter, setUserFilter] = useState<string>(() => {
+    try {
+      return localStorage.getItem("workstream:notion:userFilter") || "";
+    } catch {
+      return "";
+    }
+  });
+
+  const [hiddenGroups, setHiddenGroups] = useState<Set<string>>(() => {
+    try {
+      const stored = localStorage.getItem("workstream:notion:statusFilter");
+      if (stored) return new Set(JSON.parse(stored));
+    } catch {}
+    return new Set<string>();
+  });
+
+  // Persist user filter
+  useEffect(() => {
+    try {
+      localStorage.setItem("workstream:notion:userFilter", userFilter);
+    } catch {}
+  }, [userFilter]);
+
+  // Persist status group filter
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        "workstream:notion:statusFilter",
+        JSON.stringify(Array.from(hiddenGroups))
+      );
+    } catch {}
+  }, [hiddenGroups]);
 
   const fetchTasks = useCallback(async () => {
     setLoading(true);
@@ -200,12 +399,75 @@ export function NotionTrackerPage() {
     fetchTasks();
   }, [fetchTasks]);
 
-  const filteredTasks =
-    filter === "all"
-      ? tasks
-      : tasks.filter((t) => t.statusGroup === filter);
+  // Extract unique assignees
+  const assignees = useMemo(() => {
+    const map = new Map<
+      string,
+      { id: string; name: string; avatarUrl?: string }
+    >();
+    for (const task of tasks) {
+      if (task.assignee && !map.has(task.assignee.id)) {
+        map.set(task.assignee.id, task.assignee);
+      }
+    }
+    return Array.from(map.values()).sort((a, b) =>
+      a.name.localeCompare(b.name)
+    );
+  }, [tasks]);
 
-  // Check if a task's branch has an active session
+  // Filter tasks by user
+  const userFilteredTasks = useMemo(() => {
+    if (!userFilter) return tasks;
+    return tasks.filter((t) => t.assignee?.id === userFilter);
+  }, [tasks, userFilter]);
+
+  // Build columns from actual statuses present in filtered tasks
+  const columns = useMemo(() => {
+    const statusMap = new Map<string, ColumnDef>();
+    for (const task of userFilteredTasks) {
+      if (!statusMap.has(task.status)) {
+        statusMap.set(task.status, {
+          status: task.status,
+          statusGroup: task.statusGroup,
+        });
+      }
+    }
+    return Array.from(statusMap.values()).sort((a, b) => {
+      const groupDiff =
+        (STATUS_GROUP_ORDER[a.statusGroup] ?? 3) -
+        (STATUS_GROUP_ORDER[b.statusGroup] ?? 3);
+      if (groupDiff !== 0) return groupDiff;
+      return a.status.localeCompare(b.status);
+    });
+  }, [userFilteredTasks]);
+
+  // Group tasks by status
+  const tasksByStatus = useMemo(() => {
+    const map = new Map<string, NotionTask[]>();
+    for (const task of userFilteredTasks) {
+      const list = map.get(task.status) || [];
+      list.push(task);
+      map.set(task.status, list);
+    }
+    return map;
+  }, [userFilteredTasks]);
+
+  // Visible columns (filtered by status group)
+  const visibleColumns = useMemo(() => {
+    return columns.filter((col) => !hiddenGroups.has(col.statusGroup));
+  }, [columns, hiddenGroups]);
+
+  // Get unique status groups present
+  const presentGroups = useMemo(() => {
+    const groups = new Set<string>();
+    for (const col of columns) {
+      groups.add(col.statusGroup);
+    }
+    return Array.from(groups).sort(
+      (a, b) => (STATUS_GROUP_ORDER[a] ?? 3) - (STATUS_GROUP_ORDER[b] ?? 3)
+    );
+  }, [columns]);
+
   const getActiveSession = (task: NotionTask) => {
     return instances.find(
       (inst) =>
@@ -236,7 +498,6 @@ export function NotionTrackerPage() {
           success: true,
           message: `Worktree created at ${data.worktreePath}. tmux session: ${data.tmuxSession}`,
         });
-        // Refresh tasks to show updated status
         setTimeout(() => fetchTasks(), 2000);
       } else {
         setStartWorkResult({
@@ -254,25 +515,40 @@ export function NotionTrackerPage() {
     setStartWorkTask(null);
   };
 
-  const tabs: { label: string; value: FilterTab }[] = [
-    { label: "All", value: "all" },
-    { label: "To Do", value: "to_do" },
-    { label: "In Progress", value: "in_progress" },
-  ];
+  const toggleGroup = (group: string) => {
+    setHiddenGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(group)) {
+        next.delete(group);
+      } else {
+        next.add(group);
+      }
+      return next;
+    });
+  };
 
   return (
-    <div className="space-y-4">
+    <div className="flex h-full flex-col space-y-3">
       {/* Header */}
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold text-foreground">Notion Tracker</h1>
-        <button
-          onClick={fetchTasks}
-          disabled={loading}
-          className="inline-flex items-center gap-2 rounded border border-zinc-700 px-3 py-1.5 text-sm text-muted-foreground hover:bg-zinc-800 hover:text-foreground"
-        >
-          <RefreshCw className={cn("h-4 w-4", loading && "animate-spin")} />
-          Refresh
-        </button>
+        <h1 className="text-2xl font-semibold text-foreground">
+          Notion Tracker
+        </h1>
+        <div className="flex items-center gap-3">
+          <UserFilterDropdown
+            assignees={assignees}
+            selectedUserId={userFilter}
+            onChange={setUserFilter}
+          />
+          <button
+            onClick={fetchTasks}
+            disabled={loading}
+            className="inline-flex items-center gap-2 rounded border border-zinc-700 px-3 py-1.5 text-sm text-muted-foreground hover:bg-zinc-800 hover:text-foreground"
+          >
+            <RefreshCw className={cn("h-4 w-4", loading && "animate-spin")} />
+            Refresh
+          </button>
+        </div>
       </div>
 
       {/* Result banner */}
@@ -302,25 +578,21 @@ export function NotionTrackerPage() {
         </div>
       )}
 
-      {/* Filter tabs */}
-      <div className="flex gap-1 rounded-lg border border-zinc-800 bg-zinc-900 p-1">
-        {tabs.map((tab) => (
+      {/* Status group filter toggles */}
+      <div className="flex items-center gap-2">
+        <span className="text-xs text-muted-foreground">Show:</span>
+        {presentGroups.map((group) => (
           <button
-            key={tab.value}
-            onClick={() => setFilter(tab.value)}
+            key={group}
+            onClick={() => toggleGroup(group)}
             className={cn(
-              "rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
-              filter === tab.value
-                ? "bg-zinc-700 text-foreground"
-                : "text-muted-foreground hover:text-foreground"
+              "rounded-md px-2.5 py-1 text-xs font-medium transition-colors border",
+              hiddenGroups.has(group)
+                ? "border-zinc-800 bg-zinc-900/50 text-zinc-600"
+                : "border-zinc-700 bg-zinc-800 text-foreground"
             )}
           >
-            {tab.label}
-            <span className="ml-1.5 text-xs opacity-60">
-              {tab.value === "all"
-                ? tasks.length
-                : tasks.filter((t) => t.statusGroup === tab.value).length}
-            </span>
+            {STATUS_GROUP_LABELS[group] || group}
           </button>
         ))}
       </div>
@@ -341,97 +613,123 @@ export function NotionTrackerPage() {
       )}
 
       {/* Empty state */}
-      {!loading && !error && filteredTasks.length === 0 && (
+      {!loading && !error && userFilteredTasks.length === 0 && (
         <div className="py-16 text-center text-muted-foreground">
           <p className="text-sm">No tasks found.</p>
         </div>
       )}
 
-      {/* Task table */}
-      {filteredTasks.length > 0 && (
-        <div className="overflow-hidden rounded-lg border border-zinc-800">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-zinc-800 bg-zinc-900/50 text-left text-xs uppercase tracking-wider text-muted-foreground">
-                <th className="px-4 py-3">ID</th>
-                <th className="px-4 py-3">Title</th>
-                <th className="px-4 py-3">Status</th>
-                <th className="px-4 py-3">Type</th>
-                <th className="px-4 py-3">Branch</th>
-                <th className="px-4 py-3">Session</th>
-                <th className="px-4 py-3 text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-zinc-800">
-              {filteredTasks.map((task) => {
-                const activeSession = getActiveSession(task);
-
-                return (
-                  <tr
-                    key={task.id}
-                    className="transition-colors hover:bg-zinc-900/50"
+      {/* Kanban Board */}
+      {visibleColumns.length > 0 && (
+        <div className="flex-1 overflow-x-auto">
+          <div className="flex gap-3 pb-4" style={{ minHeight: "400px" }}>
+            {visibleColumns.map((col) => {
+              const colTasks = tasksByStatus.get(col.status) || [];
+              return (
+                <div
+                  key={col.status}
+                  className="flex w-[270px] min-w-[270px] flex-col rounded-lg border border-zinc-800 bg-zinc-950"
+                >
+                  {/* Column header */}
+                  <div
+                    className={cn(
+                      "flex items-center justify-between rounded-t-lg border-b px-3 py-2",
+                      STATUS_GROUP_HEADER_COLORS[col.statusGroup] ??
+                        STATUS_GROUP_HEADER_COLORS.unknown
+                    )}
                   >
-                    <td className="whitespace-nowrap px-4 py-3 font-mono text-xs text-muted-foreground">
-                      {task.taskId}
-                    </td>
-                    <td className="px-4 py-3">
-                      <div className="flex items-center gap-2">
-                        <span className="font-medium text-foreground">
-                          {task.title}
-                        </span>
-                        <a
-                          href={task.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-muted-foreground hover:text-foreground"
-                        >
-                          <ExternalLink className="h-3.5 w-3.5" />
-                        </a>
-                      </div>
-                    </td>
-                    <td className="px-4 py-3">
-                      <StatusBadge
-                        statusGroup={task.statusGroup}
-                        status={task.status}
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={cn(
+                          "h-2 w-2 rounded-full",
+                          STATUS_GROUP_DOT_COLORS[col.statusGroup] ??
+                            STATUS_GROUP_DOT_COLORS.unknown
+                        )}
                       />
-                    </td>
-                    <td className="px-4 py-3">
-                      <TypeBadge type={task.type} />
-                    </td>
-                    <td className="px-4 py-3">
-                      <span className="font-mono text-xs text-muted-foreground">
-                        {task.branchName}
+                      <span className="text-xs font-semibold text-foreground">
+                        {col.status}
                       </span>
-                    </td>
-                    <td className="px-4 py-3">
-                      {activeSession ? (
-                        <span className="inline-flex items-center gap-1.5 text-xs text-green-400">
-                          <span className="relative flex h-2 w-2">
-                            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-green-400 opacity-75" />
-                            <span className="relative inline-flex h-2 w-2 rounded-full bg-green-500" />
-                          </span>
-                          Active
-                        </span>
-                      ) : (
-                        <span className="text-xs text-zinc-600">--</span>
-                      )}
-                    </td>
-                    <td className="px-4 py-3 text-right">
-                      {task.statusGroup === "to_do" && !activeSession && (
-                        <button
-                          onClick={() => setStartWorkTask(task)}
-                          className="inline-flex items-center gap-1.5 rounded bg-blue-600/20 px-2.5 py-1 text-xs font-medium text-blue-400 hover:bg-blue-600/30"
+                    </div>
+                    <span className="rounded-full bg-zinc-700/50 px-1.5 py-0.5 text-[10px] font-medium text-zinc-400">
+                      {colTasks.length}
+                    </span>
+                  </div>
+
+                  {/* Cards */}
+                  <div className="flex-1 space-y-2 overflow-y-auto p-2">
+                    {colTasks.map((task) => {
+                      const activeSession = getActiveSession(task);
+                      return (
+                        <div
+                          key={task.id}
+                          className="group rounded-md border border-zinc-800 bg-zinc-900 p-2.5 transition-colors hover:border-zinc-700 hover:bg-zinc-800/80"
                         >
-                          <Play className="h-3 w-3" />
-                          Start Work
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+                          {/* Top row: taskId + actions */}
+                          <div className="mb-1 flex items-center justify-between">
+                            <span className="font-mono text-[10px] text-zinc-500">
+                              {task.taskId}
+                            </span>
+                            <div className="flex items-center gap-1">
+                              {activeSession && (
+                                <span className="relative flex h-2 w-2" title="Active session">
+                                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-green-400 opacity-75" />
+                                  <span className="relative inline-flex h-2 w-2 rounded-full bg-green-500" />
+                                </span>
+                              )}
+                              <a
+                                href={task.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="rounded p-0.5 text-zinc-500 opacity-0 transition-opacity hover:text-foreground group-hover:opacity-100"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <ExternalLink className="h-3 w-3" />
+                              </a>
+                            </div>
+                          </div>
+
+                          {/* Title */}
+                          <p
+                            className="mb-1.5 text-xs font-medium leading-snug text-foreground line-clamp-2 cursor-pointer"
+                            title={task.title}
+                            onClick={() =>
+                              window.open(task.url, "_blank", "noopener")
+                            }
+                          >
+                            {task.title}
+                          </p>
+
+                          {/* Bottom row: type + assignee + start work */}
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-1.5">
+                              <TypeBadge type={task.type} />
+                              <AssigneeAvatar
+                                assignee={task.assignee}
+                                size="sm"
+                              />
+                            </div>
+                            {task.statusGroup === "to_do" &&
+                              !activeSession && (
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setStartWorkTask(task);
+                                  }}
+                                  className="inline-flex items-center gap-1 rounded bg-blue-600/20 px-1.5 py-0.5 text-[10px] font-medium text-blue-400 opacity-0 transition-opacity hover:bg-blue-600/30 group-hover:opacity-100"
+                                >
+                                  <Play className="h-2.5 w-2.5" />
+                                  Start
+                                </button>
+                              )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
 
