@@ -22,6 +22,10 @@ export const REDIS_KEYS = {
   // Notion integration keys
   NOTION_TASKS: 'workstream:notion:tasks',             // Cached Notion tasks
   NOTION_CONFIG: 'workstream:notion:config',           // Notion configuration
+
+  // Channel instance keys
+  CHANNEL_INSTANCES: 'workstream:channel-instances',   // SET of active channel instance hashes
+  CHANNEL_INSTANCE: (hash: string) => `workstream:channel:${hash}`,  // Hash with workspace path + metadata
 } as const;
 
 export const REDIS_CHANNELS = {
@@ -45,6 +49,11 @@ export const REDIS_CHANNELS = {
 
   // GitHub Alive WebSocket
   GITHUB_ALIVE: 'workstream:github:alive',
+
+  // Channel command channels
+  COMMANDS_BROADCAST: 'workstream:commands:broadcast',
+  COMMANDS_INSTANCE: (workspaceHash: string) => `workstream:commands:${workspaceHash}`,
+  COMMAND_RESULTS: 'workstream:command-results',
 
   // Notion integration channels
   NOTION_TASKS_REQUEST: 'workstream:notion:tasks:request',

@@ -166,6 +166,51 @@ export class WebSocketServer {
         return;
       }
 
+      // Handle POST /api/command — sends a command to Claude Code instances via Redis
+      if (req.method === 'POST' && req.url === '/api/command') {
+        let body = '';
+        req.on('data', (chunk) => {
+          body += chunk.toString();
+        });
+        req.on('end', async () => {
+          try {
+            const data = JSON.parse(body);
+            if (!data.command) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Missing command parameter' }));
+              return;
+            }
+
+            const commandId = data.id || `cmd_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+            const payload = JSON.stringify({
+              command: data.command,
+              context: data.context || {},
+              source: data.source || 'http-api',
+              id: commandId,
+            });
+
+            if (data.target) {
+              // Targeted command — resolve workspace path to hash
+              const hash = Buffer.from(data.target).toString('base64');
+              await this.redis.publish(REDIS_CHANNELS.COMMANDS_INSTANCE(hash), payload);
+              console.log(`[WebSocket] Command sent to workspace: ${data.target}`);
+            } else {
+              // Broadcast to all instances
+              await this.redis.publish(REDIS_CHANNELS.COMMANDS_BROADCAST, payload);
+              console.log('[WebSocket] Command broadcast to all instances');
+            }
+
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, command_id: commandId }));
+          } catch (error) {
+            console.error('[WebSocket] Command API error:', error);
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Invalid request' }));
+          }
+        });
+        return;
+      }
+
       // For other requests, let Socket.IO handle or return 404
       res.writeHead(404);
       res.end();
