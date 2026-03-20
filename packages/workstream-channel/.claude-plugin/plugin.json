@@ -1,0 +1,13 @@
+{
+  "name": "workstream-channel",
+  "description": "Bridges workstream daemon events and commands into Claude Code sessions via Redis pub/sub",
+  "author": {
+    "name": "Adam Hancock"
+  },
+  "mcpServers": {
+    "workstream-channel": {
+      "command": "bun",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/src/channel.ts"]
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "name": "workstream",
+  "owner": {
+    "name": "Adam Hancock"
+  },
+  "plugins": [
+    {
+      "name": "workstream-channel",
+      "source": "./plugins/workstream-channel",
+      "description": "Bridges workstream daemon events and commands into Claude Code sessions via Redis pub/sub"
+    }
+  ]
+}

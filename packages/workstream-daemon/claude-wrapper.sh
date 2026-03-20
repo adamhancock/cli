@@ -143,7 +143,7 @@ EOF
   export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=4096"
 
   # Execute the real Claude binary with workstream channel (replaces this process)
-  exec "$real_claude" --dangerously-load-development-channels server:workstream-channel "$@"
+  exec "$real_claude" --dangerously-load-development-channels plugin:workstream-channel@workstream "$@"
 }
 
 # Run main function

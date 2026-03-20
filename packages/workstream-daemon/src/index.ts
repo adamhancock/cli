@@ -2680,17 +2680,7 @@ class WorkstreamDaemon {
           await this.writeCache();
           await this.publishUpdate();
 
-          // Send notification
-          const projectName = repoPath.split('/').pop() || 'project';
-          await this.sendNotification(
-            'Claude Code',
-            `🤔 Claude needs your attention in ${projectName}`,
-            'claude_waiting',
-            'failure',
-            repoPath
-          );
-
-          log(`Claude waiting for input in ${projectName}`);
+          log(`Claude waiting for input in ${repoPath.split('/').pop() || 'project'}`);
         } else {
           // Fallback to legacy behavior if no PID provided
           instance.claudeStatus.isWaiting = true;
@@ -2704,15 +2694,6 @@ class WorkstreamDaemon {
 
           await this.writeCache();
           await this.publishUpdate();
-
-          const projectName = repoPath.split('/').pop() || 'project';
-          await this.sendNotification(
-            'Claude Code',
-            `🤔 Claude needs your attention in ${projectName}`,
-            'claude_waiting',
-            'failure',
-            repoPath
-          );
         }
       }
     } catch (error) {
