@@ -1,8 +1,11 @@
 import { Server as SocketIOServer } from 'socket.io';
 import type { Server as HTTPServer } from 'http';
 import { createServer } from 'http';
+import { exec } from 'child_process';
 import Redis from 'ioredis';
 import { REDIS_KEYS, REDIS_CHANNELS, CHROME_DATA_TTL } from './redis-client.js';
+import { fetchNotionTasks, updateNotionTaskStatus } from './notion-client.js';
+import { createWorktree } from './worktree-utils.js';
 import type {
   ClientToServerEvents,
   ServerToClientEvents,
@@ -43,6 +46,24 @@ export class WebSocketServer {
 
     // Create HTTP server for Socket.IO with request handling
     this.httpServer = createServer((req, res) => {
+      // CORS preflight for all /api/ routes
+      if (req.method === 'OPTIONS' && req.url?.startsWith('/api')) {
+        res.writeHead(200, {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type',
+        });
+        res.end();
+        return;
+      }
+
+      // Helper to set CORS headers on all API responses
+      const setCorsHeaders = () => {
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+      };
+
       // Handle POST /api/navigate for Chrome extension navigation
       if (req.method === 'POST' && req.url === '/api/navigate') {
         let body = '';
@@ -206,6 +227,161 @@ export class WebSocketServer {
             console.error('[WebSocket] Command API error:', error);
             res.writeHead(400, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'Invalid request' }));
+          }
+        });
+        return;
+      }
+
+      // Handle GET /api/notion/tasks
+      if (req.method === 'GET' && req.url === '/api/notion/tasks') {
+        setCorsHeaders();
+        fetchNotionTasks()
+          .then((tasks) => {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(tasks));
+          })
+          .catch((error) => {
+            console.error('[WebSocket] Notion tasks error:', error);
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Failed to fetch Notion tasks' }));
+          });
+        return;
+      }
+
+      // Handle POST /api/notion/tasks/:id/status
+      if (req.method === 'POST' && req.url?.match(/^\/api\/notion\/tasks\/[^/]+\/status$/)) {
+        setCorsHeaders();
+        const taskId = req.url.split('/')[4]; // Extract ID from URL
+        let body = '';
+        req.on('data', (chunk) => {
+          body += chunk.toString();
+        });
+        req.on('end', async () => {
+          try {
+            const data = JSON.parse(body);
+            if (!data.status) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Missing status parameter' }));
+              return;
+            }
+            const result = await updateNotionTaskStatus(taskId, data.status);
+            if (result.success) {
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ success: true }));
+            } else {
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: result.error || 'Failed to update status' }));
+            }
+          } catch (error) {
+            console.error('[WebSocket] Notion status update error:', error);
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Invalid request' }));
+          }
+        });
+        return;
+      }
+
+      // Handle POST /api/worktree/start-work
+      if (req.method === 'POST' && req.url === '/api/worktree/start-work') {
+        setCorsHeaders();
+        let body = '';
+        req.on('data', (chunk) => {
+          body += chunk.toString();
+        });
+        req.on('end', async () => {
+          try {
+            const data = JSON.parse(body);
+            const { branchName, repoPath, notionTaskId, prompt } = data;
+
+            if (!branchName || !repoPath) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Missing branchName or repoPath' }));
+              return;
+            }
+
+            console.log(`[WebSocket] Starting work: branch=${branchName}, repo=${repoPath}`);
+
+            // Create worktree (this will also open VS Code)
+            const worktreeResult = await createWorktree({
+              branchName,
+              repoPath,
+              onOutput: (msg, type) => console.log(`[Worktree] [${type}] ${msg}`),
+            });
+
+            if (!worktreeResult.success) {
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: worktreeResult.error || 'Failed to create worktree' }));
+              return;
+            }
+
+            const worktreePath = worktreeResult.worktreePath!;
+
+            // Spawn tmux session named after the branch
+            // Sanitize branch name for tmux session name (only allow alphanum, underscore, hyphen)
+            const tmuxSessionName = branchName.replace(/[^a-zA-Z0-9_-]/g, '-');
+            const execPromise = (cmd: string): Promise<string> =>
+              new Promise((resolve, reject) => {
+                exec(cmd, (err, stdout) => {
+                  if (err) reject(err);
+                  else resolve(stdout);
+                });
+              });
+
+            try {
+              await execPromise(`tmux new-session -d -s "${tmuxSessionName}" -c "${worktreePath}"`);
+            } catch {
+              // Session may already exist — kill and retry
+              await execPromise(`tmux kill-session -t "${tmuxSessionName}"`).catch(() => {});
+              await execPromise(`tmux new-session -d -s "${tmuxSessionName}" -c "${worktreePath}"`);
+            }
+
+            // Start claude in the tmux session
+            exec(`tmux send-keys -t "${tmuxSessionName}" 'claude --dangerously-load-development-channels' Enter`);
+
+            // Wait 2 seconds, then auto-accept the development channels prompt
+            setTimeout(() => {
+              exec(`tmux send-keys -t "${tmuxSessionName}" 'y' Enter`);
+            }, 2000);
+
+            // Update Notion status to "In Progress" if notionTaskId provided
+            if (notionTaskId) {
+              try {
+                await updateNotionTaskStatus(notionTaskId, 'In Progress');
+                console.log(`[WebSocket] Notion task ${notionTaskId} marked as In Progress`);
+              } catch (err) {
+                console.error(`[WebSocket] Failed to update Notion status: ${err}`);
+              }
+            }
+
+            // If prompt provided, wait for Claude to fully start then send command via Redis
+            if (prompt) {
+              setTimeout(async () => {
+                try {
+                  await this.redis.publish(
+                    REDIS_CHANNELS.COMMANDS_BROADCAST,
+                    JSON.stringify({
+                      command: prompt,
+                      source: 'workstream-app',
+                      id: `cmd_${Date.now()}`,
+                    })
+                  );
+                  console.log(`[WebSocket] Prompt sent via Redis for branch ${branchName}`);
+                } catch (err) {
+                  console.error(`[WebSocket] Failed to send prompt via Redis: ${err}`);
+                }
+              }, 5000);
+            }
+
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              success: true,
+              worktreePath,
+              tmuxSession: tmuxSessionName,
+            }));
+          } catch (error) {
+            console.error('[WebSocket] Start work error:', error);
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Failed to start work' }));
           }
         });
         return;
