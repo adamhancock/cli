@@ -11,12 +11,19 @@ export interface GitInfo {
   behind?: number;
 }
 
+export interface CheckRun {
+  name: string;
+  state: string;
+  bucket: "pass" | "fail" | "pending" | "cancel" | "skipping";
+}
+
 export interface PRChecks {
   passing: number;
   failing: number;
   pending: number;
   total: number;
   conclusion: "success" | "failure" | "pending";
+  runs?: CheckRun[];
 }
 
 export interface PRStatus {
