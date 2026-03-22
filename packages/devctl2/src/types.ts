@@ -1,6 +1,7 @@
 export interface ProxyRoute {
-  path: string;       // e.g. "/assets/*"
+  path: string;       // e.g. "/cdn/*"
   upstream: string;    // e.g. "assurixdev.blob.core.windows.net"
+  pathRewrite?: { find: string; replace: string };
 }
 
 export interface DevCtl2Config {

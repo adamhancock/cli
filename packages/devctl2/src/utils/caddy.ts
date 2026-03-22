@@ -35,6 +35,15 @@ export class CaddyClient {
       const response = await fetch(`${this.apiUrl}${endpoint}`, opts);
       const text = await response.text();
 
+      if (!response.ok) {
+        let errorMessage = `Caddy API error (${response.status}): ${text}`;
+        try {
+          const errorJson = JSON.parse(text);
+          if (errorJson.error) errorMessage = `Caddy API error (${response.status}): ${errorJson.error}`;
+        } catch {}
+        throw new Error(errorMessage);
+      }
+
       if (!text) return null;
 
       try {
@@ -152,23 +161,29 @@ export class CaddyClient {
           },
           ...proxyRoutes.map(pr => ({
             match: [{ path: [pr.path] }],
-            handle: [{
-              handler: 'reverse_proxy',
-              upstreams: [{ dial: `${pr.upstream}:443` }],
-              transport: {
-                protocol: 'http',
-                tls: {
-                  server_name: pr.upstream
-                }
-              },
-              headers: {
-                request: {
-                  set: {
-                    Host: [pr.upstream]
+            handle: [
+              ...(pr.pathRewrite ? [{
+                handler: 'rewrite',
+                path_regexp: [{ find: pr.pathRewrite.find, replace: pr.pathRewrite.replace }]
+              }] : []),
+              {
+                handler: 'reverse_proxy',
+                upstreams: [{ dial: `${pr.upstream}:443` }],
+                transport: {
+                  protocol: 'http',
+                  tls: {
+                    server_name: pr.upstream
+                  }
+                },
+                headers: {
+                  request: {
+                    set: {
+                      Host: [pr.upstream]
+                    }
                   }
                 }
               }
-            }]
+            ]
           })),
           ...(ports.spotlight ? [{
             match: [{ path: ['/_spotlight', '/_spotlight/*'] }],
@@ -279,7 +294,7 @@ export class CaddyClient {
         filteredRoutes.push(spotlightRoute);
         existingServer.routes = filteredRoutes;
 
-        await this.request('PUT', `/config/apps/http/servers/${spotlightServerKey}`, existingServer);
+        await this.request('PATCH', `/config/apps/http/servers/${spotlightServerKey}`, existingServer);
       } catch {
         // Server doesn't exist, create it
         const spotlightServer = {
