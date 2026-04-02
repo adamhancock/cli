@@ -430,6 +430,57 @@ export class CaddyClient {
   }
 
   /**
+   * Remove all routes for a subdomain (main, standalone, api, spotlight)
+   */
+  async removeAllRoutes(subdomain: string): Promise<string[]> {
+    const removed: string[] = [];
+
+    // Remove matching routes from srv0
+    try {
+      const routes = await this.getRoutes();
+      if (routes && routes.length > 0) {
+        const prefix = `route-${subdomain}`;
+        const filtered = routes.filter((r: any) => {
+          const id = r['@id'] || '';
+          if (id === prefix || id.startsWith(`${prefix}-`)) {
+            removed.push(id);
+            return false;
+          }
+          return true;
+        });
+
+        if (removed.length > 0) {
+          const serverConfig = await this.request('GET', '/config/apps/http/servers/srv0') || {};
+          await this.request('PATCH', '/config/apps/http/servers/srv0', {
+            ...serverConfig,
+            routes: filtered
+          });
+        }
+      }
+    } catch (error: any) {
+      console.log(chalk.yellow(`⚠️  Failed to remove srv0 routes: ${error.message}`));
+    }
+
+    // Remove spotlight route from spotlight-shared server
+    try {
+      const spotlightServer = await this.request('GET', '/config/apps/http/servers/spotlight-shared');
+      if (spotlightServer?.routes) {
+        const spotlightId = `spotlight-ui-${subdomain}`;
+        const hadSpotlight = spotlightServer.routes.some((r: any) => r['@id'] === spotlightId);
+        if (hadSpotlight) {
+          spotlightServer.routes = spotlightServer.routes.filter((r: any) => r['@id'] !== spotlightId);
+          await this.request('PATCH', '/config/apps/http/servers/spotlight-shared', spotlightServer);
+          removed.push(spotlightId);
+        }
+      }
+    } catch {
+      // spotlight-shared server doesn't exist, nothing to clean up
+    }
+
+    return removed;
+  }
+
+  /**
    * List all routes with metadata
    */
   async listRoutes(baseDomain: string): Promise<RouteInfo[]> {

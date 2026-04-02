@@ -434,4 +434,46 @@ program
     }
   });
 
+/**
+ * Teardown command
+ */
+program
+  .command('teardown [name]')
+  .description('Remove all Caddy routes for a worktree (main, standalone, api, spotlight)')
+  .option('-c, --config <path>', 'Path to config file')
+  .action(async (name, options) => {
+    try {
+      const { config } = await loadConfig(options.config ? path.dirname(options.config) : process.cwd());
+
+      let subdomain: string;
+      if (name) {
+        subdomain = sanitizeBranch(name);
+      } else {
+        const branch = await getBranch();
+        subdomain = sanitizeBranch(branch);
+      }
+
+      console.log(chalk.blue(`🧹 Tearing down routes for ${subdomain}...`));
+
+      if (config.features.caddy) {
+        const caddy = new CaddyClient(config.caddyApi);
+        const removed = await caddy.removeAllRoutes(subdomain);
+
+        if (removed.length > 0) {
+          for (const id of removed) {
+            console.log(chalk.gray(`   Removed: ${id}`));
+          }
+          console.log(chalk.green(`✅ Removed ${removed.length} route(s)`));
+        } else {
+          console.log(chalk.yellow(`⚠️  No routes found for ${subdomain}`));
+        }
+      } else {
+        console.log(chalk.yellow('⚠️  Caddy is not enabled in config'));
+      }
+    } catch (error) {
+      console.error(chalk.red('Error:'), (error as Error).message);
+      process.exit(1);
+    }
+  });
+
 program.parse();
