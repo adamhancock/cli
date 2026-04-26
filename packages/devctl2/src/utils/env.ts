@@ -28,7 +28,7 @@ async function copyEnvFilesFromMainWorktree(
     return;
   }
 
-  const useSymlinks = config.symlinkEnv !== false;
+  const useSymlinks = !config.preferEnvCopyOverSymlink;
 
   // Collect env files that need worktree-specific patching (always copied + patched)
   const patchedEnvFiles = new Set<string>();
@@ -58,15 +58,38 @@ async function copyEnvFilesFromMainWorktree(
       const needsPatching = patchedEnvFiles.has(relativePath);
 
       if (await pathExists(targetPath)) {
-        // If symlinking and file doesn't need patching, replace existing file with symlink
-        if (useSymlinks && !needsPatching && !(await isSymlink(targetPath))) {
-          try {
-            await unlink(targetPath);
-            await createSymlink(sourcePath, targetPath);
-            console.log(chalk.gray(`   Symlinked ${relativePath} (shared secrets)`));
-          } catch (error) {
-            console.log(chalk.yellow(`   ⚠️  Could not symlink ${relativePath}: ${(error as Error).message}`));
+        const isAlreadySymlink = await isSymlink(targetPath);
+
+        if (useSymlinks && !needsPatching) {
+          if (isAlreadySymlink) {
+            // Already a symlink — check if it points to the right target
+            const currentTarget = await fsExtra.readlink(targetPath);
+            const expectedTarget = path.relative(path.dirname(targetPath), sourcePath);
+            if (currentTarget === expectedTarget) {
+              console.log(chalk.gray(`   ✓ ${relativePath} (symlink already correct)`));
+            } else {
+              // Stale symlink — remove and recreate
+              await unlink(targetPath);
+              await createSymlink(sourcePath, targetPath);
+              console.log(chalk.gray(`   Updated symlink ${relativePath} (was pointing to wrong target)`));
+            }
+          } else {
+            // Regular file exists — replace with symlink
+            try {
+              await unlink(targetPath);
+              await createSymlink(sourcePath, targetPath);
+              console.log(chalk.gray(`   Symlinked ${relativePath} (replaced existing file)`));
+            } catch (error) {
+              console.log(chalk.yellow(`   ⚠️  Could not symlink ${relativePath}: ${(error as Error).message}`));
+            }
           }
+        } else if (!useSymlinks && isAlreadySymlink) {
+          // Symlink exists but we want a copy — replace symlink with copy
+          const { stdout: realPath } = await $`readlink -f ${targetPath}`.quiet();
+          const realContent = await readFile(realPath.trim(), 'utf8');
+          await unlink(targetPath);
+          await writeFile(targetPath, realContent);
+          console.log(chalk.gray(`   Replaced symlink with copy: ${relativePath}`));
         }
         // For files that need patching, they'll be handled by updateAppEnv
         continue;

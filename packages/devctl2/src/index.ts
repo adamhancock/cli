@@ -206,7 +206,7 @@ program
 
       console.log(chalk.green('\n✨ Worktree setup complete!'));
       if (!isMainBranch) {
-        const usingSymlinks = config.symlinkEnv !== false;
+        const usingSymlinks = !config.preferEnvCopyOverSymlink;
         console.log(chalk.gray(`   ${usingSymlinks ? '🔗 Symlinked' : '📋 Copied'} shared .env files`));
         console.log(chalk.gray(`   📝 Patched per-worktree values (ports, DATABASE_URL, etc.)`));
       }
