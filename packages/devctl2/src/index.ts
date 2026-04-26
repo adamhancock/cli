@@ -206,7 +206,8 @@ program
 
       console.log(chalk.green('\n✨ Worktree setup complete!'));
       if (!isMainBranch) {
-        console.log(chalk.gray(`   ${config.symlinkEnv ? '🔗 Symlinked' : '📋 Copied'} shared .env files`));
+        const usingSymlinks = config.symlinkEnv !== false;
+        console.log(chalk.gray(`   ${usingSymlinks ? '🔗 Symlinked' : '📋 Copied'} shared .env files`));
         console.log(chalk.gray(`   📝 Patched per-worktree values (ports, DATABASE_URL, etc.)`));
       }
     } catch (error) {

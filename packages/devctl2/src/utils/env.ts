@@ -28,7 +28,7 @@ async function copyEnvFilesFromMainWorktree(
     return;
   }
 
-  const useSymlinks = config.symlinkEnv === true;
+  const useSymlinks = config.symlinkEnv !== false;
 
   // Collect env files that need worktree-specific patching (always copied + patched)
   const patchedEnvFiles = new Set<string>();

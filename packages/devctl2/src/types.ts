@@ -27,10 +27,11 @@ export interface DevCtl2Config {
     postSetup?: string[];
   };
   /**
-   * When true, .env files from the main worktree are symlinked instead of copied.
+   * When true (default), .env files from the main worktree are symlinked instead of copied.
    * This means secret rotations in the main worktree propagate immediately to all worktrees.
    * Worktree-specific values (ports, DATABASE_URL, etc.) are still patched in after symlinking.
-   * Default: false (copies, preserving backwards compatibility).
+   * Set to false to always copy (legacy behaviour).
+   * Default: true
    */
   symlinkEnv?: boolean;
 }
