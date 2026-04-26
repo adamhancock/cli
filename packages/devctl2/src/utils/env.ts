@@ -1,5 +1,5 @@
 import fsExtra from 'fs-extra';
-const { readFile, writeFile, pathExists, copy, ensureDir } = fsExtra;
+const { readFile, writeFile, pathExists, copy, ensureDir, symlink, lstat, unlink } = fsExtra;
 import path from 'path';
 import chalk from 'chalk';
 import { $ } from 'zx';
@@ -10,22 +10,41 @@ import { interpolate } from './template.js';
 $.verbose = false;
 
 /**
- * Copy .env files from the main worktree to the current worktree
- * Only copies files that don't already exist in the current worktree
+ * Copy .env files from the main worktree to the current worktree.
+ * When symlinkEnv is true, files are symlinked instead of copied.
+ * Files that need worktree-specific patching (listed in apps config) are
+ * always copied since they need per-worktree PORT, DATABASE_URL, etc.
+ * Other .env files (shared secrets with no per-worktree vars) stay as symlinks
+ * so that secret rotations in main propagate immediately to all worktrees.
  */
-async function copyEnvFilesFromMainWorktree(workdir: string): Promise<void> {
+async function copyEnvFilesFromMainWorktree(
+  workdir: string,
+  config: DevCtl2Config
+): Promise<void> {
   const mainWorktreePath = await getMainWorktreePath();
 
   if (!mainWorktreePath) {
-    // We're in the main worktree, nothing to copy
+    // We're in the main worktree, nothing to copy/symlink
     return;
   }
 
-  console.log(chalk.gray(`   Copying .env files from main worktree: ${mainWorktreePath}`));
+  const useSymlinks = config.symlinkEnv === true;
+
+  // Collect env files that need worktree-specific patching (always copied + patched)
+  const patchedEnvFiles = new Set<string>();
+  for (const appConfig of Object.values(config.apps)) {
+    patchedEnvFiles.add(appConfig.envFile);
+  }
+
+  if (useSymlinks) {
+    console.log(chalk.gray(`   Symlinking shared .env files from main worktree: ${mainWorktreePath}`));
+  } else {
+    console.log(chalk.gray(`   Copying .env files from main worktree: ${mainWorktreePath}`));
+  }
 
   // Find all .env files in the main worktree (excluding node_modules and .git)
   try {
-    const { stdout: envFiles } = await $`find ${mainWorktreePath} -name ".env" -type f ! -path "*/node_modules/*" ! -path "*/.git/*" 2>/dev/null || true`.quiet();
+    const { stdout: envFiles } = await $`find ${mainWorktreePath} -name \".env\" -type f ! -path \"*/node_modules/*\" ! -path \"*/.git/*\" ! -path \"*/.env.example\" 2>/dev/null || true`.quiet();
     const envFilePaths = envFiles.trim().split('\n').filter(p => p);
 
     for (const sourcePath of envFilePaths) {
@@ -35,11 +54,41 @@ async function copyEnvFilesFromMainWorktree(workdir: string): Promise<void> {
       const relativePath = path.relative(mainWorktreePath, sourcePath);
       const targetPath = path.join(workdir, relativePath);
 
-      // Only copy if the target doesn't exist
-      if (!(await pathExists(targetPath))) {
+      // Check if this env file needs worktree-specific patching
+      const needsPatching = patchedEnvFiles.has(relativePath);
+
+      if (await pathExists(targetPath)) {
+        // If symlinking and file doesn't need patching, replace existing file with symlink
+        if (useSymlinks && !needsPatching && !(await isSymlink(targetPath))) {
+          try {
+            await unlink(targetPath);
+            await createSymlink(sourcePath, targetPath);
+            console.log(chalk.gray(`   Symlinked ${relativePath} (shared secrets)`));
+          } catch (error) {
+            console.log(chalk.yellow(`   ⚠️  Could not symlink ${relativePath}: ${(error as Error).message}`));
+          }
+        }
+        // For files that need patching, they'll be handled by updateAppEnv
+        continue;
+      }
+
+      // Ensure the target directory exists
+      await ensureDir(path.dirname(targetPath));
+
+      if (useSymlinks && !needsPatching) {
+        // Symlink shared env files (secrets propagate from main automatically)
         try {
-          // Ensure the target directory exists
-          await ensureDir(path.dirname(targetPath));
+          await createSymlink(sourcePath, targetPath);
+          console.log(chalk.gray(`   Symlinked ${relativePath} (shared secrets)`));
+        } catch (error) {
+          console.log(chalk.yellow(`   ⚠️  Could not symlink ${relativePath}: ${(error as Error).message}`));
+          // Fall back to copying
+          await copy(sourcePath, targetPath);
+          console.log(chalk.gray(`   Copied ${relativePath} (symlink failed, fell back to copy)`));
+        }
+      } else {
+        // Copy files that need per-worktree patching (or when symlinks are disabled)
+        try {
           await copy(sourcePath, targetPath);
           console.log(chalk.gray(`   Copied ${relativePath}`));
         } catch (error) {
@@ -48,7 +97,29 @@ async function copyEnvFilesFromMainWorktree(workdir: string): Promise<void> {
       }
     }
   } catch (error) {
-    console.log(chalk.yellow(`   ⚠️  Could not find .env files in main worktree: ${(error as Error).message}`));
+    console.log(chalk.yellow(`⚠️  Could not find .env files in main worktree: ${(error as Error).message}`));
+  }
+}
+
+/**
+ * Create a relative symlink from target to source.
+ * Uses relative paths so symlinks work across different mount points.
+ */
+async function createSymlink(sourcePath: string, targetPath: string): Promise<void> {
+  // Create a relative symlink so it works regardless of where the repo is mounted
+  const relativeSourcePath = path.relative(path.dirname(targetPath), sourcePath);
+  await symlink(relativeSourcePath, targetPath);
+}
+
+/**
+ * Check if a path is a symlink
+ */
+async function isSymlink(filePath: string): Promise<boolean> {
+  try {
+    const stats = await lstat(filePath);
+    return stats.isSymbolicLink();
+  } catch {
+    return false;
   }
 }
 
@@ -88,6 +159,19 @@ export async function updateAppEnv(
     return;
   }
 
+  // If the env file is a symlink, we need to replace it with a real copy
+  // before patching (we can't modify a symlink's target content per-worktree)
+  if (await isSymlink(envPath)) {
+    // Read the symlink target content
+    const { stdout: realPath } = await $`readlink -f ${envPath}`.quiet();
+    const realContent = await readFile(realPath.trim(), 'utf8');
+
+    // Remove the symlink and write a real copy
+    await unlink(envPath);
+    await writeFile(envPath, realContent);
+    console.log(chalk.gray(`   Replaced symlink with copy for patching: ${path.relative(workdir, envPath)}`));
+  }
+
   // Read existing file or start empty
   let envContent = '';
   if (await pathExists(envPath)) {
@@ -123,8 +207,8 @@ export async function updateAllAppEnvFiles(
   workdir: string,
   context: TemplateContext
 ): Promise<void> {
-  // First, copy any missing .env files from the main worktree
-  await copyEnvFilesFromMainWorktree(workdir);
+  // First, copy or symlink .env files from the main worktree
+  await copyEnvFilesFromMainWorktree(workdir, config);
 
   // Update DATABASE_URL in all .env files that have it (feature flag check)
   if (config.features.database) {
@@ -155,6 +239,12 @@ async function updateDatabaseUrlInAllEnvFiles(
       // Skip specific directories that should keep their own database
       if (envPath.includes('mock-integration-server')) {
         console.log(chalk.gray(`   Skipping mock-integration-server (uses fixed database)`));
+        continue;
+      }
+
+      // Skip symlinks — shared env files should not have per-worktree DATABASE_URL patched in
+      if (await isSymlink(envPath)) {
+        console.log(chalk.gray(`   Skipping symlinked ${path.relative(workdir, envPath)} (shared secrets)`));
         continue;
       }
 
