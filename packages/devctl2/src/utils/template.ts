@@ -8,6 +8,7 @@ import type { TemplateContext, AllocatedPorts } from '../types.js';
  * - {baseDomain} - Base domain from config
  * - {queuePrefix} - Queue prefix derived from branch
  * - {databaseUrl} - Full database connection URL
+ * - {host} - Bind host for the worktree (localhost or 127.x.x.x)
  * - {ports.appName} - Port for specific app (e.g., {ports.api})
  *
  * @param template - String containing template variables
@@ -22,6 +23,7 @@ export function interpolate(template: string, context: TemplateContext): string 
   result = result.replace(/\{baseDomain\}/g, context.baseDomain);
   result = result.replace(/\{queuePrefix\}/g, context.queuePrefix);
   result = result.replace(/\{databaseUrl\}/g, context.databaseUrl);
+  result = result.replace(/\{host\}/g, context.host);
 
   // Replace port variables (e.g., {ports.api})
   result = result.replace(/\{ports\.(\w+)\}/g, (match, appName) => {
@@ -104,7 +106,8 @@ export function createTemplateContext(
   baseDomain: string,
   databasePrefix: string,
   database: { host: string; port: number; user: string; password: string },
-  ports: AllocatedPorts
+  ports: AllocatedPorts,
+  host: string = 'localhost'
 ): TemplateContext {
   const safeId = branchToSafeId(branch);
   const dbName = `${databasePrefix}_${safeId}`;
@@ -120,6 +123,7 @@ export function createTemplateContext(
       database.password,
       dbName
     ),
-    ports
+    ports,
+    host
   };
 }

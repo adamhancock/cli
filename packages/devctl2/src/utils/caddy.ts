@@ -6,6 +6,11 @@ interface CaddyPorts {
   api: number;
   web: number;
   spotlight?: number | null;
+  /**
+   * Bind host the upstream services are listening on. Defaults to 'localhost'.
+   * When the loopback strategy is enabled this is a 127.x.x.x address.
+   */
+  host?: string;
 }
 
 /**
@@ -131,6 +136,7 @@ export class CaddyClient {
     await this.checkServer();
 
     const hostname = isRootDomain ? baseDomain : `${subdomain}.${baseDomain}`;
+    const bindHost = ports.host || 'localhost';
 
     const route: any = {
       '@id': `route-${subdomain}`,
@@ -142,7 +148,7 @@ export class CaddyClient {
             match: [{ path: ['/api/*'] }],
             handle: [{
               handler: 'reverse_proxy',
-              upstreams: [{ dial: `localhost:${ports.api}` }],
+              upstreams: [{ dial: `${bindHost}:${ports.api}` }],
               health_checks: {
                 passive: {
                   unhealthy_request_count: 0
@@ -152,6 +158,7 @@ export class CaddyClient {
                 response: {
                   set: {
                     'X-Worktree-Path': [workdir],
+                    'X-Bind-Host': [bindHost],
                     'X-Api-Port': [String(ports.api)],
                     'X-Web-Port': [String(ports.web)]
                   }
@@ -194,7 +201,7 @@ export class CaddyClient {
               },
               {
                 handler: 'reverse_proxy',
-                upstreams: [{ dial: `localhost:${ports.spotlight}` }],
+                upstreams: [{ dial: `${bindHost}:${ports.spotlight}` }],
                 health_checks: {
                   passive: {
                     unhealthy_request_count: 0
@@ -204,6 +211,7 @@ export class CaddyClient {
                   response: {
                     set: {
                       'X-Worktree-Path': [workdir],
+                      'X-Bind-Host': [bindHost],
                       'X-Spotlight-Port': [String(ports.spotlight)]
                     }
                   }
@@ -214,7 +222,7 @@ export class CaddyClient {
           {
             handle: [{
               handler: 'reverse_proxy',
-              upstreams: [{ dial: `localhost:${ports.web}` }],
+              upstreams: [{ dial: `${bindHost}:${ports.web}` }],
               health_checks: {
                 passive: {
                   unhealthy_request_count: 0
@@ -224,6 +232,7 @@ export class CaddyClient {
                 response: {
                   set: {
                     'X-Worktree-Path': [workdir],
+                    'X-Bind-Host': [bindHost],
                     'X-Api-Port': [String(ports.api)],
                     'X-Web-Port': [String(ports.web)]
                   }
@@ -263,7 +272,7 @@ export class CaddyClient {
         match: [{ host: [hostname] }],
         handle: [{
           handler: 'reverse_proxy',
-          upstreams: [{ dial: `localhost:${ports.spotlight}` }],
+          upstreams: [{ dial: `${bindHost}:${ports.spotlight}` }],
           health_checks: {
             passive: {
               unhealthy_request_count: 0
@@ -273,6 +282,7 @@ export class CaddyClient {
             response: {
               set: {
                 'X-Worktree-Path': [workdir],
+                'X-Bind-Host': [bindHost],
                 'X-Spotlight-Port': [String(ports.spotlight)]
               }
             }
@@ -320,7 +330,8 @@ export class CaddyClient {
     hostname: string,
     port: number,
     workdir: string,
-    apiPort?: number
+    apiPort?: number,
+    bindHost: string = 'localhost'
   ): Promise<boolean> {
     // Ensure server is configured
     await this.checkServer();
@@ -334,7 +345,7 @@ export class CaddyClient {
         match: [{ path: ['/api/*'] }],
         handle: [{
           handler: 'reverse_proxy',
-          upstreams: [{ dial: `localhost:${apiPort}` }],
+          upstreams: [{ dial: `${bindHost}:${apiPort}` }],
           health_checks: {
             passive: {
               unhealthy_request_count: 0
@@ -344,6 +355,7 @@ export class CaddyClient {
             response: {
               set: {
                 'X-Worktree-Path': [workdir],
+                'X-Bind-Host': [bindHost],
                 'X-Api-Port': [String(apiPort)]
               }
             }
@@ -356,7 +368,7 @@ export class CaddyClient {
     routes.push({
       handle: [{
         handler: 'reverse_proxy',
-        upstreams: [{ dial: `localhost:${port}` }],
+        upstreams: [{ dial: `${bindHost}:${port}` }],
         health_checks: {
           passive: {
             unhealthy_request_count: 0
@@ -366,6 +378,7 @@ export class CaddyClient {
           response: {
             set: {
               'X-Worktree-Path': [workdir],
+              'X-Bind-Host': [bindHost],
               'X-App-Port': [String(port)]
             }
           }

@@ -76,6 +76,12 @@ export async function updateAppEnv(
     updates[appConfig.portVar] = String(context.ports[appName]);
   }
 
+  // Add host variable if specified (e.g. for loopback strategy)
+  if (appConfig.hostVar) {
+    varsToUpdate.push(appConfig.hostVar);
+    updates[appConfig.hostVar] = context.host;
+  }
+
   // Add extra variables with template interpolation
   if (appConfig.extraVars) {
     for (const [varName, template] of Object.entries(appConfig.extraVars)) {
@@ -190,7 +196,8 @@ async function updateDatabaseUrlInAllEnvFiles(
 export async function updateMcpConfig(
   workdir: string,
   databaseUrl: string,
-  spotlightPort?: number | null
+  spotlightPort?: number | null,
+  bindHost: string = 'localhost'
 ): Promise<void> {
   const mcpConfigPath = path.join(workdir, '.mcp.json');
 
@@ -225,9 +232,9 @@ export async function updateMcpConfig(
     if (spotlightPort) {
       mcpConfig.mcpServers.spotlight = {
         type: 'http',
-        url: `http://localhost:${spotlightPort}/mcp`
+        url: `http://${bindHost}:${spotlightPort}/mcp`
       };
-      console.log(chalk.gray(`   Updated .mcp.json with Spotlight MCP server on port ${spotlightPort}`));
+      console.log(chalk.gray(`   Updated .mcp.json with Spotlight MCP server at ${bindHost}:${spotlightPort}`));
     }
 
     // Write the config file

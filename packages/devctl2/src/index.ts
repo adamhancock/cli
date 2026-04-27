@@ -7,11 +7,18 @@ import path from 'path';
 import { $ } from 'zx';
 import { loadConfig, validateConfig, createExampleConfig } from './config.js';
 import { CaddyClient } from './utils/caddy.js';
-import { generatePorts, formatPorts } from './utils/ports.js';
+import { allocateBinding, defaultPorts, generatePorts, formatPorts } from './utils/ports.js';
 import { updateAllAppEnvFiles, updateMcpConfig } from './utils/env.js';
 import { createDatabase, runMigrations, dumpDatabase, restoreDatabase, listDumps, findPsqlPath } from './utils/database.js';
 import { getBranch, sanitizeBranch, isGitRepo } from './utils/git.js';
 import { createTemplateContext, branchToSafeId, interpolate } from './utils/template.js';
+import {
+  generateLoopbackAddress,
+  isLoopbackAvailable,
+  addLoopbackAlias,
+  removeLoopbackAlias,
+  listLoopbackAliases
+} from './utils/loopback.js';
 
 $.verbose = false;
 
@@ -72,9 +79,11 @@ program
         await runHooks(config.hooks.preSetup, workdir);
       }
 
-      // Use existing ports from .env files for main branch, generate unique ports for worktrees
+      // Use existing ports from .env files for main branch, generate unique binding for worktrees
       let ports: Record<string, number>;
+      let bindHost: string;
       if (isMainBranch) {
+        bindHost = 'localhost';
         // Read ports directly from .env files for main branch
         ports = {};
         for (const [appName, appConfig] of Object.entries(config.apps)) {
@@ -95,16 +104,25 @@ program
           }
         }
       } else {
-        ports = await generatePorts(config, workdir);
+        const binding = await allocateBinding(config, workdir);
+        bindHost = binding.host;
+        ports = binding.ports;
       }
 
       console.log(chalk.blue('🔧 Setting up worktree...'));
       console.log(chalk.gray(`   Branch: ${branch}`));
       console.log(chalk.gray(`   Domain: ${usingRootDomain ? config.baseDomain : `${subdomain}.${config.baseDomain}`}`));
+      console.log(chalk.gray(`   Bind host: ${bindHost}`));
 
       // Display allocated ports
       for (const [appName, port] of Object.entries(ports)) {
-        console.log(chalk.gray(`   ${appName} port: ${port}`));
+        console.log(chalk.gray(`   ${appName}: ${bindHost}:${port}`));
+      }
+
+      // Warn (and offer to fix) if loopback alias is missing on macOS
+      if (!isMainBranch && config.bindStrategy === 'loopback' && !(await isLoopbackAvailable(bindHost))) {
+        console.log(chalk.yellow(`⚠️  Loopback alias ${bindHost} is not configured on lo0.`));
+        console.log(chalk.gray(`   Run: devctl2 loopback up   (or: sudo ifconfig lo0 alias ${bindHost} up)`));
       }
 
       // Create database if enabled and not main branch
@@ -126,14 +144,15 @@ program
           config.baseDomain,
           config.databasePrefix,
           config.database,
-          ports
+          ports,
+          bindHost
         );
 
         await updateAllAppEnvFiles(config, workdir, context);
 
         // Update MCP config if database was created or spotlight is enabled
         if (databaseCreated || ports.spotlight) {
-          await updateMcpConfig(workdir, context.databaseUrl, ports.spotlight || null);
+          await updateMcpConfig(workdir, context.databaseUrl, ports.spotlight || null, bindHost);
         }
 
         // Run migrations if database was created
@@ -154,7 +173,8 @@ program
           const caddyPorts = {
             api: ports.api || 3001,
             web: ports.web || 5173,
-            spotlight: ports.spotlight || null
+            spotlight: ports.spotlight || null,
+            host: bindHost
           };
           await caddy.addRoute(subdomain, caddyPorts, workdir, config.baseDomain, usingRootDomain, config.proxyRoutes);
 
@@ -175,13 +195,14 @@ program
                 config.baseDomain,
                 config.databasePrefix,
                 config.database,
-                ports
+                ports,
+                bindHost
               );
               const hostname = interpolate(appConfig.hostname, context);
               const routeId = `${subdomain}-${appName}`;
 
               // Pass API port so standalone routes can proxy /api/* requests
-              await caddy.addStandaloneRoute(routeId, hostname, ports[appName], workdir, ports.api);
+              await caddy.addStandaloneRoute(routeId, hostname, ports[appName], workdir, ports.api, bindHost);
               console.log(`   🌐 ${chalk.blue(`https://${hostname}`)} (${appName})`);
             }
           }
@@ -189,7 +210,7 @@ program
           // Add API-only route for OAuth callbacks
           if (ports.api) {
             const apiHostname = `${subdomain}-api.${config.baseDomain}`;
-            await caddy.addStandaloneRoute(`${subdomain}-api`, apiHostname, ports.api, workdir);
+            await caddy.addStandaloneRoute(`${subdomain}-api`, apiHostname, ports.api, workdir, undefined, bindHost);
             console.log(`   🌐 ${chalk.blue(`https://${apiHostname}`)} (api)`);
           }
         } catch (error) {
@@ -427,7 +448,147 @@ program
         console.log(chalk.gray(`  - ${appName}: ${appConfig.envFile}`));
       }
 
+      // Bind strategy check
+      console.log(chalk.cyan('\nBind strategy:'));
+      const strategy = config.bindStrategy || 'port';
+      console.log(chalk.gray(`  Strategy: ${strategy}`));
+      if (strategy === 'loopback') {
+        try {
+          const branch = await getBranch();
+          const isMainBranch = branch === 'main' || branch === 'master';
+          if (isMainBranch) {
+            console.log(chalk.gray('  Main branch always uses 127.0.0.1'));
+          } else {
+            const address = generateLoopbackAddress(process.cwd(), config.loopback);
+            const available = await isLoopbackAvailable(address);
+            if (available) {
+              console.log(chalk.green(`  ✓ Loopback ${address} is available`));
+            } else {
+              console.log(chalk.yellow(`  ⚠ Loopback ${address} is NOT configured on lo0`));
+              console.log(chalk.gray(`    Run: devctl2 loopback up`));
+            }
+          }
+        } catch (error) {
+          console.log(chalk.yellow(`  ⚠ Could not derive loopback address: ${(error as Error).message}`));
+        }
+      }
+
       console.log(chalk.green('\n✅ Environment check complete'));
+    } catch (error) {
+      console.error(chalk.red('Error:'), (error as Error).message);
+      process.exit(1);
+    }
+  });
+
+/**
+ * Loopback alias management
+ */
+const loopback = program
+  .command('loopback')
+  .description('Manage loopback IP aliases used by the loopback bind strategy');
+
+loopback
+  .command('show')
+  .description('Show the loopback address allocated for the current worktree')
+  .option('-c, --config <path>', 'Path to config file')
+  .action(async (options) => {
+    try {
+      const { config } = await loadConfig(options.config ? path.dirname(options.config) : process.cwd());
+      const workdir = process.cwd();
+      const branch = await getBranch();
+      const isMainBranch = branch === 'main' || branch === 'master';
+
+      if (isMainBranch) {
+        console.log(chalk.gray('Main branch always binds to localhost (127.0.0.1).'));
+        return;
+      }
+
+      const address = generateLoopbackAddress(workdir, config.loopback);
+      const available = await isLoopbackAvailable(address);
+      console.log(`Worktree: ${chalk.cyan(workdir)}`);
+      console.log(`Address:  ${chalk.green(address)} ${available ? chalk.gray('(available)') : chalk.yellow('(not configured on lo0)')}`);
+      if (!available) {
+        console.log(chalk.gray(`   Run: devctl2 loopback up`));
+      }
+    } catch (error) {
+      console.error(chalk.red('Error:'), (error as Error).message);
+      process.exit(1);
+    }
+  });
+
+loopback
+  .command('up [address]')
+  .description('Configure a loopback alias on lo0 (no-op on Linux). Defaults to the current worktree address.')
+  .option('-c, --config <path>', 'Path to config file')
+  .action(async (address, options) => {
+    try {
+      const { config } = await loadConfig(options.config ? path.dirname(options.config) : process.cwd());
+      const target = address || generateLoopbackAddress(process.cwd(), config.loopback);
+
+      if (process.platform !== 'darwin') {
+        console.log(chalk.gray(`Loopback aliases are not required on ${process.platform}; ${target} is reachable by default.`));
+        return;
+      }
+
+      if (await isLoopbackAvailable(target)) {
+        console.log(chalk.green(`✓ ${target} is already configured`));
+        return;
+      }
+
+      console.log(chalk.gray(`Aliasing ${target} on lo0 (you may be prompted for sudo)...`));
+      const ok = await addLoopbackAlias(target);
+      if (ok) {
+        console.log(chalk.green(`✅ Aliased ${target} on lo0`));
+      } else {
+        console.log(chalk.red(`✗ Failed to alias ${target}`));
+        process.exit(1);
+      }
+    } catch (error) {
+      console.error(chalk.red('Error:'), (error as Error).message);
+      process.exit(1);
+    }
+  });
+
+loopback
+  .command('down [address]')
+  .description('Remove a loopback alias from lo0 (no-op on Linux). Defaults to the current worktree address.')
+  .option('-c, --config <path>', 'Path to config file')
+  .action(async (address, options) => {
+    try {
+      const { config } = await loadConfig(options.config ? path.dirname(options.config) : process.cwd());
+      const target = address || generateLoopbackAddress(process.cwd(), config.loopback);
+
+      if (process.platform !== 'darwin') {
+        console.log(chalk.gray(`Loopback aliases are not used on ${process.platform}.`));
+        return;
+      }
+
+      const ok = await removeLoopbackAlias(target);
+      if (ok) {
+        console.log(chalk.green(`✅ Removed alias ${target} from lo0`));
+      } else {
+        console.log(chalk.yellow(`⚠️  Could not remove ${target} (alias may not exist)`));
+      }
+    } catch (error) {
+      console.error(chalk.red('Error:'), (error as Error).message);
+      process.exit(1);
+    }
+  });
+
+loopback
+  .command('list')
+  .description('List loopback addresses currently configured on the loopback interface')
+  .action(async () => {
+    try {
+      const aliases = await listLoopbackAliases();
+      if (aliases.length === 0) {
+        console.log(chalk.yellow('No loopback addresses configured'));
+        return;
+      }
+      console.log(chalk.blue('Configured loopback addresses:'));
+      for (const addr of aliases) {
+        console.log(`  ${chalk.green(addr)}`);
+      }
     } catch (error) {
       console.error(chalk.red('Error:'), (error as Error).message);
       process.exit(1);

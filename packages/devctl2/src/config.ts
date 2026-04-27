@@ -39,6 +39,12 @@ const defaultConfig: DevCtl2Config = {
     database: true,
     caddy: true,
     queuePrefix: true
+  },
+  bindStrategy: 'port',
+  loopback: {
+    base: '127.0.0.0',
+    prefixLength: 8,
+    exclude: ['127.0.0.1']
   }
 };
 
@@ -172,6 +178,23 @@ export function validateConfig(config: DevCtl2Config): boolean {
       if (appConfig.portVar && !config.portRanges[appName]) {
         errors.push(`apps.${appName} has portVar but no matching portRanges.${appName}`);
       }
+    }
+  }
+
+  // Bind strategy validation
+  if (config.bindStrategy && config.bindStrategy !== 'port' && config.bindStrategy !== 'loopback') {
+    errors.push(`bindStrategy must be 'port' or 'loopback' (got '${config.bindStrategy}')`);
+  }
+  if (config.bindStrategy === 'loopback' && config.loopback) {
+    const { base, prefixLength } = config.loopback;
+    if (base !== undefined && !/^\d{1,3}(?:\.\d{1,3}){3}$/.test(base)) {
+      errors.push(`loopback.base must be an IPv4 address (got '${base}')`);
+    }
+    if (base !== undefined && !base.startsWith('127.')) {
+      errors.push(`loopback.base must be inside 127.0.0.0/8 (got '${base}')`);
+    }
+    if (prefixLength !== undefined && (prefixLength < 8 || prefixLength > 31)) {
+      errors.push(`loopback.prefixLength must be between 8 and 31 (got ${prefixLength})`);
     }
   }
 

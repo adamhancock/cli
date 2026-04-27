@@ -3,7 +3,8 @@ import { $ } from 'zx';
 import { readFile } from 'fs/promises';
 import { existsSync } from 'fs';
 import path from 'path';
-import type { DevCtl2Config, AllocatedPorts, AppConfig } from '../types.js';
+import type { DevCtl2Config, AllocatedPorts, AllocatedBinding, AppConfig } from '../types.js';
+import { generateLoopbackAddress } from './loopback.js';
 
 $.verbose = false;
 
@@ -145,6 +146,40 @@ export async function generatePorts(
     fallbackPorts[appName] = range.start;
   }
   return fallbackPorts;
+}
+
+/**
+ * Return the default port (range start) for every app that has a port range.
+ */
+export function defaultPorts(config: DevCtl2Config): AllocatedPorts {
+  const ports: AllocatedPorts = {};
+  for (const [appName, range] of Object.entries(config.portRanges)) {
+    ports[appName] = range.start;
+  }
+  return ports;
+}
+
+/**
+ * Allocate a binding (host + ports) for a worktree based on the configured strategy.
+ *
+ * - 'port' strategy: hostname stays 'localhost', ports vary per worktree (existing behavior).
+ * - 'loopback' strategy: each worktree gets a unique 127.x.x.x and ports stay at their defaults.
+ */
+export async function allocateBinding(
+  config: DevCtl2Config,
+  workdir: string
+): Promise<AllocatedBinding> {
+  if (config.bindStrategy === 'loopback') {
+    return {
+      host: generateLoopbackAddress(workdir, config.loopback),
+      ports: defaultPorts(config)
+    };
+  }
+
+  return {
+    host: 'localhost',
+    ports: await generatePorts(config, workdir)
+  };
 }
 
 /**

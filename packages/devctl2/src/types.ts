@@ -21,6 +21,13 @@ export interface DevCtl2Config {
     caddy: boolean;
     queuePrefix: boolean;
   };
+  /**
+   * How worktrees avoid binding conflicts:
+   * - 'port' (default): each worktree gets a unique port from portRanges, all bound to localhost
+   * - 'loopback': each worktree gets a unique 127.x.x.x IP and uses the default ports
+   */
+  bindStrategy?: BindStrategy;
+  loopback?: LoopbackConfig;
   proxyRoutes?: ProxyRoute[];
   hooks?: {
     preSetup?: string[];
@@ -28,9 +35,34 @@ export interface DevCtl2Config {
   };
 }
 
+export type BindStrategy = 'port' | 'loopback';
+
+export interface LoopbackConfig {
+  /**
+   * Base address for the loopback subnet (default: '127.0.0.0').
+   * Combined with `prefixLength`, defines the pool of usable addresses.
+   */
+  base?: string;
+  /**
+   * CIDR prefix length for the subnet (default: 8 — i.e., 127.0.0.0/8).
+   */
+  prefixLength?: number;
+  /**
+   * Addresses to never allocate (default: ['127.0.0.1'] so the main worktree
+   * keeps localhost).
+   */
+  exclude?: string[];
+}
+
 export interface AppConfig {
   envFile: string;
   portVar?: string;
+  /**
+   * Optional name of the env var that should receive the bind host
+   * (e.g. 'HOST'). When the loopback strategy is used, the worktree's
+   * allocated 127.x.x.x address is written to this variable.
+   */
+  hostVar?: string;
   extraVars?: {
     [key: string]: string;
   };
@@ -58,6 +90,16 @@ export interface DatabaseConfig {
 
 export interface AllocatedPorts {
   [appName: string]: number;
+}
+
+/**
+ * Result of allocating a binding (host + ports) for a worktree.
+ * Under the 'port' strategy, host is always 'localhost' and ports vary per worktree.
+ * Under the 'loopback' strategy, host is a unique 127.x.x.x and ports use the defaults.
+ */
+export interface AllocatedBinding {
+  host: string;
+  ports: AllocatedPorts;
 }
 
 export interface DatabaseInfo {
@@ -104,4 +146,9 @@ export interface TemplateContext {
   queuePrefix: string;
   databaseUrl: string;
   ports: AllocatedPorts;
+  /**
+   * Bind host for the worktree's services. Available as `{host}` in templates.
+   * 'localhost' under the port strategy; a 127.x.x.x address under the loopback strategy.
+   */
+  host: string;
 }
