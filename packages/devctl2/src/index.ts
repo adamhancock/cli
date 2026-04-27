@@ -132,7 +132,7 @@ program
 
       if (config.features.database && !isMainBranch) {
         dbName = `${config.databasePrefix}_${safeId}`;
-        const dbResult = await createDatabase(config, dbName, workdir);
+        const dbResult = await createDatabase(config, dbName, workdir, true);
         databaseCreated = dbResult.created;
       }
 

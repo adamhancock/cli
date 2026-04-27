@@ -72,7 +72,18 @@ function parseDatabaseUrl(url: string): DatabaseCredentials {
 /**
  * Get database credentials from .env file or config
  */
-async function getDatabaseCredentials(config: DevCtl2Config, workdir: string): Promise<DatabaseCredentials> {
+async function getDatabaseCredentials(config: DevCtl2Config, workdir: string, useConfigOnly: boolean = false): Promise<DatabaseCredentials> {
+  if (useConfigOnly) {
+    console.log(chalk.gray(`   Using database credentials from config`));
+    return {
+      user: config.database.user,
+      password: config.database.password,
+      host: config.database.host,
+      port: config.database.port,
+      database: config.database.templateDb || `${config.databasePrefix}_dev`
+    };
+  }
+
   // First try to get from .env file
   const databaseUrl = await getDatabaseUrlFromEnv(config, workdir);
 
@@ -213,11 +224,11 @@ async function createDatabaseViaDump(
 /**
  * Create database for worktree
  */
-export async function createDatabase(config: DevCtl2Config, dbName: string, workdir: string | null = null): Promise<DatabaseInfo> {
+export async function createDatabase(config: DevCtl2Config, dbName: string, workdir: string | null = null, useConfigCredentials: boolean = false): Promise<DatabaseInfo> {
   console.log(chalk.blue(`🗄️  Setting up database: ${dbName}`));
 
   // Get database credentials from .env or config
-  const creds = await getDatabaseCredentials(config, workdir || process.cwd());
+  const creds = await getDatabaseCredentials(config, workdir || process.cwd(), useConfigCredentials);
   const templateDb = config.database.templateDb || `${config.databasePrefix}_dev`;
 
   // Find PostgreSQL tools
@@ -341,7 +352,7 @@ export async function runMigrations(config: DevCtl2Config, dbName: string, workd
  */
 export async function dumpDatabase(config: DevCtl2Config, dbName: string, outputFile: string | null = null, workdir: string | null = null): Promise<string | false> {
   // Get database credentials from .env or config
-  const creds = await getDatabaseCredentials(config, workdir || process.cwd());
+  const creds = await getDatabaseCredentials(config, workdir || process.cwd(), false);
 
   const pgTools = await findPsqlPath();
   if (!pgTools) {
@@ -416,7 +427,7 @@ export async function dumpDatabase(config: DevCtl2Config, dbName: string, output
  */
 export async function restoreDatabase(config: DevCtl2Config, inputFile: string, dbName: string, workdir: string | null = null): Promise<boolean> {
   // Get database credentials from .env or config
-  const creds = await getDatabaseCredentials(config, workdir || process.cwd());
+  const creds = await getDatabaseCredentials(config, workdir || process.cwd(), false);
 
   // Check if input file exists
   if (!await pathExists(inputFile)) {
