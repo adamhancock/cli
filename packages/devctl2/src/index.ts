@@ -21,7 +21,7 @@ const program = new Command();
 program
   .name('devctl2')
   .description('Generic development environment manager for multi-worktree projects')
-  .version('1.1.0');
+  .version('1.1.1');
 
 /**
  * Run hooks
