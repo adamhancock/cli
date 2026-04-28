@@ -24,6 +24,8 @@ export function interpolate(template: string, context: TemplateContext): string 
   result = result.replace(/\{databaseUrl\}/g, context.databaseUrl);
   if (context.loopbackHost) {
     result = result.replace(/\{loopbackHost\}/g, context.loopbackHost);
+    // {host} is an alias for {loopbackHost} — shorter and more intuitive
+    result = result.replace(/\{host\}/g, context.loopbackHost);
   }
 
   // Replace port variables (e.g., {ports.api})
