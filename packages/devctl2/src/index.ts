@@ -174,10 +174,13 @@ program
             web: ports.web || 5173,
             spotlight: ports.spotlight || null
           };
-          await caddy.addRoute(subdomain, caddyPorts, workdir, config.baseDomain, usingRootDomain, config.proxyRoutes);
+          await caddy.addRoute(subdomain, caddyPorts, workdir, config.baseDomain, usingRootDomain, config.proxyRoutes, loopbackHost);
 
           const frontendUrl = usingRootDomain ? `https://${config.baseDomain}` : `https://${subdomain}.${config.baseDomain}`;
           console.log(chalk.green('✅ Added Caddy route'));
+          if (loopbackHost) {
+            console.log(chalk.gray(`   Upstream: loopback ${loopbackHost} (standard ports)`));
+          }
           console.log(`   🌐 ${chalk.blue(frontendUrl)}`);
 
           // Show Spotlight URL if enabled
@@ -200,7 +203,7 @@ program
               const routeId = `${subdomain}-${appName}`;
 
               // Pass API port so standalone routes can proxy /api/* requests
-              await caddy.addStandaloneRoute(routeId, hostname, ports[appName], workdir, ports.api);
+              await caddy.addStandaloneRoute(routeId, hostname, ports[appName], workdir, ports.api, loopbackHost);
               console.log(`   🌐 ${chalk.blue(`https://${hostname}`)} (${appName})`);
             }
           }
@@ -208,7 +211,7 @@ program
           // Add API-only route for OAuth callbacks
           if (ports.api) {
             const apiHostname = `${subdomain}-api.${config.baseDomain}`;
-            await caddy.addStandaloneRoute(`${subdomain}-api`, apiHostname, ports.api, workdir);
+            await caddy.addStandaloneRoute(`${subdomain}-api`, apiHostname, ports.api, workdir, undefined, loopbackHost);
             console.log(`   🌐 ${chalk.blue(`https://${apiHostname}`)} (api)`);
           }
         } catch (error) {

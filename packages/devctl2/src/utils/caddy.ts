@@ -125,12 +125,14 @@ export class CaddyClient {
     workdir: string,
     baseDomain: string,
     isRootDomain: boolean = false,
-    proxyRoutes: ProxyRoute[] = []
+    proxyRoutes: ProxyRoute[] = [],
+    loopbackHost?: string
   ): Promise<boolean> {
     // Ensure server is configured
     await this.checkServer();
 
     const hostname = isRootDomain ? baseDomain : `${subdomain}.${baseDomain}`;
+    const upstream = (port: number) => loopbackHost ? `${loopbackHost}:${port}` : `localhost:${port}`;
 
     const route: any = {
       '@id': `route-${subdomain}`,
@@ -142,7 +144,7 @@ export class CaddyClient {
             match: [{ path: ['/api/*'] }],
             handle: [{
               handler: 'reverse_proxy',
-              upstreams: [{ dial: `localhost:${ports.api}` }],
+              upstreams: [{ dial: upstream(ports.api) }],
               health_checks: {
                 passive: {
                   unhealthy_request_count: 0
@@ -194,7 +196,7 @@ export class CaddyClient {
               },
               {
                 handler: 'reverse_proxy',
-                upstreams: [{ dial: `localhost:${ports.spotlight}` }],
+                upstreams: [{ dial: upstream(ports.spotlight) }],
                 health_checks: {
                   passive: {
                     unhealthy_request_count: 0
@@ -214,7 +216,7 @@ export class CaddyClient {
           {
             handle: [{
               handler: 'reverse_proxy',
-              upstreams: [{ dial: `localhost:${ports.web}` }],
+              upstreams: [{ dial: upstream(ports.web) }],
               health_checks: {
                 passive: {
                   unhealthy_request_count: 0
@@ -263,7 +265,7 @@ export class CaddyClient {
         match: [{ host: [hostname] }],
         handle: [{
           handler: 'reverse_proxy',
-          upstreams: [{ dial: `localhost:${ports.spotlight}` }],
+          upstreams: [{ dial: upstream(ports.spotlight!) }],
           health_checks: {
             passive: {
               unhealthy_request_count: 0
@@ -320,10 +322,13 @@ export class CaddyClient {
     hostname: string,
     port: number,
     workdir: string,
-    apiPort?: number
+    apiPort?: number,
+    loopbackHost?: string
   ): Promise<boolean> {
     // Ensure server is configured
     await this.checkServer();
+
+    const upstream = (p: number) => loopbackHost ? `${loopbackHost}:${p}` : `localhost:${p}`;
 
     // Build route with optional API subroute
     const routes: any[] = [];
@@ -334,7 +339,7 @@ export class CaddyClient {
         match: [{ path: ['/api/*'] }],
         handle: [{
           handler: 'reverse_proxy',
-          upstreams: [{ dial: `localhost:${apiPort}` }],
+          upstreams: [{ dial: upstream(apiPort) }],
           health_checks: {
             passive: {
               unhealthy_request_count: 0
@@ -356,7 +361,7 @@ export class CaddyClient {
     routes.push({
       handle: [{
         handler: 'reverse_proxy',
-        upstreams: [{ dial: `localhost:${port}` }],
+        upstreams: [{ dial: upstream(port) }],
         health_checks: {
           passive: {
             unhealthy_request_count: 0
