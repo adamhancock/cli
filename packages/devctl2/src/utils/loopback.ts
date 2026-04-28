@@ -67,11 +67,13 @@ export async function allocateLoopbackIp(
   // Hash the workdir to get deterministic starting points for both octets
   const hash = crypto.createHash('sha256').update(workdir).digest();
 
-  // Use bytes from hash for the third and fourth octets
-  const thirdOctet = hash[0] % 254 + 1; // 1-254 (avoid 0 since 127.0.0.x is congested)
-  const fourthOctet = start + (hash[1] % (end - start + 1)); // start-end
+  // Use bytes from hash for the second, third, and fourth octets
+  // Full 127.x.y.z space: ~16M addresses (x: 1-254, y: 0-255, z: start-end)
+  const secondOctet = hash[0] % 254 + 1; // 1-254 (avoid 0 since 127.0.x.y is congested)
+  const thirdOctet = hash[1]; // 0-255
+  const fourthOctet = start + (hash[2] % (end - start + 1)); // start-end
 
-  const candidateIp = `127.${thirdOctet}.${fourthOctet}`;
+  const candidateIp = `127.${secondOctet}.${thirdOctet}.${fourthOctet}`;
 
   // Check if this IP is already allocated to a different workdir
   const takenIps = new Set(allocations.map((a) => a.ip));
@@ -79,15 +81,18 @@ export async function allocateLoopbackIp(
   let probeOffset = 0;
 
   while (takenIps.has(ip)) {
-    // Linear probe: increment fourth octet, then third
+    // Linear probe: increment fourth octet, carry to third, then second
     probeOffset++;
-    const f = start + ((fourthOctet - start + probeOffset) % (end - start + 1));
-    const carry = (fourthOctet - start + probeOffset) > (end - start) ? 1 : 0;
-    const t = ((thirdOctet - 1 + carry) % 254) + 1;
-    ip = `127.${t}.${f}`;
+    const range = end - start + 1;
+    const f = start + ((fourthOctet - start + probeOffset) % range);
+    const carry1 = Math.floor((fourthOctet - start + probeOffset) / range);
+    const t = (thirdOctet + carry1) % 256;
+    const carry2 = Math.floor((thirdOctet + carry1) / 256);
+    const s = ((secondOctet - 1 + carry2) % 254) + 1;
+    ip = `127.${s}.${t}.${f}`;
 
     // Safety: extremely unlikely but prevent infinite loop
-    if (probeOffset > 65000) {
+    if (probeOffset > 65000000) {
       throw new Error('Loopback IP space exhausted');
     }
   }
