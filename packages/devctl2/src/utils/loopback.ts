@@ -109,6 +109,19 @@ export async function allocateLoopbackIp(
 }
 
 /**
+ * Look up the loopback IP for a workdir from the registry.
+ * Unlike allocateLoopbackIp, this does NOT allocate or re-hash.
+ * Returns undefined if no allocation exists.
+ *
+ * @param workdir - The worktree directory path
+ * @returns The allocated IP address, or undefined
+ */
+export function lookupLoopbackIp(workdir: string): string | undefined {
+  const allocations = loadRegistry();
+  return allocations.find((a) => a.workdir === workdir)?.ip;
+}
+
+/**
  * Release a loopback IP allocation for a workdir.
  * Removes from the registry file (does NOT remove from the interface).
  *

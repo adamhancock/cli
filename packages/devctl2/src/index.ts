@@ -12,7 +12,7 @@ import { updateAllAppEnvFiles, updateMcpConfig } from './utils/env.js';
 import { createDatabase, runMigrations, dumpDatabase, restoreDatabase, listDumps, findPsqlPath } from './utils/database.js';
 import { getBranch, sanitizeBranch, isGitRepo } from './utils/git.js';
 import { createTemplateContext, branchToSafeId, interpolate } from './utils/template.js';
-import { allocateLoopbackIp, addLoopbackIp, removeLoopbackIp, releaseLoopbackIp } from './utils/loopback.js';
+import { allocateLoopbackIp, addLoopbackIp, removeLoopbackIp, releaseLoopbackIp, lookupLoopbackIp } from './utils/loopback.js';
 
 $.verbose = false;
 
@@ -266,7 +266,8 @@ program
       // Remove loopback IP if configured
       if (config.loopback?.enabled) {
         const workdir = process.cwd();
-        const loopbackHost = await allocateLoopbackIp(workdir);
+        // Look up from registry (don't re-hash — workdir may be gone)
+        const loopbackHost = lookupLoopbackIp(workdir);
         if (loopbackHost) {
           await removeLoopbackIp(loopbackHost);
           releaseLoopbackIp(workdir);
