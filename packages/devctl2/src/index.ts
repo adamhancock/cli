@@ -12,7 +12,7 @@ import { updateAllAppEnvFiles, updateMcpConfig } from './utils/env.js';
 import { createDatabase, runMigrations, dumpDatabase, restoreDatabase, listDumps, findPsqlPath } from './utils/database.js';
 import { getBranch, sanitizeBranch, isGitRepo } from './utils/git.js';
 import { createTemplateContext, branchToSafeId, interpolate } from './utils/template.js';
-import { allocateLoopbackIp, addLoopbackIp, removeLoopbackIp, releaseLoopbackIp } from './utils/loopback.js';
+import { allocateLoopbackIp, addLoopbackIp, removeLoopbackIp, releaseLoopbackIp, lookupLoopbackIp } from './utils/loopback.js';
 
 $.verbose = false;
 
@@ -21,7 +21,7 @@ const program = new Command();
 program
   .name('devctl2')
   .description('Generic development environment manager for multi-worktree projects')
-  .version('1.1.0');
+  .version('1.1.1');
 
 /**
  * Run hooks
@@ -174,10 +174,13 @@ program
             web: ports.web || 5173,
             spotlight: ports.spotlight || null
           };
-          await caddy.addRoute(subdomain, caddyPorts, workdir, config.baseDomain, usingRootDomain, config.proxyRoutes);
+          await caddy.addRoute(subdomain, caddyPorts, workdir, config.baseDomain, usingRootDomain, config.proxyRoutes, loopbackHost);
 
           const frontendUrl = usingRootDomain ? `https://${config.baseDomain}` : `https://${subdomain}.${config.baseDomain}`;
           console.log(chalk.green('✅ Added Caddy route'));
+          if (loopbackHost) {
+            console.log(chalk.gray(`   Upstream: loopback ${loopbackHost} (standard ports)`));
+          }
           console.log(`   🌐 ${chalk.blue(frontendUrl)}`);
 
           // Show Spotlight URL if enabled
@@ -200,7 +203,7 @@ program
               const routeId = `${subdomain}-${appName}`;
 
               // Pass API port so standalone routes can proxy /api/* requests
-              await caddy.addStandaloneRoute(routeId, hostname, ports[appName], workdir, ports.api);
+              await caddy.addStandaloneRoute(routeId, hostname, ports[appName], workdir, ports.api, loopbackHost);
               console.log(`   🌐 ${chalk.blue(`https://${hostname}`)} (${appName})`);
             }
           }
@@ -208,7 +211,7 @@ program
           // Add API-only route for OAuth callbacks
           if (ports.api) {
             const apiHostname = `${subdomain}-api.${config.baseDomain}`;
-            await caddy.addStandaloneRoute(`${subdomain}-api`, apiHostname, ports.api, workdir);
+            await caddy.addStandaloneRoute(`${subdomain}-api`, apiHostname, ports.api, workdir, undefined, loopbackHost);
             console.log(`   🌐 ${chalk.blue(`https://${apiHostname}`)} (api)`);
           }
         } catch (error) {
@@ -266,7 +269,8 @@ program
       // Remove loopback IP if configured
       if (config.loopback?.enabled) {
         const workdir = process.cwd();
-        const loopbackHost = await allocateLoopbackIp(workdir);
+        // Look up from registry (don't re-hash — workdir may be gone)
+        const loopbackHost = lookupLoopbackIp(workdir);
         if (loopbackHost) {
           await removeLoopbackIp(loopbackHost);
           releaseLoopbackIp(workdir);
