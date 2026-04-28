@@ -12,6 +12,7 @@ import { updateAllAppEnvFiles, updateMcpConfig } from './utils/env.js';
 import { createDatabase, runMigrations, dumpDatabase, restoreDatabase, listDumps, findPsqlPath } from './utils/database.js';
 import { getBranch, sanitizeBranch, isGitRepo } from './utils/git.js';
 import { createTemplateContext, branchToSafeId, interpolate } from './utils/template.js';
+import { allocateLoopbackIp, addLoopbackIp, removeLoopbackIp, releaseLoopbackIp } from './utils/loopback.js';
 
 $.verbose = false;
 
@@ -20,7 +21,7 @@ const program = new Command();
 program
   .name('devctl2')
   .description('Generic development environment manager for multi-worktree projects')
-  .version('1.0.0');
+  .version('1.1.0');
 
 /**
  * Run hooks
@@ -72,6 +73,16 @@ program
         await runHooks(config.hooks.preSetup, workdir);
       }
 
+      // Allocate loopback IP if enabled
+      let loopbackHost: string | undefined;
+      if (config.loopback?.enabled && !isMainBranch) {
+        console.log(chalk.blue('🌐 Allocating loopback IP...'));
+        const start = config.loopback.start ?? 2;
+        loopbackHost = await allocateLoopbackIp(workdir, start);
+        await addLoopbackIp(loopbackHost);
+        console.log(chalk.gray(`   Loopback IP: ${loopbackHost}`));
+      }
+
       // Use existing ports from .env files for main branch, generate unique ports for worktrees
       let ports: Record<string, number>;
       if (isMainBranch) {
@@ -93,6 +104,12 @@ program
               ports[appName] = config.portRanges[appName].start;
             }
           }
+        }
+      } else if (config.loopback?.enabled) {
+        // When loopback is enabled, use standard port numbers (each worktree has its own IP)
+        ports = {};
+        for (const [appName, range] of Object.entries(config.portRanges)) {
+          ports[appName] = range.start; // Always use the base port (3001, 5173, etc.)
         }
       } else {
         ports = await generatePorts(config, workdir);
@@ -126,7 +143,8 @@ program
           config.baseDomain,
           config.databasePrefix,
           config.database,
-          ports
+          ports,
+          loopbackHost
         );
 
         await updateAllAppEnvFiles(config, workdir, context);
@@ -175,7 +193,8 @@ program
                 config.baseDomain,
                 config.databasePrefix,
                 config.database,
-                ports
+                ports,
+                loopbackHost
               );
               const hostname = interpolate(appConfig.hostname, context);
               const routeId = `${subdomain}-${appName}`;
@@ -243,6 +262,16 @@ program
     try {
       const { config } = await loadConfig(options.config ? path.dirname(options.config) : process.cwd());
       const caddy = new CaddyClient(config.caddyApi);
+
+      // Remove loopback IP if configured
+      if (config.loopback?.enabled) {
+        const workdir = process.cwd();
+        const loopbackHost = await allocateLoopbackIp(workdir);
+        if (loopbackHost) {
+          await removeLoopbackIp(loopbackHost);
+          releaseLoopbackIp(workdir);
+        }
+      }
 
       await caddy.removeRoute(subdomain);
     } catch (error) {

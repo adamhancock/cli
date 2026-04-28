@@ -22,6 +22,9 @@ export function interpolate(template: string, context: TemplateContext): string 
   result = result.replace(/\{baseDomain\}/g, context.baseDomain);
   result = result.replace(/\{queuePrefix\}/g, context.queuePrefix);
   result = result.replace(/\{databaseUrl\}/g, context.databaseUrl);
+  if (context.loopbackHost) {
+    result = result.replace(/\{loopbackHost\}/g, context.loopbackHost);
+  }
 
   // Replace port variables (e.g., {ports.api})
   result = result.replace(/\{ports\.(\w+)\}/g, (match, appName) => {
@@ -104,7 +107,8 @@ export function createTemplateContext(
   baseDomain: string,
   databasePrefix: string,
   database: { host: string; port: number; user: string; password: string },
-  ports: AllocatedPorts
+  ports: AllocatedPorts,
+  loopbackHost?: string
 ): TemplateContext {
   const safeId = branchToSafeId(branch);
   const dbName = `${databasePrefix}_${safeId}`;
@@ -120,6 +124,7 @@ export function createTemplateContext(
       database.password,
       dbName
     ),
-    ports
+    ports,
+    loopbackHost
   };
 }
