@@ -6,6 +6,7 @@ import { unlink } from 'fs/promises';
 import fsExtra from 'fs-extra';
 const { ensureDir, readdir, stat, pathExists, readFile, writeFile } = fsExtra;
 import type { DevCtl2Config, PostgresTools, DatabaseInfo } from '../types.js';
+import { getMainWorktreePath } from './git.js';
 
 $.verbose = false;
 
@@ -70,6 +71,40 @@ function parseDatabaseUrl(url: string): DatabaseCredentials {
 }
 
 /**
+ * Read DATABASE_URL from the main worktree's .env files (the gitignored
+ * source of truth). Used when the config password is a placeholder like "***"
+ * or an unset ${ENV_VAR} reference.
+ */
+async function getDatabaseUrlFromMainEnv(config: DevCtl2Config): Promise<string | null> {
+  const mainWorktreePath = await getMainWorktreePath();
+  if (!mainWorktreePath) return null;
+
+  const envFilePaths = [
+    config.apps.api?.envFile ? path.join(mainWorktreePath, config.apps.api.envFile) : null,
+    path.join(mainWorktreePath, '.env'),
+  ].filter(Boolean) as string[];
+
+  for (const envPath of envFilePaths) {
+    if (await pathExists(envPath)) {
+      try {
+        const envContent = await readFile(envPath, 'utf8');
+        const match = envContent.match(/^DATABASE_URL=(.+)$/m);
+        if (match && match[1]) {
+          const url = match[1].trim();
+          const maskedUrl = url.replace(/:[^:@]+@/, ':****@');
+          console.log(chalk.gray(`   Using DATABASE_URL from main worktree ${path.basename(envPath)}: ${maskedUrl}`));
+          return url;
+        }
+      } catch (error) {
+        // Continue to next file
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
  * Get database credentials from .env file or config
  */
 async function getDatabaseCredentials(config: DevCtl2Config, workdir: string): Promise<DatabaseCredentials> {
@@ -84,7 +119,17 @@ async function getDatabaseCredentials(config: DevCtl2Config, workdir: string): P
     }
   }
 
-  // Fallback to config
+  // Fall back to the main worktree's .env (resolves placeholder passwords)
+  const mainDbUrl = await getDatabaseUrlFromMainEnv(config);
+  if (mainDbUrl) {
+    try {
+      return parseDatabaseUrl(mainDbUrl);
+    } catch (error) {
+      console.log(chalk.yellow(`⚠️  Could not parse main worktree DATABASE_URL: ${(error as Error).message}`));
+    }
+  }
+
+  // Final fallback to config
   return {
     user: config.database.user,
     password: config.database.password,
@@ -211,6 +256,15 @@ async function createDatabaseViaDump(
 }
 
 /**
+ * Resolve the real DB password: .env in workdir → main worktree .env → config.
+ * Exported so setup can use it when building the DATABASE_URL for env files.
+ */
+export async function resolveDatabasePassword(config: DevCtl2Config, workdir: string): Promise<string> {
+  const creds = await getDatabaseCredentials(config, workdir);
+  return creds.password;
+}
+
+/**
  * Create database for worktree
  */
 export async function createDatabase(config: DevCtl2Config, dbName: string, workdir: string | null = null): Promise<DatabaseInfo> {
@@ -297,6 +351,8 @@ export async function createDatabase(config: DevCtl2Config, dbName: string, work
 export async function runMigrations(config: DevCtl2Config, dbName: string, workdir: string | null = null): Promise<boolean> {
   console.log(chalk.blue(`🔄 Running database migrations for ${dbName}...`));
 
+  const dbPackage = config.database.package || `@${config.projectName}/database`;
+
   try {
     let migrationResult;
 
@@ -305,12 +361,12 @@ export async function runMigrations(config: DevCtl2Config, dbName: string, workd
       process.chdir(workdir);
 
       try {
-        migrationResult = await $`pnpm --filter @${config.projectName}/database db:migrate:deploy`.quiet();
+        migrationResult = await $`pnpm --filter ${dbPackage} db:migrate:deploy`.quiet();
       } finally {
         process.chdir(currentDir);
       }
     } else {
-      migrationResult = await $`pnpm --filter @${config.projectName}/database db:migrate:deploy`.quiet();
+      migrationResult = await $`pnpm --filter ${dbPackage} db:migrate:deploy`.quiet();
     }
 
     if (migrationResult.exitCode === 0) {
@@ -331,7 +387,7 @@ export async function runMigrations(config: DevCtl2Config, dbName: string, workd
     }
 
     console.log(chalk.yellow(`⚠️  Could not run migrations: ${error.message}`));
-    console.log(chalk.gray(`   You can manually run: pnpm --filter @${config.projectName}/database db:migrate:deploy`));
+    console.log(chalk.gray(`   You can manually run: pnpm --filter ${dbPackage} db:migrate:deploy`));
     return false;
   }
 }

@@ -54,6 +54,11 @@ export interface DatabaseConfig {
   user: string;
   password: string;
   templateDb: string | null;
+  /**
+   * pnpm filter for the DB package (e.g. "@mailhooks/db").
+   * Defaults to "@<projectName>/database" when unset.
+   */
+  package?: string;
 }
 
 export interface AllocatedPorts {

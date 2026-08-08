@@ -9,7 +9,7 @@ import { loadConfig, validateConfig, createExampleConfig } from './config.js';
 import { CaddyClient } from './utils/caddy.js';
 import { generatePorts, formatPorts } from './utils/ports.js';
 import { updateAllAppEnvFiles, updateMcpConfig } from './utils/env.js';
-import { createDatabase, runMigrations, dumpDatabase, restoreDatabase, listDumps, findPsqlPath } from './utils/database.js';
+import { createDatabase, runMigrations, dumpDatabase, restoreDatabase, listDumps, findPsqlPath, resolveDatabasePassword } from './utils/database.js';
 import { getBranch, sanitizeBranch, isGitRepo } from './utils/git.js';
 import { createTemplateContext, branchToSafeId, interpolate } from './utils/template.js';
 
@@ -120,12 +120,16 @@ program
 
       // Update env files if not main branch
       if (!isMainBranch) {
+        // Resolve the real DB password (placeholder in config → main worktree .env)
+        const dbPassword = await resolveDatabasePassword(config, workdir);
+        const databaseWithPassword = { ...config.database, password: dbPassword };
+
         // Create template context
         const context = createTemplateContext(
           branch,
           config.baseDomain,
           config.databasePrefix,
-          config.database,
+          databaseWithPassword,
           ports
         );
 

@@ -92,6 +92,19 @@ export async function loadConfig(searchFrom: string = process.cwd()): Promise<Co
 }
 
 /**
+ * Expand ${ENV_VAR} references in config string values.
+ * E.g. "password": "${DEVCTL2_DB_PASSWORD}" reads from process.env.
+ */
+function expandEnvVars(value: unknown): unknown {
+  if (typeof value === 'string') {
+    return value.replace(/\$\{([A-Z0-9_]+)\}/g, (match, name: string) => {
+      return process.env[name] ?? match;
+    });
+  }
+  return value;
+}
+
+/**
  * Deep merge configuration objects
  */
 function mergeConfig(defaults: DevCtl2Config, userConfig: Partial<DevCtl2Config>): DevCtl2Config {
@@ -126,6 +139,12 @@ function mergeConfig(defaults: DevCtl2Config, userConfig: Partial<DevCtl2Config>
     } else {
       (merged as any)[key] = value;
     }
+  }
+
+  // Expand ${ENV_VAR} references in database credentials (keeps secrets out of git)
+  if (merged.database) {
+    merged.database.user = expandEnvVars(merged.database.user) as string;
+    merged.database.password = expandEnvVars(merged.database.password) as string;
   }
 
   return merged;
