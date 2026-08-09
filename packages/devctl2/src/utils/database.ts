@@ -55,10 +55,12 @@ async function getDatabaseUrlFromEnv(config: DevCtl2Config, workdir: string): Pr
 /**
  * Parse PostgreSQL connection URL
  */
-function parseDatabaseUrl(url: string): DatabaseCredentials {
+function parseDatabaseUrl(rawUrl: string): DatabaseCredentials {
+  // .env files often wrap values in quotes: DATABASE_URL="postgresql://..."
+  const url = rawUrl.trim().replace(/^["']|["']$/g, '');
   const match = url.match(/^postgresql:\/\/([^:]+):([^@]*)@([^:]+):(\d+)\/(.+)$/);
   if (!match) {
-    throw new Error('Invalid DATABASE_URL format. Expected: postgresql://user:password@host:port/database');
+    throw new Error('Invalid DATABASE_URL format. Expected: postgresql://user:***@host:port/database');
   }
 
   return {
@@ -66,7 +68,7 @@ function parseDatabaseUrl(url: string): DatabaseCredentials {
     password: match[2],
     host: match[3],
     port: parseInt(match[4]),
-    database: match[5]
+    database: match[5].split('?')[0]
   };
 }
 
