@@ -143,11 +143,6 @@ export class CaddyClient {
             handle: [{
               handler: 'reverse_proxy',
               upstreams: [{ dial: `localhost:${ports.api}` }],
-              health_checks: {
-                passive: {
-                  unhealthy_request_count: 0
-                }
-              },
               headers: {
                 response: {
                   set: {
@@ -195,11 +190,6 @@ export class CaddyClient {
               {
                 handler: 'reverse_proxy',
                 upstreams: [{ dial: `localhost:${ports.spotlight}` }],
-                health_checks: {
-                  passive: {
-                    unhealthy_request_count: 0
-                  }
-                },
                 headers: {
                   response: {
                     set: {
@@ -215,11 +205,6 @@ export class CaddyClient {
             handle: [{
               handler: 'reverse_proxy',
               upstreams: [{ dial: `localhost:${ports.web}` }],
-              health_checks: {
-                passive: {
-                  unhealthy_request_count: 0
-                }
-              },
               headers: {
                 response: {
                   set: {
@@ -264,11 +249,6 @@ export class CaddyClient {
         handle: [{
           handler: 'reverse_proxy',
           upstreams: [{ dial: `localhost:${ports.spotlight}` }],
-          health_checks: {
-            passive: {
-              unhealthy_request_count: 0
-            }
-          },
           headers: {
             response: {
               set: {
@@ -335,11 +315,6 @@ export class CaddyClient {
         handle: [{
           handler: 'reverse_proxy',
           upstreams: [{ dial: `localhost:${apiPort}` }],
-          health_checks: {
-            passive: {
-              unhealthy_request_count: 0
-            }
-          },
           headers: {
             response: {
               set: {
@@ -357,11 +332,6 @@ export class CaddyClient {
       handle: [{
         handler: 'reverse_proxy',
         upstreams: [{ dial: `localhost:${port}` }],
-        health_checks: {
-          passive: {
-            unhealthy_request_count: 0
-          }
-        },
         headers: {
           response: {
             set: {
