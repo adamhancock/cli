@@ -130,6 +130,13 @@ test('returns absolute paths for a relative root', async () => {
   }
 });
 
+test('does not follow a symlinked root', async () => {
+  // find -P (the default) does not descend through a symlink given as the start path.
+  const base = await mkTmp('devctl2-env-link-root-');
+  await fs.promises.symlink(root, path.join(base, 'link'), 'dir');
+  assert.deepEqual(await findEnvFiles(path.join(base, 'link')), []);
+});
+
 async function listFiles(dir) {
   const out = [];
   async function walk(d) {
