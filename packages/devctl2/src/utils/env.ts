@@ -43,7 +43,17 @@ export async function findEnvFiles(
     }
   }
 
-  await walk(path.resolve(root));
+  // Like find -P, do not descend through a root that is itself a symlink
+  const rootPath = path.resolve(root);
+  try {
+    if ((await fs.promises.lstat(rootPath)).isSymbolicLink()) {
+      return found;
+    }
+  } catch {
+    return found;
+  }
+
+  await walk(rootPath);
   return found;
 }
 
