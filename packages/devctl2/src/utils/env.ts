@@ -1,5 +1,6 @@
 import fsExtra from 'fs-extra';
 const { readFile, writeFile, pathExists, copy, ensureDir } = fsExtra;
+import fs from 'fs';
 import path from 'path';
 import chalk from 'chalk';
 import { $ } from 'zx';
@@ -8,6 +9,43 @@ import { getMainWorktreePath } from './git.js';
 import { interpolate } from './template.js';
 
 $.verbose = false;
+
+const ENV_SEARCH_SKIP_DIRS = new Set(['node_modules', '.git', '.claude']);
+
+/**
+ * Find all files named exactly `.env` under a root directory
+ * Skips node_modules, .git and .claude, does not follow symlinks,
+ * and skips any directory that cannot be read
+ */
+export async function findEnvFiles(
+  root: string,
+  opts: { readdir?: typeof fs.promises.readdir } = {}
+): Promise<string[]> {
+  const readdir = opts.readdir ?? fs.promises.readdir;
+  const found: string[] = [];
+
+  async function walk(dir: string): Promise<void> {
+    let entries: fs.Dirent[];
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        if (!ENV_SEARCH_SKIP_DIRS.has(entry.name)) {
+          await walk(path.join(dir, entry.name));
+        }
+      } else if (entry.isFile() && entry.name === '.env') {
+        found.push(path.join(dir, entry.name));
+      }
+    }
+  }
+
+  await walk(path.resolve(root));
+  return found;
+}
 
 /**
  * Copy .env files from the main worktree to the current worktree
@@ -23,10 +61,9 @@ async function copyEnvFilesFromMainWorktree(workdir: string): Promise<void> {
 
   console.log(chalk.gray(`   Copying .env files from main worktree: ${mainWorktreePath}`));
 
-  // Find all .env files in the main worktree (excluding node_modules and .git)
+  // Find all .env files in the main worktree (excluding node_modules, .git and .claude)
   try {
-    const { stdout: envFiles } = await $`find ${mainWorktreePath} -name ".env" -type f ! -path "*/node_modules/*" ! -path "*/.git/*" 2>/dev/null || true`.quiet();
-    const envFilePaths = envFiles.trim().split('\n').filter(p => p);
+    const envFilePaths = await findEnvFiles(mainWorktreePath);
 
     for (const sourcePath of envFilePaths) {
       if (!sourcePath) continue;
@@ -145,8 +182,7 @@ async function updateDatabaseUrlInAllEnvFiles(
   databaseUrl: string
 ): Promise<void> {
   // Find all .env files (excluding .env.example files)
-  const { stdout: envFiles } = await $`find ${workdir} -name ".env" -type f ! -name "*.example" ! -path "*/node_modules/*" 2>/dev/null || true`.quiet();
-  const envFilePaths = envFiles.trim().split('\n').filter(p => p && !p.includes('.env.example'));
+  const envFilePaths = (await findEnvFiles(workdir)).filter(p => p && !p.includes('.env.example'));
 
   for (const envPath of envFilePaths) {
     if (!envPath) continue;
